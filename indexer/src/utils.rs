@@ -88,6 +88,7 @@ pub fn infer_language(path: &Path) -> Option<&'static str> {
         Some(ref ext) if matches!(ext.as_str(), "java" | "kt") => Some("jvm"),
         Some(ref ext) if matches!(ext.as_str(), "c" | "h") => Some("c"),
         Some(ref ext) if matches!(ext.as_str(), "cpp" | "cxx" | "hpp" | "hh") => Some("cpp"),
+        Some(ref ext) if ext == "nix" => Some("nix"),
         _ => None,
     }
 }
