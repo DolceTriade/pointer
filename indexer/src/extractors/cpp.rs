@@ -51,8 +51,8 @@ fn collect_symbols(node: &Node, source: &[u8]) -> Vec<ExtractedSymbol> {
                 None => Vec::new(),
             }
         }
-        "class_specifier" => symbol_from_named(node, source, "class"),
-        "struct_specifier" => symbol_from_named(node, source, "struct"),
+        "class_specifier" => symbols_from_class_like(node, source, "class"),
+        "struct_specifier" => symbols_from_class_like(node, source, "struct"),
         "enum_specifier" => symbol_from_named(node, source, "enum"),
         "namespace_definition" => symbol_from_named(node, source, "namespace"),
         "declaration" | "simple_declaration" => symbols_from_simple_declaration(node, source),
@@ -87,31 +87,52 @@ fn symbols_from_simple_declaration(node: &Node, source: &[u8]) -> Vec<ExtractedS
 
     let mut vars = Vec::new();
     let mut cursor = node.walk();
+    let namespace = namespace_for_node(node, source);
 
     for child in node.children(&mut cursor) {
         match child.kind() {
             "init_declarator" | "structured_binding_declarator" => {
                 let declarator = child.child_by_field_name("declarator").unwrap_or(child);
-                if declarator.kind() == "function_declarator" {
-                    continue;
-                }
                 if let Some(name) = identifier_from_declarator(&declarator, source) {
+                    let is_function_like = declarator_contains_function(&declarator);
                     vars.push(ExtractedSymbol {
                         name,
-                        kind: "var".to_string(),
-                        namespace: namespace_for_node(node, source),
+                        kind: if is_function_like { "fn" } else { "var" }.to_string(),
+                        namespace: namespace.clone(),
                     });
                 }
             }
             "declarator" | "pointer_declarator" | "reference_declarator" => {
-                if child.kind() == "function_declarator" {
-                    continue;
+                if let Some(name) = identifier_from_declarator(&child, source) {
+                    let is_function_like = declarator_contains_function(&child);
+                    vars.push(ExtractedSymbol {
+                        name,
+                        kind: if is_function_like { "fn" } else { "var" }.to_string(),
+                        namespace: namespace.clone(),
+                    });
                 }
+            }
+            "function_declarator" => {
                 if let Some(name) = identifier_from_declarator(&child, source) {
                     vars.push(ExtractedSymbol {
                         name,
-                        kind: "var".to_string(),
-                        namespace: namespace_for_node(node, source),
+                        kind: "fn".to_string(),
+                        namespace: namespace.clone(),
+                    });
+                }
+            }
+            "identifier" | "field_identifier" => {
+                if let Some(parent) = child.parent() {
+                    if parent.kind() == "init_declarator" {
+                        continue;
+                    }
+                }
+                if let Ok(text) = child.utf8_text(source) {
+                    let is_function_like = identifier_in_function_declarator(&child);
+                    vars.push(ExtractedSymbol {
+                        name: text.to_string(),
+                        kind: if is_function_like { "fn" } else { "var" }.to_string(),
+                        namespace: namespace.clone(),
                     });
                 }
             }
@@ -148,6 +169,13 @@ fn namespace_for_node(node: &Node, source: &[u8]) -> Option<String> {
                 if let Some(name_node) = parent.child_by_field_name("name") {
                     if let Ok(text) = name_node.utf8_text(source) {
                         names.push(text.to_string());
+                    }
+                }
+            }
+            "function_definition" => {
+                if let Some(declarator) = parent.child_by_field_name("declarator") {
+                    if let Some(name) = identifier_from_declarator(&declarator, source) {
+                        names.push(name);
                     }
                 }
             }
@@ -200,6 +228,73 @@ fn is_typedef(node: &Node, source: &[u8]) -> bool {
     false
 }
 
+fn declarator_contains_function(node: &Node) -> bool {
+    if node.kind() == "function_declarator" {
+        return true;
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if declarator_contains_function(&child) {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn symbols_from_class_like(node: &Node, source: &[u8], kind: &str) -> Vec<ExtractedSymbol> {
+    let mut symbols = symbol_from_named(node, source, kind);
+    symbols.extend(function_pointer_members(node, source));
+    symbols
+}
+
+fn function_pointer_members(node: &Node, source: &[u8]) -> Vec<ExtractedSymbol> {
+    let mut results = Vec::new();
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "field_declaration_list" {
+            collect_function_declarators(&child, source, &mut results);
+        }
+    }
+
+    results
+}
+
+fn collect_function_declarators(node: &Node, source: &[u8], out: &mut Vec<ExtractedSymbol>) {
+    let mut stack = vec![*node];
+
+    while let Some(current) = stack.pop() {
+        if current.kind() == "function_declarator" {
+            if let Some(name) = identifier_from_declarator(&current, source) {
+                out.push(ExtractedSymbol {
+                    name,
+                    kind: "fn".to_string(),
+                    namespace: namespace_for_node(&current, source),
+                });
+            }
+        }
+
+        let mut cursor = current.walk();
+        for child in current.children(&mut cursor) {
+            if child.kind() != ";" {
+                stack.push(child);
+            }
+        }
+    }
+}
+
+fn identifier_in_function_declarator(node: &Node) -> bool {
+    let mut current = node.parent();
+    while let Some(parent) = current {
+        if parent.kind().ends_with("declarator") && declarator_contains_function(&parent) {
+            return true;
+        }
+        current = parent.parent();
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,14 +302,18 @@ mod tests {
     #[test]
     fn extracts_cpp_symbols_and_variables() {
         let source = r#"
+            int (*global_handler)(int);
             cvar_t *r_maxPolyVerts;
             namespace foo {
+                int (*foo_handler)(int);
                 int foo_global = 2;
                 class Bar {
                 public:
                     int value;
+                    int (*on_ready)(int);
                     int method() {
                         int local = value;
+                        int (*local_callback)(int);
                         return local;
                     }
                 };
@@ -255,5 +354,22 @@ mod tests {
         assert!(var_names.contains(&("foo_global", Some("foo"))));
         assert!(var_names.iter().any(|(name, _)| *name == "local"));
         assert!(var_names.iter().any(|(name, _)| *name == "result"));
+        assert!(!var_names.contains(&("global_handler", None)));
+        assert!(!var_names.contains(&("foo_handler", Some("foo"))));
+        assert!(!var_names.iter().any(|(name, ns)| *name == "on_ready" && *ns == Some("foo::Bar")));
+        assert!(!var_names
+            .iter()
+            .any(|(name, ns)| *name == "local_callback" && *ns == Some("foo::Bar::method")));
+
+        let fn_symbols: Vec<_> = symbols
+            .iter()
+            .filter(|s| s.kind == "fn")
+            .map(|s| (s.name.as_str(), s.namespace.as_deref()))
+            .collect();
+
+        assert!(fn_symbols.contains(&("global_handler", None)));
+        assert!(fn_symbols.contains(&("foo_handler", Some("foo"))));
+        assert!(fn_symbols.contains(&("on_ready", Some("foo::Bar"))));
+        assert!(fn_symbols.contains(&("local_callback", Some("foo::Bar::method"))));
     }
 }
