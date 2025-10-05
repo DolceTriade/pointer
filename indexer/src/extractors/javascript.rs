@@ -136,10 +136,16 @@ fn symbols_from_variable_declaration(
                         names.push(name.to_string());
                     }
                 }
+                let is_function_like = child
+                    .child_by_field_name("value")
+                    .map(|value| js_expression_is_function(&value))
+                    .unwrap_or(false)
+                    && names.len() == 1;
                 for name in names {
                     results.push(ExtractedSymbol {
                         name,
-                        kind: kind.clone(),
+                        kind: if is_function_like { "function" } else { &kind }
+                            .to_string(),
                         namespace: namespace.clone(),
                     });
                 }
@@ -239,6 +245,22 @@ fn lexical_kind(node: &Node, source: &[u8]) -> String {
     }
 }
 
+fn js_expression_is_function(node: &Node) -> bool {
+    match node.kind() {
+        "function_expression" | "function" | "generator_function" | "arrow_function" => true,
+        "parenthesized_expression" => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.is_named() && js_expression_is_function(&child) {
+                    return true;
+                }
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,11 +311,18 @@ mod tests {
 
         assert!(vars.contains(&"local"));
         assert!(vars.contains(&"answer"));
-        assert!(vars.contains(&"helper"));
         assert!(vars.contains(&"flag"));
         assert!(vars.contains(&"legacy"));
         assert!(vars.contains(&"a"));
         assert!(vars.contains(&"b"));
         assert!(vars.contains(&"alias"));
+        assert!(!vars.contains(&"helper"));
+
+        let fn_symbols: Vec<_> = symbols
+            .iter()
+            .filter(|s| s.kind == "function")
+            .map(|s| s.name.as_str())
+            .collect();
+        assert!(fn_symbols.contains(&"helper"));
     }
 }

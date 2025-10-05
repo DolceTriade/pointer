@@ -142,10 +142,25 @@ fn symbols_from_variable_declaration(
                         names.push(name.to_string());
                     }
                 }
+                let single_binding = names.len() == 1;
+                let type_is_function = child
+                    .child_by_field_name("type")
+                    .map(|ty| ts_type_is_function(&ty))
+                    .unwrap_or(false);
+                let value_is_function = child
+                    .child_by_field_name("value")
+                    .map(|value| ts_expression_is_function(&value))
+                    .unwrap_or(false);
+                let is_function_like = single_binding && (type_is_function || value_is_function);
+                let symbol_kind = if is_function_like {
+                    "function".to_string()
+                } else {
+                    kind.clone()
+                };
                 for name in names {
                     results.push(ExtractedSymbol {
                         name,
-                        kind: kind.clone(),
+                        kind: symbol_kind.clone(),
                         namespace: namespace.clone(),
                     });
                 }
@@ -272,6 +287,37 @@ fn lexical_kind(node: &Node, source: &[u8]) -> String {
     }
 }
 
+fn ts_expression_is_function(node: &Node) -> bool {
+    match node.kind() {
+        "function_expression" | "function" | "generator_function" | "arrow_function" => true,
+        "parenthesized_expression" => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.is_named() && ts_expression_is_function(&child) {
+                    return true;
+                }
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+fn ts_type_is_function(node: &Node) -> bool {
+    if node.kind() == "function_type" {
+        return true;
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if ts_type_is_function(&child) {
+            return true;
+        }
+    }
+
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,6 +353,9 @@ mod tests {
             }
             const value = 1;
             let count = 0;
+            const handler: (x: number) => number = (x) => x;
+            let pointer: () => void;
+            const arrow = () => {};
         "#;
 
         let mut symbols = extract(source);
@@ -359,5 +408,17 @@ mod tests {
         assert!(vars.contains(&("secret", Some("Internal.hidden"))));
         assert!(vars.contains(&("value", None)));
         assert!(vars.contains(&("count", None)));
+        assert!(!vars.iter().any(|(name, _)| *name == "handler"));
+        assert!(!vars.iter().any(|(name, _)| *name == "pointer"));
+        assert!(!vars.iter().any(|(name, _)| *name == "arrow"));
+
+        let fn_symbols: Vec<_> = symbols
+            .iter()
+            .filter(|s| s.kind == "function")
+            .map(|s| (s.name.as_str(), s.namespace.as_deref()))
+            .collect();
+        assert!(fn_symbols.contains(&("handler", None)));
+        assert!(fn_symbols.contains(&("pointer", None)));
+        assert!(fn_symbols.contains(&("arrow", None)));
     }
 }

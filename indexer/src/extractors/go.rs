@@ -84,22 +84,35 @@ fn symbols_from_short_var(
     package: Option<&str>,
 ) -> Vec<ExtractedSymbol> {
     let namespace = go_namespace(node, source, package);
-    let mut vars = Vec::new();
+    let mut names = Vec::new();
     if let Some(left) = node.child_by_field_name("left") {
-        let mut cursor = left.walk();
-        for child in left.children(&mut cursor) {
-            if child.kind() == "identifier" {
-                if let Ok(name) = child.utf8_text(source) {
-                    vars.push(ExtractedSymbol {
-                        name: name.to_string(),
-                        kind: "var".to_string(),
-                        namespace: namespace.clone(),
-                    });
-                }
-            }
-        }
+        collect_go_binding_names(&left, source, &mut names);
     }
-    vars
+
+    if names.is_empty() {
+        return Vec::new();
+    }
+
+    let value_nodes = node
+        .child_by_field_name("right")
+        .map(flatten_go_expression_list)
+        .unwrap_or_default();
+
+    names
+        .into_iter()
+        .enumerate()
+        .map(|(idx, name)| {
+            let is_function_like = value_nodes
+                .get(idx)
+                .map(|expr| go_expression_is_function(expr))
+                .unwrap_or(false);
+            ExtractedSymbol {
+                name,
+                kind: if is_function_like { "fn" } else { "var" }.to_string(),
+                namespace: namespace.clone(),
+            }
+        })
+        .collect()
 }
 
 fn symbols_from_spec(
@@ -109,36 +122,52 @@ fn symbols_from_spec(
     kind: &str,
 ) -> Vec<ExtractedSymbol> {
     let namespace = go_namespace(node, source, package);
-    let mut vars = Vec::new();
-    if let Some(names_node) = node.child_by_field_name("name") {
-        match names_node.kind() {
-            "identifier_list" => {
-                let mut list_cursor = names_node.walk();
-                for ident in names_node.children(&mut list_cursor) {
-                    if ident.kind() == "identifier" {
-                        if let Ok(name) = ident.utf8_text(source) {
-                            vars.push(ExtractedSymbol {
-                                name: name.to_string(),
-                                kind: kind.to_string(),
-                                namespace: namespace.clone(),
-                            });
-                        }
-                    }
-                }
+    let mut names = Vec::new();
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i) {
+            if node.field_name_for_child(i as u32) == Some("name") {
+                collect_go_binding_names(&child, source, &mut names);
             }
-            "identifier" => {
-                if let Ok(name) = names_node.utf8_text(source) {
-                    vars.push(ExtractedSymbol {
-                        name: name.to_string(),
-                        kind: kind.to_string(),
-                        namespace: namespace.clone(),
-                    });
-                }
-            }
-            _ => {}
         }
     }
-    vars
+
+    if names.is_empty() {
+        return Vec::new();
+    }
+
+    let type_is_function = node
+        .child_by_field_name("type")
+        .map(|ty| go_type_is_function(&ty))
+        .unwrap_or(false);
+
+    let mut value_exprs = Vec::new();
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i) {
+            if node.field_name_for_child(i as u32) == Some("value") {
+                value_exprs.extend(flatten_go_expression_list(child));
+            }
+        }
+    }
+
+    names
+        .into_iter()
+        .enumerate()
+        .map(|(idx, name)| {
+            let is_function_like = if type_is_function {
+                true
+            } else {
+                value_exprs
+                    .get(idx)
+                    .map(|expr| go_expression_is_function(expr))
+                    .unwrap_or(false)
+            };
+            ExtractedSymbol {
+                name,
+                kind: if is_function_like { "fn" } else { kind }.to_string(),
+                namespace: namespace.clone(),
+            }
+        })
+        .collect()
 }
 
 fn receiver_type(node: &Node, source: &[u8]) -> Option<String> {
@@ -208,6 +237,79 @@ fn go_namespace(node: &Node, source: &[u8], package: Option<&str>) -> Option<Str
     }
 }
 
+fn collect_go_binding_names(node: &Node, source: &[u8], out: &mut Vec<String>) {
+    match node.kind() {
+        "identifier" => {
+            if let Ok(name) = node.utf8_text(source) {
+                out.push(name.to_string());
+            }
+        }
+        "identifier_list" | "expression_list" | "parenthesized_expression" => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.is_named() {
+                    collect_go_binding_names(&child, source, out);
+                }
+            }
+        }
+        _ => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.is_named() {
+                    collect_go_binding_names(&child, source, out);
+                }
+            }
+        }
+    }
+}
+
+fn flatten_go_expression_list(node: Node) -> Vec<Node> {
+    if node.kind() == "expression_list" {
+        let mut results = Vec::new();
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.is_named() {
+                results.push(child);
+            }
+        }
+        results
+    } else {
+        vec![node]
+    }
+}
+
+fn go_expression_is_function(node: &Node) -> bool {
+    if node.kind() == "func_literal" {
+        return true;
+    }
+
+    if node.kind() == "parenthesized_expression" {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.is_named() && go_expression_is_function(&child) {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+fn go_type_is_function(node: &Node) -> bool {
+    if node.kind() == "function_type" {
+        return true;
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if go_type_is_function(&child) {
+            return true;
+        }
+    }
+
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,6 +320,10 @@ mod tests {
             package demo
 
             var top = 1
+            var handler func(int) int
+            var typed1, typed2 func() int
+            var withLiteral = func() int { return 0 }
+            var mix1, mix2 = func() {}, 42
 
             type Foo struct {
                 Value int
@@ -226,6 +332,7 @@ mod tests {
 
             func helper() {
                 local := 3
+                localFn := func() int { return local }
             }
 
             func (f *Foo) Method() {
@@ -256,5 +363,26 @@ mod tests {
         assert!(vars.contains(&("top", Some("demo"))));
         assert!(vars.contains(&("local", Some("demo.helper"))));
         assert!(vars.contains(&("counter", Some("demo.Method"))));
+        assert!(vars.contains(&("mix2", Some("demo"))));
+        assert!(!vars.iter().any(|(name, _)| *name == "handler"));
+        assert!(!vars.iter().any(|(name, _)| *name == "typed1"));
+        assert!(!vars.iter().any(|(name, _)| *name == "typed2"));
+        assert!(!vars.iter().any(|(name, _)| *name == "withLiteral"));
+        assert!(!vars.iter().any(|(name, _)| *name == "mix1"));
+        assert!(!vars.iter().any(|(name, _)| *name == "localFn"));
+
+        let fn_symbols: Vec<_> = symbols
+            .iter()
+            .filter(|s| s.kind == "fn")
+            .map(|s| (s.name.as_str(), s.namespace.as_deref()))
+            .collect();
+
+        assert!(fn_symbols.contains(&("helper", Some("demo"))));
+        assert!(fn_symbols.contains(&("handler", Some("demo"))));
+        assert!(fn_symbols.contains(&("typed1", Some("demo"))));
+        assert!(fn_symbols.contains(&("typed2", Some("demo"))));
+        assert!(fn_symbols.contains(&("withLiteral", Some("demo"))));
+        assert!(fn_symbols.contains(&("mix1", Some("demo"))));
+        assert!(fn_symbols.contains(&("localFn", Some("demo.helper"))));
     }
 }

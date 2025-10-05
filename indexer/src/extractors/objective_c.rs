@@ -137,14 +137,15 @@ fn symbols_from_property(node: &Node, source: &[u8]) -> Vec<ExtractedSymbol> {
             let mut inner = child.walk();
             for declarator in child.children(&mut inner) {
                 if declarator.kind() == "struct_declarator" {
-                    if let Some(name_node) = find_identifier(&declarator) {
-                        if let Some(name) = identifier_text(&name_node, source) {
-                            results.push(ExtractedSymbol {
-                                name,
-                                kind: "property".to_string(),
-                                namespace: namespace_for_node(node, source),
-                            });
-                        }
+                    if let Some(name) = identifier_from_declarator(&declarator, source) {
+                        let namespace = namespace_for_node(node, source);
+                        let is_function_like = declarator_contains_function(&declarator);
+                        results.push(ExtractedSymbol {
+                            name,
+                            kind: if is_function_like { "function" } else { "property" }
+                                .to_string(),
+                            namespace,
+                        });
                     }
                 }
             }
@@ -161,14 +162,15 @@ fn symbols_from_ivar(node: &Node, source: &[u8]) -> Vec<ExtractedSymbol> {
             let mut inner = child.walk();
             for declarator in child.children(&mut inner) {
                 if declarator.kind() == "struct_declarator" {
-                    if let Some(name_node) = find_identifier(&declarator) {
-                        if let Some(name) = identifier_text(&name_node, source) {
-                            results.push(ExtractedSymbol {
-                                name,
-                                kind: "ivar".to_string(),
-                                namespace: namespace_for_node(node, source),
-                            });
-                        }
+                    if let Some(name) = identifier_from_declarator(&declarator, source) {
+                        let namespace = namespace_for_node(node, source);
+                        let is_function_like = declarator_contains_function(&declarator);
+                        results.push(ExtractedSymbol {
+                            name,
+                            kind: if is_function_like { "function" } else { "ivar" }
+                                .to_string(),
+                            namespace,
+                        });
                     }
                 }
             }
@@ -185,10 +187,12 @@ fn symbols_from_declaration(node: &Node, source: &[u8]) -> Vec<ExtractedSymbol> 
         if child.kind() == "init_declarator" {
             let declarator = child.child_by_field_name("declarator").unwrap_or(child);
             if let Some(name) = identifier_from_declarator(&declarator, source) {
+                let namespace = namespace_for_node(node, source);
+                let is_function_like = declarator_contains_function(&declarator);
                 results.push(ExtractedSymbol {
                     name,
-                    kind: "var".to_string(),
-                    namespace: namespace_for_node(node, source),
+                    kind: if is_function_like { "function" } else { "var" }.to_string(),
+                    namespace,
                 });
             }
         } else if matches!(
@@ -200,9 +204,20 @@ fn symbols_from_declaration(node: &Node, source: &[u8]) -> Vec<ExtractedSymbol> 
                 | "identifier"
         ) {
             if let Some(name) = identifier_from_declarator(&child, source) {
+                let namespace = namespace_for_node(node, source);
+                let is_function_like =
+                    declarator_contains_function(&child) || identifier_in_function_declarator(&child);
                 results.push(ExtractedSymbol {
                     name,
-                    kind: "var".to_string(),
+                    kind: if is_function_like { "function" } else { "var" }.to_string(),
+                    namespace,
+                });
+            }
+        } else if child.kind() == "function_declarator" {
+            if let Some(name) = identifier_from_declarator(&child, source) {
+                results.push(ExtractedSymbol {
+                    name,
+                    kind: "function".to_string(),
                     namespace: namespace_for_node(node, source),
                 });
             }
@@ -213,7 +228,7 @@ fn symbols_from_declaration(node: &Node, source: &[u8]) -> Vec<ExtractedSymbol> 
 }
 
 fn identifier_from_declarator(node: &Node, source: &[u8]) -> Option<String> {
-    if node.kind() == "identifier" {
+    if matches!(node.kind(), "identifier" | "field_identifier") {
         return node.utf8_text(source).ok().map(|text| text.to_string());
     }
 
@@ -225,6 +240,33 @@ fn identifier_from_declarator(node: &Node, source: &[u8]) -> Option<String> {
     }
 
     None
+}
+
+fn declarator_contains_function(node: &Node) -> bool {
+    match node.kind() {
+        "function_declarator" | "abstract_function_declarator" => return true,
+        _ => {}
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if declarator_contains_function(&child) {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn identifier_in_function_declarator(node: &Node) -> bool {
+    let mut current = node.parent();
+    while let Some(parent) = current {
+        if parent.kind().ends_with("declarator") && declarator_contains_function(&parent) {
+            return true;
+        }
+        current = parent.parent();
+    }
+    false
 }
 
 fn namespace_for_node(node: &Node, source: &[u8]) -> Option<String> {
@@ -282,10 +324,13 @@ mod tests {
     fn extracts_objective_c_symbols() {
         let source = r#"
             int solovar;
+            static int (*global_handler)(int);
             @interface Demo : NSObject {
                 int _count;
+                int (*callback)(int);
             }
             @property(nonatomic) int value;
+            @property(nonatomic) int (*onReady)(int);
             - (void)doThing;
             @end
 
@@ -293,12 +338,14 @@ mod tests {
             - (void)doThing {
                 int local = 0;
                 int temp;
+                int (*local_handler)(int);
             }
             @end
 
             void Helper(void) {
                 int global = 1;
                 int global_no_init;
+                int (*helper_callback)(int);
             }
         "#;
 
@@ -322,6 +369,8 @@ mod tests {
             .collect();
         assert!(fields.contains(&("_count", "ivar")));
         assert!(fields.contains(&("value", "property")));
+        assert!(!fields.iter().any(|(name, kind)| *name == "callback" && *kind == "ivar"));
+        assert!(!fields.iter().any(|(name, kind)| *name == "onReady" && *kind == "property"));
 
         let vars: Vec<_> = symbols
             .iter()
@@ -333,5 +382,22 @@ mod tests {
         assert!(vars.contains(&("global", Some("Helper"))));
         assert!(vars.contains(&("global_no_init", Some("Helper"))));
         assert!(vars.contains(&("solovar", None)));
+        assert!(!vars.iter().any(|(name, _)| *name == "global_handler"));
+        assert!(!vars.iter().any(|(name, _)| *name == "callback"));
+        assert!(!vars.iter().any(|(name, _)| *name == "onReady"));
+        assert!(!vars.iter().any(|(name, _)| *name == "helper_callback"));
+        assert!(!vars.iter().any(|(name, _)| *name == "local_handler"));
+
+        let fn_symbols: Vec<_> = symbols
+            .iter()
+            .filter(|s| s.kind == "function")
+            .map(|s| (s.name.as_str(), s.namespace.as_deref()))
+            .collect();
+        assert!(fn_symbols.contains(&("Helper", None)));
+        assert!(fn_symbols.contains(&("global_handler", None)));
+        assert!(fn_symbols.contains(&("callback", Some("Demo"))));
+        assert!(fn_symbols.contains(&("onReady", Some("Demo"))));
+        assert!(fn_symbols.contains(&("helper_callback", Some("Helper"))));
+        assert!(fn_symbols.contains(&("local_handler", Some("Demo.doThing"))));
     }
 }

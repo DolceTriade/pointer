@@ -84,9 +84,13 @@ fn symbols_from_variable_declaration(
         if child.kind() == "variable_declarator" {
             if let Some(name_node) = child.child_by_field_name("name") {
                 if let Ok(text) = name_node.utf8_text(source) {
+                    let is_function_like = child
+                        .child_by_field_name("value")
+                        .map(|value| java_expression_is_function(&value))
+                        .unwrap_or(false);
                     vars.push(ExtractedSymbol {
                         name: text.to_string(),
-                        kind: "var".to_string(),
+                        kind: if is_function_like { "fn" } else { "var" }.to_string(),
                         namespace: namespace.clone(),
                     });
                 }
@@ -95,6 +99,22 @@ fn symbols_from_variable_declaration(
     }
 
     vars
+}
+
+fn java_expression_is_function(node: &Node) -> bool {
+    match node.kind() {
+        "lambda_expression" | "method_reference" => true,
+        "parenthesized_expression" => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.is_named() && java_expression_is_function(&child) {
+                    return true;
+                }
+            }
+            false
+        }
+        _ => false,
+    }
 }
 
 fn package_name(root: &Node, source: &[u8]) -> Option<String> {
@@ -210,6 +230,7 @@ mod tests {
 
             public class Foo {
                 private int value;
+                java.util.function.Function<Integer, Integer> handler = x -> x;
 
                 public Foo() {
                     int created = 1;
@@ -217,6 +238,7 @@ mod tests {
 
                 public void doThing() {
                     int counter = 0;
+                    Runnable localHandler = () -> {};
                 }
 
                 void hidden() {}
@@ -263,5 +285,15 @@ mod tests {
         assert!(vars.contains(&("counter", Some("com.example.demo.Foo.doThing"))));
         assert!(vars.contains(&("created", Some("com.example.demo.Foo.Foo"))));
         assert!(vars.contains(&("nestedField", Some("com.example.demo.Foo.Nested"))));
+        assert!(!vars.iter().any(|(name, _)| *name == "handler"));
+        assert!(!vars.iter().any(|(name, _)| *name == "localHandler"));
+
+        let fn_symbols: Vec<_> = symbols
+            .iter()
+            .filter(|s| s.kind == "fn")
+            .map(|s| (s.name.as_str(), s.namespace.as_deref()))
+            .collect();
+        assert!(fn_symbols.contains(&("handler", Some("com.example.demo.Foo"))));
+        assert!(fn_symbols.contains(&("localHandler", Some("com.example.demo.Foo.doThing"))));
     }
 }

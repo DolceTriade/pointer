@@ -114,34 +114,52 @@ fn swift_type_keyword(node: &Node, name_node: &Node, source: &[u8]) -> String {
 
 fn symbols_from_variable_declaration(node: &Node, source: &[u8]) -> Vec<ExtractedSymbol> {
     let namespace = namespace_for_node(node, source);
-    let mut results = Vec::new();
-
+    let mut base_names = Vec::new();
     if let Some(pattern) = node.child_by_field_name("pattern") {
-        let mut names = Vec::new();
-        collect_pattern_names(&pattern, source, &mut names);
-        for name in names {
-            results.push(ExtractedSymbol {
-                name,
-                kind: "var".to_string(),
-                namespace: namespace.clone(),
-            });
-        }
+        collect_pattern_names(&pattern, source, &mut base_names);
     }
+
+    let mut results = Vec::new();
+    let mut handled_initializers = false;
 
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         if child.kind() == "pattern_initializer" {
+            handled_initializers = true;
             if let Some(pattern) = child.child_by_field_name("pattern") {
                 let mut names = Vec::new();
                 collect_pattern_names(&pattern, source, &mut names);
+                let pattern_is_function = swift_pattern_has_function_type(&pattern);
+                let value_is_function = child
+                    .child_by_field_name("value")
+                    .map(|value| swift_expression_is_function(&value))
+                    .unwrap_or(false);
+                let is_function_like = pattern_is_function || value_is_function;
+
                 for name in names {
                     results.push(ExtractedSymbol {
                         name,
-                        kind: "var".to_string(),
+                        kind: if is_function_like { "function" } else { "var" }.to_string(),
                         namespace: namespace.clone(),
                     });
                 }
             }
+        }
+    }
+
+    if !handled_initializers {
+        let type_is_function = node
+            .child_by_field_name("type_annotation")
+            .map(|ty| swift_type_is_function(&ty))
+            .unwrap_or(false)
+            || swift_node_contains_function_type(node);
+
+        for name in base_names {
+            results.push(ExtractedSymbol {
+                name,
+                kind: if type_is_function { "function" } else { "var" }.to_string(),
+                namespace: namespace.clone(),
+            });
         }
     }
 
@@ -156,11 +174,22 @@ fn symbols_from_property_declaration(node: &Node, source: &[u8]) -> Vec<Extracte
         collect_pattern_names(&name_node, source, &mut names);
     }
 
+    let type_is_function = node
+        .child_by_field_name("type_annotation")
+        .map(|ty| swift_type_is_function(&ty))
+        .unwrap_or(false)
+        || swift_node_contains_function_type(node);
+    let value_is_function = node
+        .child_by_field_name("value")
+        .map(|value| swift_expression_is_function(&value))
+        .unwrap_or(false);
+    let is_function_like = type_is_function || value_is_function;
+
     names
         .into_iter()
         .map(|name| ExtractedSymbol {
             name,
-            kind: "var".to_string(),
+            kind: if is_function_like { "function" } else { "var" }.to_string(),
             namespace: namespace.clone(),
         })
         .collect()
@@ -185,6 +214,45 @@ fn collect_pattern_names(node: &Node, source: &[u8], out: &mut Vec<String>) {
         }
         _ => {}
     }
+}
+
+fn swift_pattern_has_function_type(node: &Node) -> bool {
+    swift_node_contains_function_type(node)
+}
+
+fn swift_type_is_function(node: &Node) -> bool {
+    swift_node_contains_function_type(node)
+}
+
+fn swift_node_contains_function_type(node: &Node) -> bool {
+    match node.kind() {
+        "function_type" | "lambda_function_type" => return true,
+        _ => {}
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if swift_node_contains_function_type(&child) {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn swift_expression_is_function(node: &Node) -> bool {
+    if node.kind() == "lambda_literal" {
+        return true;
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.is_named() && swift_expression_is_function(&child) {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn namespace_for_node(node: &Node, source: &[u8]) -> Option<String> {
@@ -233,8 +301,11 @@ mod tests {
         let source = r#"
             class Demo {
                 var count = 0
+                var handler: (Int) -> Int = { $0 }
+                var callback: (Int) -> Int
                 func doThing() {
                     let local = 1
+                    let localHandler = { (x: Int) -> Int in x }
                 }
             }
 
@@ -245,6 +316,7 @@ mod tests {
             func helper() {
                 let answer = 42
             }
+            let execute = { (x: Int) -> Int in x }
         "#;
 
         let mut symbols = extract(source);
@@ -272,5 +344,19 @@ mod tests {
         assert!(vars.contains(&("local", Some("Demo.doThing"))));
         assert!(vars.contains(&("inner", Some("Value"))));
         assert!(vars.contains(&("answer", Some("helper"))));
+        assert!(!vars.iter().any(|(name, _)| *name == "handler"));
+        assert!(!vars.iter().any(|(name, _)| *name == "callback"));
+        assert!(!vars.iter().any(|(name, _)| *name == "localHandler"));
+        assert!(!vars.iter().any(|(name, _)| *name == "execute"));
+
+        let fn_symbols: Vec<_> = symbols
+            .iter()
+            .filter(|s| s.kind == "function")
+            .map(|s| (s.name.as_str(), s.namespace.as_deref()))
+            .collect();
+        assert!(fn_symbols.contains(&("handler", Some("Demo"))));
+        assert!(fn_symbols.contains(&("callback", Some("Demo"))));
+        assert!(fn_symbols.contains(&("localHandler", Some("Demo.doThing"))));
+        assert!(fn_symbols.contains(&("execute", None)));
     }
 }

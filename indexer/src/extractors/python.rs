@@ -63,38 +63,62 @@ fn symbol_from_named(node: &Node, source: &[u8], kind: &str) -> Vec<ExtractedSym
 
 fn symbols_from_assignment(node: &Node, source: &[u8]) -> Vec<ExtractedSymbol> {
     let namespace = namespace_for_node(node, source);
-    let mut vars = Vec::new();
+    let mut names = Vec::new();
 
     if let Some(left) = node.child_by_field_name("left") {
-        collect_targets(&left, source, namespace, &mut vars);
+        collect_target_names(&left, source, &mut names);
     }
 
-    vars
+    let value_is_function = node
+        .child_by_field_name("right")
+        .map(|right| python_expression_is_function(&right))
+        .unwrap_or(false);
+    let classify_as_function = value_is_function && names.len() == 1;
+
+    names
+        .into_iter()
+        .map(|name| ExtractedSymbol {
+            name,
+            kind: if classify_as_function { "fn" } else { "var" }.to_string(),
+            namespace: namespace.clone(),
+        })
+        .collect()
 }
 
-fn collect_targets(
+fn collect_target_names(
     node: &Node,
     source: &[u8],
-    namespace: Option<String>,
-    out: &mut Vec<ExtractedSymbol>,
+    out: &mut Vec<String>,
 ) {
     match node.kind() {
         "identifier" => {
             if let Ok(name) = node.utf8_text(source) {
-                out.push(ExtractedSymbol {
-                    name: name.to_string(),
-                    kind: "var".to_string(),
-                    namespace: namespace.clone(),
-                });
+                out.push(name.to_string());
             }
         }
         "tuple" | "list" | "pattern_list" | "parenthesized_expression" => {
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
-                collect_targets(&child, source, namespace.clone(), out);
+                collect_target_names(&child, source, out);
             }
         }
         _ => {}
+    }
+}
+
+fn python_expression_is_function(node: &Node) -> bool {
+    match node.kind() {
+        "lambda" => true,
+        "parenthesized_expression" => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.is_named() && python_expression_is_function(&child) {
+                    return true;
+                }
+            }
+            false
+        }
+        _ => false,
     }
 }
 
@@ -163,6 +187,7 @@ mod tests {
                 return answer
 
             env = "prod"
+            compute = lambda value: value
         "#;
 
         let mut symbols = extract(source);
@@ -197,5 +222,13 @@ mod tests {
         assert!(vars.contains(&("count", Some("Outer.method"))));
         assert!(vars.contains(&("answer", Some("top_level"))));
         assert!(vars.contains(&("env", None)));
+        assert!(!vars.iter().any(|(name, _)| *name == "compute"));
+
+        let fn_symbols: Vec<_> = symbols
+            .iter()
+            .filter(|s| s.kind == "fn")
+            .map(|s| (s.name.as_str(), s.namespace.as_deref()))
+            .collect();
+        assert!(fn_symbols.contains(&("compute", None)));
     }
 }
