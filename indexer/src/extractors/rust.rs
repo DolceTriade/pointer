@@ -19,9 +19,8 @@ pub fn extract(source: &str) -> Vec<ExtractedSymbol> {
     let source_bytes = source.as_bytes();
 
     while let Some(node) = stack.pop() {
-        if let Some(symbol) = extract_symbol(&node, source_bytes) {
-            symbols.push(symbol);
-        }
+        let mut extracted = collect_symbols(&node, source_bytes);
+        symbols.append(&mut extracted);
 
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
@@ -32,63 +31,73 @@ pub fn extract(source: &str) -> Vec<ExtractedSymbol> {
     symbols
 }
 
-fn extract_symbol(node: &Node, source: &[u8]) -> Option<ExtractedSymbol> {
-    if is_in_impl(node) {
-        return None;
+fn collect_symbols(node: &Node, source: &[u8]) -> Vec<ExtractedSymbol> {
+    match node.kind() {
+        "function_item" | "method_item" => symbol_from_function(node, source),
+        "struct_item" => symbol_from_named_item(node, source, "struct"),
+        "enum_item" => symbol_from_named_item(node, source, "enum"),
+        "trait_item" => symbol_from_named_item(node, source, "trait"),
+        "mod_item" => symbol_from_named_item(node, source, "mod"),
+        "const_item" => symbol_from_named_item(node, source, "const"),
+        "static_item" => symbol_from_named_item(node, source, "static"),
+        "type_item" => symbol_from_named_item(node, source, "type"),
+        "field_declaration" => symbols_from_field(node, source),
+        "tuple_field_declaration" => symbols_from_field(node, source),
+        "let_declaration" => symbols_from_let(node, source),
+        _ => Vec::new(),
     }
+}
 
-    let kind = match node.kind() {
-        "function_item" => "fn",
-        "struct_item" => "struct",
-        "enum_item" => "enum",
-        "trait_item" => "trait",
-        "mod_item" => "mod",
-        "const_item" => "const",
-        "static_item" => "static",
-        "type_item" => "type",
-        _ => return None,
+fn symbol_from_function(node: &Node, source: &[u8]) -> Vec<ExtractedSymbol> {
+    let kind = if has_impl_ancestor(node) {
+        "method"
+    } else {
+        "fn"
     };
-
     symbol_from_named_item(node, source, kind)
 }
 
-fn symbol_from_named_item(node: &Node, source: &[u8], kind: &str) -> Option<ExtractedSymbol> {
-    let name_node = node.child_by_field_name("name")?;
+fn symbol_from_named_item(node: &Node, source: &[u8], kind: &str) -> Vec<ExtractedSymbol> {
+    let name_node = match node.child_by_field_name("name") {
+        Some(name) => name,
+        None => return Vec::new(),
+    };
 
-    if !is_public(node, &name_node, source) {
-        return None;
-    }
+    let name = match name_node.utf8_text(source) {
+        Ok(text) => text.to_string(),
+        Err(_) => return Vec::new(),
+    };
 
-    let name = name_node.utf8_text(source).ok()?.to_string();
     let namespace = namespace_for_node(node, source);
 
-    Some(ExtractedSymbol {
+    vec![ExtractedSymbol {
         name,
         kind: kind.to_string(),
         namespace,
-    })
+    }]
 }
 
-fn is_public(node: &Node, name_node: &Node, source: &[u8]) -> bool {
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        if child.id() == name_node.id() {
-            break;
-        }
+fn symbols_from_field(node: &Node, source: &[u8]) -> Vec<ExtractedSymbol> {
+    let name_node = match node.child_by_field_name("name") {
+        Some(name) => name,
+        None => return Vec::new(),
+    };
 
-        if child.kind() == "visibility_modifier" {
-            if let Ok(text) = child.utf8_text(source) {
-                if text.starts_with("pub") {
-                    return true;
-                }
-            }
-        }
-    }
+    let name = match name_node.utf8_text(source) {
+        Ok(text) => text.trim().to_string(),
+        Err(_) => return Vec::new(),
+    };
 
-    false
+    let namespace = namespace_for_node(node, source);
+
+    vec![ExtractedSymbol {
+        name,
+        kind: "field".to_string(),
+        namespace,
+    }]
 }
 
-fn is_in_impl(node: &Node) -> bool {
+fn has_impl_ancestor(node: &Node) -> bool {
     let mut current = node.parent();
     while let Some(parent) = current {
         if parent.kind() == "impl_item" {
@@ -97,6 +106,58 @@ fn is_in_impl(node: &Node) -> bool {
         current = parent.parent();
     }
     false
+}
+
+fn symbols_from_let(node: &Node, source: &[u8]) -> Vec<ExtractedSymbol> {
+    let pattern = match node.child_by_field_name("pattern") {
+        Some(pattern) => pattern,
+        None => return Vec::new(),
+    };
+
+    let mut names = Vec::new();
+    collect_pattern_bindings(&pattern, source, &mut names);
+
+    let namespace = namespace_for_node(node, source);
+
+    names
+        .into_iter()
+        .map(|name| ExtractedSymbol {
+            name,
+            kind: "var".to_string(),
+            namespace: namespace.clone(),
+        })
+        .collect()
+}
+
+fn collect_pattern_bindings(pattern: &Node, source: &[u8], out: &mut Vec<String>) {
+    match pattern.kind() {
+        "identifier" => {
+            if let Ok(text) = pattern.utf8_text(source) {
+                let trimmed = text.trim();
+                if !trimmed.starts_with('_') {
+                    out.push(trimmed.to_string());
+                }
+            }
+        }
+        "tuple_pattern"
+        | "tuple_struct_pattern"
+        | "slice_pattern"
+        | "struct_pattern"
+        | "struct_pattern_elements"
+        | "struct_pattern_field"
+        | "pattern_list" => {
+            let mut cursor = pattern.walk();
+            for child in pattern.children(&mut cursor) {
+                collect_pattern_bindings(&child, source, out);
+            }
+        }
+        _ => {
+            let mut cursor = pattern.walk();
+            for child in pattern.children(&mut cursor) {
+                collect_pattern_bindings(&child, source, out);
+            }
+        }
+    }
 }
 
 fn namespace_for_node(node: &Node, source: &[u8]) -> Option<String> {
@@ -111,7 +172,18 @@ fn namespace_for_node(node: &Node, source: &[u8]) -> Option<String> {
                     }
                 }
             }
-            "impl_item" => return None,
+            "impl_item" => {
+                if let Some(name) = impl_target_name(&parent, source) {
+                    names.push(name);
+                }
+            }
+            "struct_item" | "enum_item" | "trait_item" => {
+                if let Some(name_node) = parent.child_by_field_name("name") {
+                    if let Ok(name) = name_node.utf8_text(source) {
+                        names.push(name.to_string());
+                    }
+                }
+            }
             _ => {}
         }
         current = parent.parent();
@@ -125,26 +197,53 @@ fn namespace_for_node(node: &Node, source: &[u8]) -> Option<String> {
     }
 }
 
+fn impl_target_name(node: &Node, source: &[u8]) -> Option<String> {
+    if let Some(type_node) = node.child_by_field_name("type") {
+        return type_node
+            .utf8_text(source)
+            .ok()
+            .map(|t| t.trim().to_string());
+    }
+
+    if let Some(type_node) = node.child_by_field_name("trait") {
+        if let Ok(text) = type_node.utf8_text(source) {
+            return Some(text.trim().to_string());
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn extracts_public_symbols_with_namespaces() {
+    fn extracts_public_symbols_with_namespaces_and_vars() {
         let source = r#"
             pub mod foo {
-                pub struct Bar;
+                pub struct Bar {
+                    inner: i32,
+                }
                 pub(crate) fn helper() {}
                 fn private_fn() {}
 
                 impl Bar {
-                    pub fn method(&self) {}
+                    pub fn method(&self) {
+                        let inner = 2;
+                        let (left, right) = (1, 2);
+                        let _ignored = 10;
+                    }
                 }
             }
 
             pub enum TopLevel {}
             pub fn top_fn() {}
             fn hidden() {}
+
+            fn variable_owner() {
+                let count = 1;
+            }
         "#;
 
         let mut symbols = extract(source);
@@ -162,8 +261,27 @@ mod tests {
             .any(|s| s.name == "TopLevel" && s.kind == "enum"));
         assert!(symbols.iter().any(|s| s.name == "top_fn" && s.kind == "fn"));
 
-        assert!(symbols.iter().all(|s| s.name != "private_fn"));
-        assert!(symbols.iter().all(|s| s.name != "method"));
-        assert!(symbols.iter().all(|s| s.name != "hidden"));
+        assert!(symbols
+            .iter()
+            .any(|s| s.name == "private_fn" && s.kind == "fn"));
+        assert!(symbols.iter().any(|s| {
+            s.name == "method" && s.kind == "method" && s.namespace.as_deref() == Some("foo::Bar")
+        }));
+        assert!(symbols.iter().any(|s| s.name == "hidden" && s.kind == "fn"));
+
+        let var_names: Vec<_> = symbols
+            .iter()
+            .filter(|s| s.kind == "var")
+            .map(|s| s.name.as_str())
+            .collect();
+        assert!(var_names.contains(&"count"));
+        assert!(var_names.contains(&"inner"));
+        assert!(var_names.contains(&"left"));
+        assert!(var_names.contains(&"right"));
+        assert!(!var_names.contains(&"_ignored"));
+
+        assert!(symbols.iter().any(|s| {
+            s.name == "inner" && s.kind == "field" && s.namespace.as_deref() == Some("foo::Bar")
+        }));
     }
 }

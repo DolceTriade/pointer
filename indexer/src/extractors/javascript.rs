@@ -19,9 +19,7 @@ pub fn extract(source: &str) -> Vec<ExtractedSymbol> {
     let mut symbols = Vec::new();
 
     while let Some(node) = stack.pop() {
-        if let Some(mut extracted) = extract_symbol(&node, source_bytes) {
-            symbols.append(&mut extracted);
-        }
+        symbols.extend(collect_symbols(&node, source_bytes));
 
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
@@ -32,53 +30,92 @@ pub fn extract(source: &str) -> Vec<ExtractedSymbol> {
     symbols
 }
 
-fn extract_symbol(node: &Node, source: &[u8]) -> Option<Vec<ExtractedSymbol>> {
+fn collect_symbols(node: &Node, source: &[u8]) -> Vec<ExtractedSymbol> {
     match node.kind() {
         "function_declaration" | "generator_function_declaration" => {
-            if !is_exported(node) {
-                return None;
-            }
-            symbol_from_named(node, source, "function").map(|symbol| vec![symbol])
+            symbol_from_named(node, source, "function")
         }
-        "class_declaration" => {
-            if !is_exported(node) {
-                return None;
-            }
-            symbol_from_named(node, source, "class").map(|symbol| vec![symbol])
-        }
+        "class_declaration" => symbol_from_named(node, source, "class"),
+        "method_definition" => symbols_from_method(node, source),
+        "public_field_definition" | "property_definition" => symbols_from_field(node, source),
         "lexical_declaration" => {
-            if !is_exported(node) {
-                return None;
-            }
-            Some(symbols_from_variable_declaration(
-                node,
-                source,
-                lexical_kind(node, source),
-            ))
+            symbols_from_variable_declaration(node, source, lexical_kind(node, source))
         }
         "variable_declaration" => {
-            if !is_exported(node) {
-                return None;
-            }
-            Some(symbols_from_variable_declaration(
-                node,
-                source,
-                "var".to_string(),
-            ))
+            symbols_from_variable_declaration(node, source, "var".to_string())
         }
-        _ => None,
+        "assignment_expression" if is_destructuring_assignment(node) => {
+            symbols_from_assignment(node, source)
+        }
+        _ => Vec::new(),
     }
 }
 
-fn symbol_from_named(node: &Node, source: &[u8], kind: &str) -> Option<ExtractedSymbol> {
-    let name_node = node.child_by_field_name("name")?;
-    let name = name_node.utf8_text(source).ok()?.to_string();
+fn symbol_from_named(node: &Node, source: &[u8], kind: &str) -> Vec<ExtractedSymbol> {
+    let name_node = match node.child_by_field_name("name") {
+        Some(name) => name,
+        None => return Vec::new(),
+    };
 
-    Some(ExtractedSymbol {
+    let name = match name_node.utf8_text(source) {
+        Ok(text) => text.to_string(),
+        Err(_) => return Vec::new(),
+    };
+
+    vec![ExtractedSymbol {
         name,
         kind: kind.to_string(),
-        namespace: None,
-    })
+        namespace: namespace_for_node(node, source),
+    }]
+}
+
+fn symbols_from_method(node: &Node, source: &[u8]) -> Vec<ExtractedSymbol> {
+    let name_node = node
+        .child_by_field_name("name")
+        .or_else(|| node.child_by_field_name("property"))
+        .or_else(|| node.child_by_field_name("_constructor"))
+        .or_else(|| node.child(0))
+        .filter(|n| n.is_named());
+
+    let name_node = match name_node {
+        Some(node) => node,
+        None => return Vec::new(),
+    };
+
+    let name = match name_node.utf8_text(source) {
+        Ok(text) => text.to_string(),
+        Err(_) => return Vec::new(),
+    };
+
+    vec![ExtractedSymbol {
+        name,
+        kind: "method".to_string(),
+        namespace: namespace_for_node(node, source),
+    }]
+}
+
+fn symbols_from_field(node: &Node, source: &[u8]) -> Vec<ExtractedSymbol> {
+    let name_node = node
+        .child_by_field_name("name")
+        .or_else(|| node.child_by_field_name("property"))
+        .or_else(|| node.child(0))
+        .filter(|n| n.is_named());
+
+    let name_node = match name_node {
+        Some(node) => node,
+        None => return Vec::new(),
+    };
+
+    let name = match name_node.utf8_text(source) {
+        Ok(text) => text.to_string(),
+        Err(_) => return Vec::new(),
+    };
+
+    vec![ExtractedSymbol {
+        name,
+        kind: "field".to_string(),
+        namespace: namespace_for_node(node, source),
+    }]
 }
 
 fn symbols_from_variable_declaration(
@@ -86,39 +123,105 @@ fn symbols_from_variable_declaration(
     source: &[u8],
     kind: String,
 ) -> Vec<ExtractedSymbol> {
+    let namespace = namespace_for_node(node, source);
     let mut results = Vec::new();
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        match child.kind() {
-            "variable_declarator" | "lexical_declarator" => {
-                if let Some(name_node) = child.child_by_field_name("name") {
+        if matches!(child.kind(), "variable_declarator" | "lexical_declarator") {
+            if let Some(name_node) = child.child_by_field_name("name") {
+                let mut names = Vec::new();
+                collect_pattern_names(&name_node, source, &mut names);
+                if names.is_empty() {
                     if let Ok(name) = name_node.utf8_text(source) {
-                        results.push(ExtractedSymbol {
-                            name: name.to_string(),
-                            kind: kind.clone(),
-                            namespace: None,
-                        });
+                        names.push(name.to_string());
                     }
                 }
+                for name in names {
+                    results.push(ExtractedSymbol {
+                        name,
+                        kind: kind.clone(),
+                        namespace: namespace.clone(),
+                    });
+                }
             }
-            _ => {}
         }
     }
     results
 }
 
-fn is_exported(node: &Node) -> bool {
-    let mut current = node.parent();
-    while let Some(parent) = current {
-        if parent.kind() == "export_statement" {
-            return true;
+fn symbols_from_assignment(node: &Node, source: &[u8]) -> Vec<ExtractedSymbol> {
+    let namespace = namespace_for_node(node, source);
+    let mut results = Vec::new();
+    if let Some(left) = node.child_by_field_name("left") {
+        let mut names = Vec::new();
+        collect_pattern_names(&left, source, &mut names);
+        for name in names {
+            results.push(ExtractedSymbol {
+                name,
+                kind: "var".to_string(),
+                namespace: namespace.clone(),
+            });
         }
-        if parent.kind() == "program" {
-            break;
+    }
+    results
+}
+
+fn collect_pattern_names(node: &Node, source: &[u8], out: &mut Vec<String>) {
+    match node.kind() {
+        "identifier" | "property_identifier" => {
+            if let Ok(name) = node.utf8_text(source) {
+                out.push(name.to_string());
+            }
+        }
+        "array_pattern" | "object_pattern" | "pair_pattern" | "parenthesized_pattern" => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                collect_pattern_names(&child, source, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_destructuring_assignment(node: &Node) -> bool {
+    if let Some(left) = node.child_by_field_name("left") {
+        matches!(left.kind(), "array_pattern" | "object_pattern")
+    } else {
+        false
+    }
+}
+
+fn namespace_for_node(node: &Node, source: &[u8]) -> Option<String> {
+    let mut segments = Vec::new();
+    let mut current = node.parent();
+
+    while let Some(parent) = current {
+        match parent.kind() {
+            "class_declaration" | "class_expression" => {
+                if let Some(name_node) = parent.child_by_field_name("name") {
+                    if let Ok(text) = name_node.utf8_text(source) {
+                        segments.push(text.to_string());
+                    }
+                }
+            }
+            "function_declaration" | "generator_function_declaration" => {
+                if let Some(name_node) = parent.child_by_field_name("name") {
+                    if let Ok(text) = name_node.utf8_text(source) {
+                        segments.push(text.to_string());
+                    }
+                }
+            }
+            _ => {}
         }
         current = parent.parent();
     }
-    false
+
+    if segments.is_empty() {
+        None
+    } else {
+        segments.reverse();
+        Some(segments.join("."))
+    }
 }
 
 fn lexical_kind(node: &Node, source: &[u8]) -> String {
@@ -141,15 +244,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn extracts_exported_symbols() {
+    fn extracts_function_class_and_variable_names() {
         let source = r#"
             export function foo() {}
             function hidden() {}
-            export class Widget {}
-            export const answer = 42, helper = () => {};
-            export let flag = true;
-            export var legacy = 0;
-            export default function () {}
+            class Widget {
+                count = 1;
+                method() {
+                    const local = 1;
+                }
+            }
+            const local = 1;
+            const answer = 42, helper = () => {};
+            let flag = true;
+            var legacy = 0;
+            let [a, b] = [1, 2];
+            ({ x: alias } = obj);
         "#;
 
         let mut symbols = extract(source);
@@ -160,17 +270,30 @@ mod tests {
             .any(|s| s.name == "foo" && s.kind == "function"));
         assert!(symbols
             .iter()
+            .any(|s| s.name == "hidden" && s.kind == "function"));
+        assert!(symbols
+            .iter()
             .any(|s| s.name == "Widget" && s.kind == "class"));
-        assert!(symbols
+        assert!(symbols.iter().any(|s| {
+            s.name == "method" && s.kind == "method" && s.namespace.as_deref() == Some("Widget")
+        }));
+        assert!(symbols.iter().any(|s| {
+            s.name == "count" && s.kind == "field" && s.namespace.as_deref() == Some("Widget")
+        }));
+
+        let vars: Vec<_> = symbols
             .iter()
-            .any(|s| s.name == "answer" && s.kind == "const"));
-        assert!(symbols
-            .iter()
-            .any(|s| s.name == "helper" && s.kind == "const"));
-        assert!(symbols.iter().any(|s| s.name == "flag" && s.kind == "let"));
-        assert!(symbols
-            .iter()
-            .any(|s| s.name == "legacy" && s.kind == "var"));
-        assert!(symbols.iter().all(|s| s.name != "hidden"));
+            .filter(|s| matches!(s.kind.as_str(), "var" | "let" | "const"))
+            .map(|s| s.name.as_str())
+            .collect();
+
+        assert!(vars.contains(&"local"));
+        assert!(vars.contains(&"answer"));
+        assert!(vars.contains(&"helper"));
+        assert!(vars.contains(&"flag"));
+        assert!(vars.contains(&"legacy"));
+        assert!(vars.contains(&"a"));
+        assert!(vars.contains(&"b"));
+        assert!(vars.contains(&"alias"));
     }
 }

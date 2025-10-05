@@ -4,9 +4,11 @@ mod go;
 mod java;
 mod javascript;
 mod nix;
+mod objective_c;
 mod protobuf;
 mod python;
 mod rust;
+mod swift;
 mod typescript;
 
 #[derive(Debug, Clone)]
@@ -24,9 +26,11 @@ pub fn extract(language: &str, source: &str) -> Vec<ExtractedSymbol> {
         "js" | "javascript" => javascript::extract(source),
         "java" => java::extract(source),
         "nix" => nix::extract(source),
+        "objc" | "objective-c" | "objectivec" => objective_c::extract(source),
         "proto" | "protobuf" => protobuf::extract(source),
         "py" | "python" => python::extract(source),
         "rust" => rust::extract(source),
+        "swift" => swift::extract(source),
         "ts" | "typescript" => typescript::extract(source),
         _ => Vec::new(),
     }

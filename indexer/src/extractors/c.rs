@@ -19,9 +19,8 @@ pub fn extract(source: &str) -> Vec<ExtractedSymbol> {
     let mut symbols = Vec::new();
 
     while let Some(node) = stack.pop() {
-        if let Some(symbol) = extract_symbol(&node, source_bytes) {
-            symbols.push(symbol);
-        }
+        let mut extracted = collect_symbols(&node, source_bytes);
+        symbols.append(&mut extracted);
 
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
@@ -32,34 +31,103 @@ pub fn extract(source: &str) -> Vec<ExtractedSymbol> {
     symbols
 }
 
-fn extract_symbol(node: &Node, source: &[u8]) -> Option<ExtractedSymbol> {
+fn collect_symbols(node: &Node, source: &[u8]) -> Vec<ExtractedSymbol> {
     match node.kind() {
         "function_definition" => {
             let name = node
                 .child_by_field_name("declarator")
-                .and_then(|decl| identifier_from_declarator(&decl, source))?;
-            Some(ExtractedSymbol {
-                name,
-                kind: "fn".to_string(),
-                namespace: None,
-            })
+                .and_then(|decl| identifier_from_declarator(&decl, source));
+            match name {
+                Some(name) => vec![ExtractedSymbol {
+                    name,
+                    kind: "fn".to_string(),
+                    namespace: None,
+                }],
+                None => Vec::new(),
+            }
         }
         "struct_specifier" => symbol_from_named(node, source, "struct"),
         "union_specifier" => symbol_from_named(node, source, "union"),
         "enum_specifier" => symbol_from_named(node, source, "enum"),
-        _ => None,
+        "declaration" => symbols_from_declaration(node, source),
+        _ => Vec::new(),
     }
 }
 
-fn symbol_from_named(node: &Node, source: &[u8], kind: &str) -> Option<ExtractedSymbol> {
-    let name_node = node.child_by_field_name("name")?;
-    let name = name_node.utf8_text(source).ok()?.to_string();
+fn symbol_from_named(node: &Node, source: &[u8], kind: &str) -> Vec<ExtractedSymbol> {
+    let name_node = match node.child_by_field_name("name") {
+        Some(name) => name,
+        None => return Vec::new(),
+    };
 
-    Some(ExtractedSymbol {
+    let name = match name_node.utf8_text(source) {
+        Ok(text) => text.to_string(),
+        Err(_) => return Vec::new(),
+    };
+
+    vec![ExtractedSymbol {
         name,
         kind: kind.to_string(),
         namespace: None,
-    })
+    }]
+}
+
+fn symbols_from_declaration(node: &Node, source: &[u8]) -> Vec<ExtractedSymbol> {
+    if is_typedef(node, source) {
+        return Vec::new();
+    }
+
+    let mut vars = Vec::new();
+    let mut cursor = node.walk();
+
+    for child in node.children(&mut cursor) {
+        match child.kind() {
+            "init_declarator" => {
+                let declarator = child.child_by_field_name("declarator").unwrap_or(child);
+                if declarator.kind() == "function_declarator" {
+                    continue;
+                }
+                if let Some(name) = identifier_from_declarator(&declarator, source) {
+                    vars.push(ExtractedSymbol {
+                        name,
+                        kind: "var".to_string(),
+                        namespace: None,
+                    });
+                }
+            }
+            "identifier" => {
+                if let Some(parent) = child.parent() {
+                    if parent.kind() == "init_declarator" {
+                        continue;
+                    }
+                }
+                if let Ok(text) = child.utf8_text(source) {
+                    vars.push(ExtractedSymbol {
+                        name: text.to_string(),
+                        kind: "var".to_string(),
+                        namespace: None,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    vars
+}
+
+fn is_typedef(node: &Node, source: &[u8]) -> bool {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "storage_class_specifier" {
+            if let Ok(text) = child.utf8_text(source) {
+                if text.trim() == "typedef" {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 fn identifier_from_declarator(node: &Node, source: &[u8]) -> Option<String> {
@@ -82,7 +150,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn extracts_functions_and_types() {
+    fn extracts_functions_types_and_variables() {
         let source = r#"
             struct Foo {
                 int value;
@@ -93,12 +161,16 @@ mod tests {
                 B,
             };
 
+            int counter = 0;
+
             static int helper(void) {
-                return 1;
+                int local = 3;
+                return local;
             }
 
             int run(struct Foo foo) {
-                return helper();
+                int result = helper();
+                return result;
             }
         "#;
 
@@ -111,5 +183,15 @@ mod tests {
         assert!(symbols.iter().any(|s| s.name == "Bar" && s.kind == "enum"));
         assert!(symbols.iter().any(|s| s.name == "helper" && s.kind == "fn"));
         assert!(symbols.iter().any(|s| s.name == "run" && s.kind == "fn"));
+
+        let var_names: Vec<_> = symbols
+            .iter()
+            .filter(|s| s.kind == "var")
+            .map(|s| s.name.as_str())
+            .collect();
+
+        assert!(var_names.contains(&"counter"));
+        assert!(var_names.contains(&"local"));
+        assert!(var_names.contains(&"result"));
     }
 }

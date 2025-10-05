@@ -20,9 +20,8 @@ pub fn extract(source: &str) -> Vec<ExtractedSymbol> {
     let mut symbols = Vec::new();
 
     while let Some(node) = stack.pop() {
-        if let Some(symbol) = extract_symbol(&node, source_bytes, package.as_deref()) {
-            symbols.push(symbol);
-        }
+        let mut extracted = collect_symbols(&node, source_bytes, package.as_deref());
+        symbols.append(&mut extracted);
 
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
@@ -33,18 +32,19 @@ pub fn extract(source: &str) -> Vec<ExtractedSymbol> {
     symbols
 }
 
-fn extract_symbol(node: &Node, source: &[u8], package: Option<&str>) -> Option<ExtractedSymbol> {
+fn collect_symbols(node: &Node, source: &[u8], package: Option<&str>) -> Vec<ExtractedSymbol> {
     match node.kind() {
         "class_declaration" => symbol_from_named(node, source, "class", package),
         "interface_declaration" => symbol_from_named(node, source, "interface", package),
         "enum_declaration" => symbol_from_named(node, source, "enum", package),
         "record_declaration" => symbol_from_named(node, source, "record", package),
         "annotation_type_declaration" => symbol_from_named(node, source, "annotation", package),
-        "method_declaration" => symbol_from_named_if_public(node, source, "method", package),
-        "constructor_declaration" => {
-            symbol_from_named_if_public(node, source, "constructor", package)
+        "method_declaration" => symbol_from_named(node, source, "method", package),
+        "constructor_declaration" => symbol_from_named(node, source, "constructor", package),
+        "field_declaration" | "local_variable_declaration" => {
+            symbols_from_variable_declaration(node, source, package)
         }
-        _ => None,
+        _ => Vec::new(),
     }
 }
 
@@ -53,49 +53,48 @@ fn symbol_from_named(
     source: &[u8],
     kind: &str,
     package: Option<&str>,
-) -> Option<ExtractedSymbol> {
-    let name_node = node.child_by_field_name("name")?;
-    let name = name_node.utf8_text(source).ok()?.to_string();
+) -> Vec<ExtractedSymbol> {
+    let name_node = match node.child_by_field_name("name") {
+        Some(name) => name,
+        None => return Vec::new(),
+    };
+    let name = match name_node.utf8_text(source) {
+        Ok(text) => text.to_string(),
+        Err(_) => return Vec::new(),
+    };
     let namespace = namespace_for_node(node, source, package);
 
-    Some(ExtractedSymbol {
+    vec![ExtractedSymbol {
         name,
         kind: kind.to_string(),
         namespace,
-    })
+    }]
 }
 
-fn symbol_from_named_if_public(
+fn symbols_from_variable_declaration(
     node: &Node,
     source: &[u8],
-    kind: &str,
     package: Option<&str>,
-) -> Option<ExtractedSymbol> {
-    let name_node = node.child_by_field_name("name")?;
-    if !has_public_modifier(node, &name_node, source) {
-        return None;
+) -> Vec<ExtractedSymbol> {
+    let namespace = variable_namespace(node, source, package);
+    let mut vars = Vec::new();
+    let mut cursor = node.walk();
+
+    for child in node.children(&mut cursor) {
+        if child.kind() == "variable_declarator" {
+            if let Some(name_node) = child.child_by_field_name("name") {
+                if let Ok(text) = name_node.utf8_text(source) {
+                    vars.push(ExtractedSymbol {
+                        name: text.to_string(),
+                        kind: "var".to_string(),
+                        namespace: namespace.clone(),
+                    });
+                }
+            }
+        }
     }
 
-    let name = name_node.utf8_text(source).ok()?.to_string();
-    let namespace = namespace_for_node(node, source, package);
-
-    Some(ExtractedSymbol {
-        name,
-        kind: kind.to_string(),
-        namespace,
-    })
-}
-
-fn has_public_modifier(node: &Node, name_node: &Node, source: &[u8]) -> bool {
-    let start = node.start_byte();
-    let end = name_node.start_byte();
-    if start >= end || end > source.len() {
-        return false;
-    }
-
-    std::str::from_utf8(&source[start..end])
-        .map(|text| text.contains("public"))
-        .unwrap_or(false)
+    vars
 }
 
 fn package_name(root: &Node, source: &[u8]) -> Option<String> {
@@ -152,25 +151,79 @@ fn namespace_for_node(node: &Node, source: &[u8], package: Option<&str>) -> Opti
     }
 }
 
+fn variable_namespace(node: &Node, source: &[u8], package: Option<&str>) -> Option<String> {
+    let mut scopes = Vec::new();
+    let mut current = node.parent();
+
+    while let Some(parent) = current {
+        match parent.kind() {
+            "method_declaration" | "constructor_declaration" => {
+                if let Some(name_node) = parent.child_by_field_name("name") {
+                    if let Ok(text) = name_node.utf8_text(source) {
+                        scopes.push(text.to_string());
+                    }
+                }
+            }
+            "class_declaration"
+            | "interface_declaration"
+            | "enum_declaration"
+            | "record_declaration"
+            | "annotation_type_declaration" => {
+                if let Some(name_node) = parent.child_by_field_name("name") {
+                    if let Ok(text) = name_node.utf8_text(source) {
+                        scopes.push(text.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+        current = parent.parent();
+    }
+
+    let mut segments = Vec::new();
+    if let Some(pkg) = package {
+        segments.push(pkg.to_string());
+    }
+
+    if scopes.is_empty() {
+        return if segments.is_empty() {
+            None
+        } else {
+            Some(segments.join("."))
+        };
+    }
+
+    scopes.reverse();
+    segments.extend(scopes);
+
+    Some(segments.join("."))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn extracts_public_symbols() {
+    fn extracts_public_symbols_and_variables() {
         let source = r#"
             package com.example.demo;
 
             public class Foo {
                 private int value;
 
-                public Foo() {}
+                public Foo() {
+                    int created = 1;
+                }
 
-                public void doThing() {}
+                public void doThing() {
+                    int counter = 0;
+                }
 
                 void hidden() {}
 
-                public static class Nested {}
+                public static class Nested {
+                    int nestedField = 3;
+                }
             }
 
             interface Bar {}
@@ -185,15 +238,30 @@ mod tests {
         assert!(symbols.iter().any(|s| s.name == "Bar"
             && s.kind == "interface"
             && s.namespace.as_deref() == Some("com.example.demo")));
-        assert!(symbols
-            .iter()
-            .any(|s| s.name == "Foo" && s.kind == "constructor"));
+        assert!(symbols.iter().any(|s| s.name == "Foo"
+            && s.kind == "constructor"
+            && s.namespace.as_deref() == Some("com.example.demo.Foo")));
         assert!(symbols.iter().any(|s| s.name == "doThing"
             && s.kind == "method"
             && s.namespace.as_deref() == Some("com.example.demo.Foo")));
         assert!(symbols.iter().any(|s| s.name == "Nested"
             && s.kind == "class"
             && s.namespace.as_deref() == Some("com.example.demo.Foo")));
-        assert!(symbols.iter().all(|s| s.name != "hidden"));
+        assert!(symbols.iter().any(|s| {
+            s.name == "hidden"
+                && s.kind == "method"
+                && s.namespace.as_deref() == Some("com.example.demo.Foo")
+        }));
+
+        let vars: Vec<_> = symbols
+            .iter()
+            .filter(|s| s.kind == "var")
+            .map(|s| (s.name.as_str(), s.namespace.as_deref()))
+            .collect();
+
+        assert!(vars.contains(&("value", Some("com.example.demo.Foo"))));
+        assert!(vars.contains(&("counter", Some("com.example.demo.Foo.doThing"))));
+        assert!(vars.contains(&("created", Some("com.example.demo.Foo.Foo"))));
+        assert!(vars.contains(&("nestedField", Some("com.example.demo.Foo.Nested"))));
     }
 }

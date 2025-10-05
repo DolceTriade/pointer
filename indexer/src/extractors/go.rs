@@ -20,9 +20,8 @@ pub fn extract(source: &str) -> Vec<ExtractedSymbol> {
     let mut symbols = Vec::new();
 
     while let Some(node) = stack.pop() {
-        if let Some(symbol) = extract_symbol(&node, source_bytes, package.as_deref()) {
-            symbols.push(symbol);
-        }
+        let mut extracted = collect_symbols(&node, source_bytes, package.as_deref());
+        symbols.append(&mut extracted);
 
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
@@ -33,20 +32,15 @@ pub fn extract(source: &str) -> Vec<ExtractedSymbol> {
     symbols
 }
 
-fn extract_symbol(node: &Node, source: &[u8], package: Option<&str>) -> Option<ExtractedSymbol> {
+fn collect_symbols(node: &Node, source: &[u8], package: Option<&str>) -> Vec<ExtractedSymbol> {
     match node.kind() {
         "function_declaration" => symbol_from_named(node, source, "fn", package),
-        "method_declaration" => {
-            let mut symbol = symbol_from_named(node, source, "method", package)?;
-            if let Some(receiver) = node.child_by_field_name("receiver") {
-                if let Some(receiver_type) = receiver_type(&receiver, source) {
-                    symbol.namespace = merge_namespaces(package, Some(&receiver_type));
-                }
-            }
-            Some(symbol)
-        }
+        "method_declaration" => symbols_from_method(node, source, package),
         "type_spec" => symbol_from_named(node, source, "type", package),
-        _ => None,
+        "short_var_declaration" => symbols_from_short_var(node, source, package),
+        "var_spec" => symbols_from_spec(node, source, package, "var"),
+        "const_spec" => symbols_from_spec(node, source, package, "const"),
+        _ => Vec::new(),
     }
 }
 
@@ -55,15 +49,96 @@ fn symbol_from_named(
     source: &[u8],
     kind: &str,
     package: Option<&str>,
-) -> Option<ExtractedSymbol> {
-    let name_node = node.child_by_field_name("name")?;
-    let name = name_node.utf8_text(source).ok()?.to_string();
+) -> Vec<ExtractedSymbol> {
+    let name_node = match node.child_by_field_name("name") {
+        Some(name) => name,
+        None => return Vec::new(),
+    };
+    let name = match name_node.utf8_text(source) {
+        Ok(text) => text.to_string(),
+        Err(_) => return Vec::new(),
+    };
 
-    Some(ExtractedSymbol {
+    vec![ExtractedSymbol {
         name,
         kind: kind.to_string(),
         namespace: package.map(|pkg| pkg.to_string()),
-    })
+    }]
+}
+
+fn symbols_from_method(node: &Node, source: &[u8], package: Option<&str>) -> Vec<ExtractedSymbol> {
+    let mut symbol = symbol_from_named(node, source, "method", package);
+    if let Some(receiver) = node.child_by_field_name("receiver") {
+        if let Some(receiver_type) = receiver_type(&receiver, source) {
+            if let Some(method) = symbol.first_mut() {
+                method.namespace = merge_namespaces(package, Some(&receiver_type));
+            }
+        }
+    }
+    symbol
+}
+
+fn symbols_from_short_var(
+    node: &Node,
+    source: &[u8],
+    package: Option<&str>,
+) -> Vec<ExtractedSymbol> {
+    let namespace = go_namespace(node, source, package);
+    let mut vars = Vec::new();
+    if let Some(left) = node.child_by_field_name("left") {
+        let mut cursor = left.walk();
+        for child in left.children(&mut cursor) {
+            if child.kind() == "identifier" {
+                if let Ok(name) = child.utf8_text(source) {
+                    vars.push(ExtractedSymbol {
+                        name: name.to_string(),
+                        kind: "var".to_string(),
+                        namespace: namespace.clone(),
+                    });
+                }
+            }
+        }
+    }
+    vars
+}
+
+fn symbols_from_spec(
+    node: &Node,
+    source: &[u8],
+    package: Option<&str>,
+    kind: &str,
+) -> Vec<ExtractedSymbol> {
+    let namespace = go_namespace(node, source, package);
+    let mut vars = Vec::new();
+    if let Some(names_node) = node.child_by_field_name("name") {
+        match names_node.kind() {
+            "identifier_list" => {
+                let mut list_cursor = names_node.walk();
+                for ident in names_node.children(&mut list_cursor) {
+                    if ident.kind() == "identifier" {
+                        if let Ok(name) = ident.utf8_text(source) {
+                            vars.push(ExtractedSymbol {
+                                name: name.to_string(),
+                                kind: kind.to_string(),
+                                namespace: namespace.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+            "identifier" => {
+                if let Ok(name) = names_node.utf8_text(source) {
+                    vars.push(ExtractedSymbol {
+                        name: name.to_string(),
+                        kind: kind.to_string(),
+                        namespace: namespace.clone(),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    vars
 }
 
 fn receiver_type(node: &Node, source: &[u8]) -> Option<String> {
@@ -106,21 +181,56 @@ fn package_name(root: &Node, source: &[u8]) -> Option<String> {
     None
 }
 
+fn go_namespace(node: &Node, source: &[u8], package: Option<&str>) -> Option<String> {
+    let mut scopes = Vec::new();
+    let mut current = node.parent();
+    while let Some(parent) = current {
+        match parent.kind() {
+            "function_declaration" | "method_declaration" => {
+                if let Some(name_node) = parent.child_by_field_name("name") {
+                    if let Ok(text) = name_node.utf8_text(source) {
+                        scopes.push(text.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+        current = parent.parent();
+    }
+
+    scopes.reverse();
+
+    match (package, scopes.is_empty()) {
+        (Some(pkg), true) => Some(pkg.to_string()),
+        (Some(pkg), false) => Some(format!("{}.{}", pkg, scopes.join("."))),
+        (None, true) => None,
+        (None, false) => Some(scopes.join(".")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn extracts_go_symbols() {
+    fn extracts_go_symbols_and_variables() {
         let source = r#"
             package demo
 
-            type Foo struct {}
+            var top = 1
+
+            type Foo struct {
+                Value int
+            }
             type Bar interface {}
 
-            func helper() {}
+            func helper() {
+                local := 3
+            }
 
-            func (f *Foo) Method() {}
+            func (f *Foo) Method() {
+                var counter int
+            }
         "#;
 
         let mut symbols = extract(source);
@@ -136,5 +246,15 @@ mod tests {
         assert!(symbols.iter().any(|s| s.name == "Method"
             && s.kind == "method"
             && s.namespace.as_deref() == Some("demo.*Foo")));
+
+        let vars: Vec<_> = symbols
+            .iter()
+            .filter(|s| s.kind == "var" || s.kind == "const")
+            .map(|s| (s.name.as_str(), s.namespace.as_deref()))
+            .collect();
+
+        assert!(vars.contains(&("top", Some("demo"))));
+        assert!(vars.contains(&("local", Some("demo.helper"))));
+        assert!(vars.contains(&("counter", Some("demo.Method"))));
     }
 }

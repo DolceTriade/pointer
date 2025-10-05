@@ -19,9 +19,8 @@ pub fn extract(source: &str) -> Vec<ExtractedSymbol> {
     let mut symbols = Vec::new();
 
     while let Some(node) = stack.pop() {
-        if let Some(symbol) = extract_symbol(&node, source_bytes) {
-            symbols.push(symbol);
-        }
+        let mut extracted = collect_symbols(&node, source_bytes);
+        symbols.append(&mut extracted);
 
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
@@ -32,28 +31,71 @@ pub fn extract(source: &str) -> Vec<ExtractedSymbol> {
     symbols
 }
 
-fn extract_symbol(node: &Node, source: &[u8]) -> Option<ExtractedSymbol> {
+fn collect_symbols(node: &Node, source: &[u8]) -> Vec<ExtractedSymbol> {
     match node.kind() {
         "class_definition" => symbol_from_named(node, source, "class"),
-        "function_definition" => {
+        "function_definition" | "async_function_definition" => {
             let kind = function_kind(node, source);
             symbol_from_named(node, source, kind)
         }
-        "async_function_definition" => symbol_from_named(node, source, "async_fn"),
-        _ => None,
+        "assignment" => symbols_from_assignment(node, source),
+        _ => Vec::new(),
     }
 }
 
-fn symbol_from_named(node: &Node, source: &[u8], kind: &str) -> Option<ExtractedSymbol> {
-    let name_node = node.child_by_field_name("name")?;
-    let name = name_node.utf8_text(source).ok()?.to_string();
+fn symbol_from_named(node: &Node, source: &[u8], kind: &str) -> Vec<ExtractedSymbol> {
+    let name_node = match node.child_by_field_name("name") {
+        Some(name) => name,
+        None => return Vec::new(),
+    };
+    let name = match name_node.utf8_text(source) {
+        Ok(text) => text.to_string(),
+        Err(_) => return Vec::new(),
+    };
     let namespace = namespace_for_node(node, source);
 
-    Some(ExtractedSymbol {
+    vec![ExtractedSymbol {
         name,
         kind: kind.to_string(),
         namespace,
-    })
+    }]
+}
+
+fn symbols_from_assignment(node: &Node, source: &[u8]) -> Vec<ExtractedSymbol> {
+    let namespace = namespace_for_node(node, source);
+    let mut vars = Vec::new();
+
+    if let Some(left) = node.child_by_field_name("left") {
+        collect_targets(&left, source, namespace, &mut vars);
+    }
+
+    vars
+}
+
+fn collect_targets(
+    node: &Node,
+    source: &[u8],
+    namespace: Option<String>,
+    out: &mut Vec<ExtractedSymbol>,
+) {
+    match node.kind() {
+        "identifier" => {
+            if let Ok(name) = node.utf8_text(source) {
+                out.push(ExtractedSymbol {
+                    name: name.to_string(),
+                    kind: "var".to_string(),
+                    namespace: namespace.clone(),
+                });
+            }
+        }
+        "tuple" | "list" | "pattern_list" | "parenthesized_expression" => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                collect_targets(&child, source, namespace.clone(), out);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn namespace_for_node(node: &Node, source: &[u8]) -> Option<String> {
@@ -82,25 +124,19 @@ fn namespace_for_node(node: &Node, source: &[u8]) -> Option<String> {
     }
 }
 
-fn function_kind(node: &Node, source: &[u8]) -> &'static str {
+fn function_kind<'a>(node: &'a Node, source: &[u8]) -> &'static str {
     if let Some(name_node) = node.child_by_field_name("name") {
-        if is_async(node, &name_node, source) {
-            return "async_fn";
+        let start = node.start_byte();
+        let end = name_node.start_byte();
+        if start < end && end <= source.len() {
+            if let Ok(text) = std::str::from_utf8(&source[start..end]) {
+                if text.contains("async") {
+                    return "async_fn";
+                }
+            }
         }
     }
     "fn"
-}
-
-fn is_async(node: &Node, name_node: &Node, source: &[u8]) -> bool {
-    let start = node.start_byte();
-    let end = name_node.start_byte();
-    if start >= end || end > source.len() {
-        return false;
-    }
-
-    std::str::from_utf8(&source[start..end])
-        .map(|text| text.contains("async"))
-        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -108,7 +144,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn extracts_python_symbols() {
+    fn extracts_python_symbols_and_variables() {
         let source = r#"
             class Outer:
                 class Inner:
@@ -117,11 +153,16 @@ mod tests {
 
                 def method(self):
                     def helper():
-                        return 42
-                    return helper()
+                        value = 42
+                        return value
+                    count = helper()
+                    return count
 
             def top_level():
-                return None
+                answer = None
+                return answer
+
+            env = "prod"
         "#;
 
         let mut symbols = extract(source);
@@ -145,5 +186,16 @@ mod tests {
         assert!(symbols
             .iter()
             .any(|s| s.name == "top_level" && s.kind == "fn" && s.namespace.is_none()));
+
+        let vars: Vec<_> = symbols
+            .iter()
+            .filter(|s| s.kind == "var")
+            .map(|s| (s.name.as_str(), s.namespace.as_deref()))
+            .collect();
+
+        assert!(vars.contains(&("value", Some("Outer.method.helper"))));
+        assert!(vars.contains(&("count", Some("Outer.method"))));
+        assert!(vars.contains(&("answer", Some("top_level"))));
+        assert!(vars.contains(&("env", None)));
     }
 }
