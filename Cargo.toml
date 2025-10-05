@@ -1,3 +1,7 @@
+[workspace]
+members = ["indexer"]
+resolver = "2"
+
 [package]
 name = "pointer"
 version = "0.1.0"
@@ -96,7 +100,7 @@ lib-features = ["hydrate"]
 # Optional. Defaults to false.
 lib-default-features = false
 
-# The profile to use for the lib target when compiling for release
+# The profile to use when compiling the lib target when compiling for release
 #
 # Optional. Defaults to "release".
 lib-profile-release = "wasm-release"

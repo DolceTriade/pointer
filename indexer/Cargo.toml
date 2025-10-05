@@ -1,0 +1,29 @@
+[package]
+name = "pointer-indexer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4.5", features = ["derive", "env"] }
+git2 = "0.18"
+hex = "0.4"
+ignore = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tree-sitter = "0.25"
+tree-sitter-c = "0.21"
+tree-sitter-cpp = "0.22"
+tree-sitter-go = "0.21"
+tree-sitter-java = "0.21"
+tree-sitter-nix = "0.0.2"
+tree-sitter-proto = "0.3"
+tree-sitter-python = "0.21"
+tree-sitter-rust = "0.21"
+tree-sitter-typescript = "0.21.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[dev-dependencies]
+pretty_assertions = "1"
