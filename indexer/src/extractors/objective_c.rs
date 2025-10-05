@@ -191,6 +191,21 @@ fn symbols_from_declaration(node: &Node, source: &[u8]) -> Vec<ExtractedSymbol> 
                     namespace: namespace_for_node(node, source),
                 });
             }
+        } else if matches!(
+            child.kind(),
+            "declarator"
+                | "pointer_declarator"
+                | "reference_declarator"
+                | "abstract_declarator"
+                | "identifier"
+        ) {
+            if let Some(name) = identifier_from_declarator(&child, source) {
+                results.push(ExtractedSymbol {
+                    name,
+                    kind: "var".to_string(),
+                    namespace: namespace_for_node(node, source),
+                });
+            }
         }
     }
 
@@ -266,6 +281,7 @@ mod tests {
     #[test]
     fn extracts_objective_c_symbols() {
         let source = r#"
+            int solovar;
             @interface Demo : NSObject {
                 int _count;
             }
@@ -276,11 +292,13 @@ mod tests {
             @implementation Demo
             - (void)doThing {
                 int local = 0;
+                int temp;
             }
             @end
 
             void Helper(void) {
                 int global = 1;
+                int global_no_init;
             }
         "#;
 
@@ -311,6 +329,9 @@ mod tests {
             .map(|s| (s.name.as_str(), s.namespace.as_deref()))
             .collect();
         assert!(vars.contains(&("local", Some("Demo.doThing"))));
+        assert!(vars.contains(&("temp", Some("Demo.doThing"))));
         assert!(vars.contains(&("global", Some("Helper"))));
+        assert!(vars.contains(&("global_no_init", Some("Helper"))));
+        assert!(vars.contains(&("solovar", None)));
     }
 }

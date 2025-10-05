@@ -152,6 +152,7 @@ mod tests {
     #[test]
     fn extracts_functions_types_and_variables() {
         let source = r#"
+            customType uninitialized;
             struct Foo {
                 int value;
             };
@@ -193,5 +194,6 @@ mod tests {
         assert!(var_names.contains(&"counter"));
         assert!(var_names.contains(&"local"));
         assert!(var_names.contains(&"result"));
+        assert!(var_names.contains(&"uninitialized"));
     }
 }

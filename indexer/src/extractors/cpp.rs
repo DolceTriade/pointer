@@ -103,6 +103,18 @@ fn symbols_from_simple_declaration(node: &Node, source: &[u8]) -> Vec<ExtractedS
                     });
                 }
             }
+            "declarator" | "pointer_declarator" | "reference_declarator" => {
+                if child.kind() == "function_declarator" {
+                    continue;
+                }
+                if let Some(name) = identifier_from_declarator(&child, source) {
+                    vars.push(ExtractedSymbol {
+                        name,
+                        kind: "var".to_string(),
+                        namespace: namespace_for_node(node, source),
+                    });
+                }
+            }
             _ => {}
         }
     }
@@ -195,7 +207,9 @@ mod tests {
     #[test]
     fn extracts_cpp_symbols_and_variables() {
         let source = r#"
+            cvar_t *r_maxPolyVerts;
             namespace foo {
+                int foo_global = 2;
                 class Bar {
                 public:
                     int value;
@@ -236,8 +250,9 @@ mod tests {
             .filter(|s| s.kind == "var")
             .map(|s| (s.name.as_str(), s.namespace.as_deref()))
             .collect();
-
         assert!(var_names.contains(&("counter", Some("foo"))));
+        assert!(var_names.contains(&("r_maxPolyVerts", None)));
+        assert!(var_names.contains(&("foo_global", Some("foo"))));
         assert!(var_names.iter().any(|(name, _)| *name == "local"));
         assert!(var_names.iter().any(|(name, _)| *name == "result"));
     }
