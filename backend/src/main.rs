@@ -1,22 +1,24 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
 use axum::{
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
 use clap::Parser;
 use pointer_indexer::models::{
     ContentBlob, FilePointer, IndexReport, ReferenceRecord, SymbolRecord,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
-use sqlx::{PgPool, QueryBuilder};
+use sqlx::{PgPool, Postgres, QueryBuilder, Transaction};
 use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio::signal;
@@ -93,6 +95,26 @@ impl IntoResponse for AppError {
 
 type ApiResult<T> = std::result::Result<T, AppError>;
 
+#[derive(Debug, Deserialize)]
+struct ChunkPayload {
+    upload_id: String,
+    chunk_index: i32,
+    total_chunks: i32,
+    data: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct FinalizePayload {
+    upload_id: String,
+}
+
+#[derive(sqlx::FromRow)]
+struct UploadChunkRow {
+    chunk_index: i32,
+    total_chunks: i32,
+    data: Vec<u8>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
@@ -122,9 +144,12 @@ async fn main() -> Result<()> {
 
     let app = Router::new()
         .route("/api/v1/index", post(ingest_index))
+        .route("/api/v1/index/chunk", post(ingest_chunk))
+        .route("/api/v1/index/finalize", post(finalize_upload))
         .route("/api/v1/search", post(search_symbols))
         .route("/healthz", get(health_check))
-        .with_state(state);
+        .with_state(state)
+        .layer(DefaultBodyLimit::max(64 * 1024 * 1024));
 
     let listener = TcpListener::bind(bind_addr)
         .await
@@ -168,6 +193,106 @@ async fn shutdown_signal() {
     info!("shutdown signal received");
 }
 
+async fn ingest_chunk(
+    State(state): State<AppState>,
+    Json(payload): Json<ChunkPayload>,
+) -> ApiResult<StatusCode> {
+    if payload.chunk_index < 0
+        || payload.total_chunks <= 0
+        || payload.chunk_index >= payload.total_chunks
+    {
+        return Err(AppError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid chunk metadata",
+        ));
+    }
+
+    let decoded = BASE64.decode(payload.data.as_bytes()).map_err(|err| {
+        AppError::new(
+            StatusCode::BAD_REQUEST,
+            format!("invalid base64 data: {err}"),
+        )
+    })?;
+
+    sqlx::query(
+        "INSERT INTO upload_chunks (upload_id, chunk_index, total_chunks, data)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (upload_id, chunk_index) DO UPDATE
+         SET total_chunks = EXCLUDED.total_chunks, data = EXCLUDED.data",
+    )
+    .bind(&payload.upload_id)
+    .bind(payload.chunk_index)
+    .bind(payload.total_chunks)
+    .bind(decoded)
+    .execute(&state.pool)
+    .await
+    .map_err(ApiErrorKind::from)?;
+
+    Ok(StatusCode::ACCEPTED)
+}
+
+async fn finalize_upload(
+    State(state): State<AppState>,
+    Json(payload): Json<FinalizePayload>,
+) -> ApiResult<StatusCode> {
+    let rows: Vec<UploadChunkRow> = sqlx::query_as(
+        "SELECT chunk_index, total_chunks, data FROM upload_chunks WHERE upload_id = $1 ORDER BY chunk_index",
+    )
+    .bind(&payload.upload_id)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(ApiErrorKind::from)?;
+
+    if rows.is_empty() {
+        return Err(AppError::new(
+            StatusCode::BAD_REQUEST,
+            "no chunks uploaded for the provided id",
+        ));
+    }
+
+    let expected_total = rows[0].total_chunks;
+    if expected_total <= 0 {
+        return Err(AppError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid total chunk count",
+        ));
+    }
+
+    if rows.len() != expected_total as usize {
+        return Err(AppError::new(
+            StatusCode::BAD_REQUEST,
+            "missing chunks for upload",
+        ));
+    }
+
+    for (index, row) in rows.iter().enumerate() {
+        if row.chunk_index != index as i32 || row.total_chunks != expected_total {
+            return Err(AppError::new(
+                StatusCode::BAD_REQUEST,
+                "inconsistent chunk metadata",
+            ));
+        }
+    }
+
+    let mut combined = Vec::with_capacity(rows.iter().map(|row| row.data.len()).sum());
+    for row in rows {
+        combined.extend_from_slice(&row.data);
+    }
+
+    let mut decoder = Decoder::new(Cursor::new(combined)).map_err(ApiErrorKind::Compression)?;
+    let report: IndexReport = serde_json::from_reader(&mut decoder).map_err(ApiErrorKind::Serde)?;
+
+    ingest_report(&state.pool, report).await?;
+
+    sqlx::query("DELETE FROM upload_chunks WHERE upload_id = $1")
+        .bind(&payload.upload_id)
+        .execute(&state.pool)
+        .await
+        .map_err(ApiErrorKind::from)?;
+
+    Ok(StatusCode::CREATED)
+}
+
 async fn ingest_index(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -196,102 +321,190 @@ async fn ingest_index(
 async fn ingest_report(pool: &PgPool, report: IndexReport) -> Result<(), ApiErrorKind> {
     let mut tx = pool.begin().await.map_err(ApiErrorKind::from)?;
 
-    for ContentBlob {
-        hash,
-        language,
-        byte_len,
-        line_count,
-    } in report.content_blobs
-    {
-        sqlx::query(
-            "INSERT INTO content_blobs (hash, language, byte_len, line_count)
-             VALUES ($1, $2, $3, $4)
-             ON CONFLICT (hash) DO UPDATE SET language = EXCLUDED.language, byte_len = EXCLUDED.byte_len, line_count = EXCLUDED.line_count",
-        )
-        .bind(&hash)
-        .bind(&language)
-        .bind(byte_len)
-        .bind(line_count)
-        .execute(&mut *tx)
-        .await
-        .map_err(ApiErrorKind::from)?;
-    }
-
-    for FilePointer {
-        repository,
-        commit_sha,
-        file_path,
-        content_hash,
-    } in report.file_pointers
-    {
-        sqlx::query(
-            "INSERT INTO files (repository, commit_sha, file_path, content_hash)
-             VALUES ($1, $2, $3, $4)
-             ON CONFLICT (repository, commit_sha, file_path) DO UPDATE SET content_hash = EXCLUDED.content_hash",
-        )
-        .bind(&repository)
-        .bind(&commit_sha)
-        .bind(&file_path)
-        .bind(&content_hash)
-        .execute(&mut *tx)
-        .await
-        .map_err(ApiErrorKind::from)?;
-    }
-
-    for SymbolRecord {
-        content_hash,
-        namespace,
-        symbol,
-        fully_qualified,
-        kind,
-    } in report.symbol_records
-    {
-        sqlx::query(
-            "INSERT INTO symbols (content_hash, namespace, symbol, fully_qualified, kind)
-             VALUES ($1, $2, $3, $4, $5)
-             ON CONFLICT (content_hash, namespace, symbol, kind) DO UPDATE SET fully_qualified = EXCLUDED.fully_qualified",
-        )
-        .bind(&content_hash)
-        .bind(&namespace)
-        .bind(&symbol)
-        .bind(&fully_qualified)
-        .bind(&kind)
-        .execute(&mut *tx)
-        .await
-        .map_err(ApiErrorKind::from)?;
-    }
-
-    for ReferenceRecord {
-        content_hash,
-        namespace,
-        name,
-        fully_qualified,
-        kind,
-        line,
-        column,
-    } in report.reference_records
-    {
-        let line: i32 = line.try_into().unwrap_or(i32::MAX);
-        let column: i32 = column.try_into().unwrap_or(i32::MAX);
-        sqlx::query(
-            "INSERT INTO symbol_references (content_hash, namespace, name, fully_qualified, kind, line_number, column_number)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
-             ON CONFLICT (content_hash, namespace, name, line_number, column_number, kind)
-             DO NOTHING",
-        )
-        .bind(&content_hash)
-        .bind(&namespace)
-        .bind(&name)
-        .bind(&fully_qualified)
-        .bind(&kind)
-        .bind(line)
-        .bind(column)
-        .execute(&mut *tx)
-        .await
-        .map_err(ApiErrorKind::from)?;
-    }
+    insert_content_blobs(&mut tx, &report.content_blobs).await?;
+    insert_file_pointers(&mut tx, &report.file_pointers).await?;
+    insert_symbol_records(&mut tx, &report.symbol_records).await?;
+    insert_reference_records(&mut tx, &report.reference_records).await?;
 
     tx.commit().await.map_err(ApiErrorKind::from)?;
+
+    Ok(())
+}
+
+const INSERT_BATCH_SIZE: usize = 1000;
+
+fn dedup_by_key<'a, T, K, F>(items: &'a [T], mut key: F) -> Vec<&'a T>
+where
+    K: Eq + std::hash::Hash,
+    F: FnMut(&'a T) -> K,
+{
+    let mut seen = HashSet::new();
+    let mut deduped = Vec::with_capacity(items.len());
+
+    for item in items {
+        if seen.insert(key(item)) {
+            deduped.push(item);
+        }
+    }
+
+    deduped
+}
+
+async fn insert_content_blobs(
+    tx: &mut Transaction<'_, Postgres>,
+    blobs: &[ContentBlob],
+) -> Result<(), ApiErrorKind> {
+    if blobs.is_empty() {
+        return Ok(());
+    }
+
+    let deduped = dedup_by_key(blobs, |blob| blob.hash.clone());
+
+    for chunk in deduped.chunks(INSERT_BATCH_SIZE) {
+        let mut qb =
+            QueryBuilder::new("INSERT INTO content_blobs (hash, language, byte_len, line_count) ");
+        qb.push_values(chunk.iter().copied(), |mut b, blob| {
+            b.push_bind(&blob.hash)
+                .push_bind(&blob.language)
+                .push_bind(blob.byte_len)
+                .push_bind(blob.line_count);
+        });
+        qb.push(
+            " ON CONFLICT (hash) DO UPDATE SET language = EXCLUDED.language, byte_len = EXCLUDED.byte_len, line_count = EXCLUDED.line_count",
+        );
+
+        qb.build()
+            .execute(tx.as_mut())
+            .await
+            .map_err(ApiErrorKind::from)?;
+    }
+
+    Ok(())
+}
+
+async fn insert_file_pointers(
+    tx: &mut Transaction<'_, Postgres>,
+    files: &[FilePointer],
+) -> Result<(), ApiErrorKind> {
+    if files.is_empty() {
+        return Ok(());
+    }
+
+    let deduped = dedup_by_key(files, |file| {
+        (
+            file.repository.clone(),
+            file.commit_sha.clone(),
+            file.file_path.clone(),
+        )
+    });
+
+    for chunk in deduped.chunks(INSERT_BATCH_SIZE) {
+        let mut qb = QueryBuilder::new(
+            "INSERT INTO files (repository, commit_sha, file_path, content_hash) ",
+        );
+        qb.push_values(chunk.iter().copied(), |mut b, file| {
+            b.push_bind(&file.repository)
+                .push_bind(&file.commit_sha)
+                .push_bind(&file.file_path)
+                .push_bind(&file.content_hash);
+        });
+        qb.push(
+            " ON CONFLICT (repository, commit_sha, file_path) DO UPDATE SET content_hash = EXCLUDED.content_hash",
+        );
+
+        qb.build()
+            .execute(tx.as_mut())
+            .await
+            .map_err(ApiErrorKind::from)?;
+    }
+
+    Ok(())
+}
+
+async fn insert_symbol_records(
+    tx: &mut Transaction<'_, Postgres>,
+    symbols: &[SymbolRecord],
+) -> Result<(), ApiErrorKind> {
+    if symbols.is_empty() {
+        return Ok(());
+    }
+
+    let deduped = dedup_by_key(symbols, |symbol| {
+        (
+            symbol.content_hash.clone(),
+            symbol.namespace.clone(),
+            symbol.symbol.clone(),
+            symbol.kind.clone(),
+        )
+    });
+
+    for chunk in deduped.chunks(INSERT_BATCH_SIZE) {
+        let mut qb = QueryBuilder::new(
+            "INSERT INTO symbols (content_hash, namespace, symbol, fully_qualified, kind) ",
+        );
+        qb.push_values(chunk.iter().copied(), |mut b, symbol| {
+            b.push_bind(&symbol.content_hash)
+                .push_bind(&symbol.namespace)
+                .push_bind(&symbol.symbol)
+                .push_bind(&symbol.fully_qualified)
+                .push_bind(&symbol.kind);
+        });
+        qb.push(
+            " ON CONFLICT (content_hash, namespace, symbol, kind) DO UPDATE SET fully_qualified = EXCLUDED.fully_qualified",
+        );
+
+        qb.build()
+            .execute(tx.as_mut())
+            .await
+            .map_err(ApiErrorKind::from)?;
+    }
+
+    Ok(())
+}
+
+async fn insert_reference_records(
+    tx: &mut Transaction<'_, Postgres>,
+    references: &[ReferenceRecord],
+) -> Result<(), ApiErrorKind> {
+    if references.is_empty() {
+        return Ok(());
+    }
+
+    let deduped = dedup_by_key(references, |reference| {
+        (
+            reference.content_hash.clone(),
+            reference.namespace.clone(),
+            reference.name.clone(),
+            reference.kind.clone(),
+            reference.line,
+            reference.column,
+        )
+    });
+
+    for chunk in deduped.chunks(INSERT_BATCH_SIZE) {
+        let mut qb = QueryBuilder::new(
+            "INSERT INTO symbol_references (content_hash, namespace, name, fully_qualified, kind, line_number, column_number) ",
+        );
+        qb.push_values(chunk.iter().copied(), |mut b, reference| {
+            let line: i32 = reference.line.try_into().unwrap_or(i32::MAX);
+            let column: i32 = reference.column.try_into().unwrap_or(i32::MAX);
+            b.push_bind(&reference.content_hash)
+                .push_bind(&reference.namespace)
+                .push_bind(&reference.name)
+                .push_bind(&reference.fully_qualified)
+                .push_bind(&reference.kind)
+                .push_bind(line)
+                .push_bind(column);
+        });
+        qb.push(
+            " ON CONFLICT (content_hash, namespace, name, line_number, column_number, kind) DO NOTHING",
+        );
+
+        qb.build()
+            .execute(tx.as_mut())
+            .await
+            .map_err(ApiErrorKind::from)?;
+    }
 
     Ok(())
 }
@@ -350,16 +563,14 @@ struct SymbolRow {
     repository: String,
     commit_sha: String,
     file_path: String,
-    content_hash: String,
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(sqlx::FromRow, Clone)]
 struct ReferenceRow {
-    content_hash: String,
+    fully_qualified: String,
     name: String,
     namespace: Option<String>,
     kind: Option<String>,
-    fully_qualified: String,
     line: i32,
     column: i32,
 }
@@ -370,7 +581,7 @@ async fn search_symbols(
 ) -> ApiResult<Json<SearchResponse>> {
     let mut qb = QueryBuilder::new(
         "SELECT s.symbol, s.namespace, s.kind, s.fully_qualified, cb.language, \
-         f.repository, f.commit_sha, f.file_path, s.content_hash \
+         f.repository, f.commit_sha, f.file_path \
          FROM symbols s \
          JOIN content_blobs cb ON cb.hash = s.content_hash \
          JOIN files f ON f.content_hash = s.content_hash \
@@ -435,21 +646,22 @@ async fn search_symbols(
     let mut reference_map: HashMap<String, Vec<ReferenceRow>> = HashMap::new();
 
     if include_refs {
-        let hashes: Vec<String> = rows.iter().map(|row| row.content_hash.clone()).collect();
-        if !hashes.is_empty() {
+        let fully_qualified: HashSet<String> =
+            rows.iter().map(|row| row.fully_qualified.clone()).collect();
+        if !fully_qualified.is_empty() {
+            let lookup: Vec<String> = fully_qualified.into_iter().collect();
             let ref_rows: Vec<ReferenceRow> = sqlx::query_as(
-                "SELECT content_hash, name, namespace, kind, fully_qualified, line_number AS line, column_number AS column \
-                 FROM symbol_references WHERE content_hash = ANY($1)",
+                "SELECT fully_qualified, name, namespace, kind, line_number AS line, column_number AS column \
+                 FROM symbol_references WHERE fully_qualified = ANY($1)",
             )
-            .bind(&hashes)
+            .bind(&lookup)
             .fetch_all(&state.pool)
             .await
             .map_err(ApiErrorKind::from)?;
 
             for reference in ref_rows {
-                let key = reference.content_hash.clone();
                 reference_map
-                    .entry(key)
+                    .entry(reference.fully_qualified.clone())
                     .or_insert_with(Vec::new)
                     .push(reference);
             }
@@ -460,13 +672,13 @@ async fn search_symbols(
 
     for row in rows {
         let references = if include_refs {
-            reference_map.remove(&row.content_hash).map(|refs| {
-                refs.into_iter()
+            reference_map.get(row.fully_qualified.as_str()).map(|refs| {
+                refs.iter()
                     .map(|r| ReferenceResult {
-                        name: r.name,
-                        namespace: r.namespace,
-                        kind: r.kind,
-                        fully_qualified: r.fully_qualified,
+                        name: r.name.clone(),
+                        namespace: r.namespace.clone(),
+                        kind: r.kind.clone(),
+                        fully_qualified: r.fully_qualified.clone(),
                         line: r.line.max(0) as usize,
                         column: r.column.max(0) as usize,
                     })

@@ -30,6 +30,17 @@ CREATE INDEX IF NOT EXISTS idx_symbols_namespace ON symbols (namespace);
 CREATE INDEX IF NOT EXISTS idx_symbols_kind ON symbols (kind);
 CREATE INDEX IF NOT EXISTS idx_symbols_content_hash ON symbols (content_hash);
 
+CREATE TABLE IF NOT EXISTS upload_chunks (
+    upload_id TEXT NOT NULL,
+    chunk_index INTEGER NOT NULL,
+    total_chunks INTEGER NOT NULL,
+    data BYTEA NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (upload_id, chunk_index)
+);
+
+CREATE INDEX IF NOT EXISTS idx_upload_chunks_upload ON upload_chunks (upload_id);
+
 CREATE TABLE IF NOT EXISTS symbol_references (
     id SERIAL PRIMARY KEY,
     content_hash TEXT NOT NULL REFERENCES content_blobs(hash) ON DELETE CASCADE,

@@ -18,3 +18,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 thiserror = "1"
 dotenvy = "0.15"
 tower-http = { version = "0.4", features = ["trace"] }
+base64 = "0.21"
