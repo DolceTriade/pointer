@@ -50,8 +50,27 @@ fn collect_symbols(node: &Node, source: &[u8]) -> Vec<ExtractedSymbol> {
         "union_specifier" => symbols_from_struct(node, source, "union"),
         "enum_specifier" => symbol_from_named(node, source, "enum"),
         "declaration" => symbols_from_declaration(node, source),
+        "preproc_function_def" => macro_symbol(node, source, true),
+        "preproc_def" => macro_symbol(node, source, false),
         _ => Vec::new(),
     }
+}
+
+fn macro_symbol(node: &Node, source: &[u8], is_function_like: bool) -> Vec<ExtractedSymbol> {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "identifier" {
+            if let Ok(text) = child.utf8_text(source) {
+                return vec![ExtractedSymbol {
+                    name: text.to_string(),
+                    kind: if is_function_like { "fn" } else { "var" }.to_string(),
+                    namespace: None,
+                }];
+            }
+        }
+    }
+
+    Vec::new()
 }
 
 fn symbol_from_named(node: &Node, source: &[u8], kind: &str) -> Vec<ExtractedSymbol> {
