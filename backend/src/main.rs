@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::{Cursor, Read};
+use std::io::Cursor;
 use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
@@ -18,9 +18,9 @@ use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, QueryBuilder};
 use thiserror::Error;
+use tokio::net::TcpListener;
 use tokio::signal;
-use tower_http::trace::TraceLayer;
-use tracing::{error, info};
+use tracing::info;
 use zstd::stream::read::Decoder;
 
 #[derive(Debug, Parser)]
@@ -124,13 +124,15 @@ async fn main() -> Result<()> {
         .route("/api/v1/index", post(ingest_index))
         .route("/api/v1/search", post(search_symbols))
         .route("/healthz", get(health_check))
-        .with_state(state)
-        .layer(TraceLayer::new_for_http());
+        .with_state(state);
+
+    let listener = TcpListener::bind(bind_addr)
+        .await
+        .context("failed to bind TCP listener")?;
 
     info!(%bind_addr, "server starting");
 
-    axum::Server::bind(&bind_addr)
-        .serve(app.into_make_service())
+    axum::serve(listener, app.into_make_service())
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("server shutdown")?;
@@ -140,17 +142,19 @@ async fn main() -> Result<()> {
 
 async fn shutdown_signal() {
     let ctrl_c = async {
-        signal::ctrl_c()
-            .await
-            .expect("failed to install CTRL+C handler");
+        if let Err(err) = signal::ctrl_c().await {
+            tracing::warn!(?err, "failed to listen for CTRL+C");
+        }
     };
 
     #[cfg(unix)]
     let terminate = async {
-        signal::unix::signal(signal::unix::SignalKind::terminate())
-            .expect("failed to install TERM handler")
-            .recv()
-            .await;
+        match signal::unix::signal(signal::unix::SignalKind::terminate()) {
+            Ok(mut stream) => {
+                stream.recv().await;
+            }
+            Err(err) => tracing::warn!(?err, "failed to listen for TERM signal"),
+        }
     };
 
     #[cfg(not(unix))]
@@ -270,9 +274,9 @@ async fn ingest_report(pool: &PgPool, report: IndexReport) -> Result<(), ApiErro
         let line: i32 = line.try_into().unwrap_or(i32::MAX);
         let column: i32 = column.try_into().unwrap_or(i32::MAX);
         sqlx::query(
-            "INSERT INTO references (content_hash, namespace, name, fully_qualified, kind, line, column)
+            "INSERT INTO symbol_references (content_hash, namespace, name, fully_qualified, kind, line_number, column_number)
              VALUES ($1, $2, $3, $4, $5, $6, $7)
-             ON CONFLICT (content_hash, namespace, name, line, column, kind)
+             ON CONFLICT (content_hash, namespace, name, line_number, column_number, kind)
              DO NOTHING",
         )
         .bind(&content_hash)
@@ -434,8 +438,8 @@ async fn search_symbols(
         let hashes: Vec<String> = rows.iter().map(|row| row.content_hash.clone()).collect();
         if !hashes.is_empty() {
             let ref_rows: Vec<ReferenceRow> = sqlx::query_as(
-                "SELECT content_hash, name, namespace, kind, fully_qualified, line, column \
-                 FROM references WHERE content_hash = ANY($1)",
+                "SELECT content_hash, name, namespace, kind, fully_qualified, line_number AS line, column_number AS column \
+                 FROM symbol_references WHERE content_hash = ANY($1)",
             )
             .bind(&hashes)
             .fetch_all(&state.pool)
@@ -443,8 +447,9 @@ async fn search_symbols(
             .map_err(ApiErrorKind::from)?;
 
             for reference in ref_rows {
+                let key = reference.content_hash.clone();
                 reference_map
-                    .entry(reference.content_hash)
+                    .entry(key)
                     .or_insert_with(Vec::new)
                     .push(reference);
             }

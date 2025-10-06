@@ -4,7 +4,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use crate::engine::IndexReport;
+use crate::models::IndexReport;
 
 pub fn write_report(output_dir: &Path, report: &IndexReport) -> Result<()> {
     fs::create_dir_all(output_dir)

@@ -71,7 +71,7 @@ pub fn run() -> Result<()> {
     output::write_report(&output_dir, &report)?;
 
     if let Some(url) = cli.upload_url.as_deref() {
-        info!("uploading index to backend", %url);
+        info!(%url, "uploading index to backend");
         upload::upload_report(url, cli.upload_api_key.as_deref(), &report)?;
     }
 
