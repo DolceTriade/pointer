@@ -13,6 +13,7 @@ use axum::{
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use clap::Parser;
+use once_cell::sync::Lazy;
 use pointer_indexer::models::{
     ChunkDescriptor, ContentBlob, FileChunkRecord, FilePointer, IndexReport, ReferenceRecord,
     SymbolRecord,
@@ -25,6 +26,10 @@ use tokio::net::TcpListener;
 use tokio::signal;
 use tracing::{info, warn};
 use zstd::stream::read::Decoder;
+
+use syntect::easy::HighlightLines;
+use syntect::highlighting::{FontStyle, Style, Theme, ThemeSet};
+use syntect::parsing::SyntaxSet;
 
 #[derive(Debug, Parser)]
 struct ServerConfig {
@@ -172,8 +177,103 @@ struct SnippetResponse {
 
 #[derive(sqlx::FromRow)]
 struct FileChunkDataRow {
+    _chunk_order: i32,
     chunk_hash: String,
     byte_len: i32,
+}
+
+#[derive(Debug, Serialize)]
+struct RepoListResponse {
+    repos: Vec<RepoSummary>,
+}
+
+#[derive(Debug, Serialize)]
+struct RepoSummary {
+    repository: String,
+    file_count: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct CommitListResponse {
+    commits: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RepoTreeQuery {
+    commit: String,
+    path: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct TreeResponse {
+    repository: String,
+    commit_sha: String,
+    path: String,
+    entries: Vec<TreeEntry>,
+}
+
+#[derive(Debug, Serialize)]
+struct TreeEntry {
+    name: String,
+    path: String,
+    kind: String,
+}
+
+#[derive(Debug, Serialize)]
+struct FileContentResponse {
+    repository: String,
+    commit_sha: String,
+    file_path: String,
+    language: Option<String>,
+    lines: Vec<HighlightedLine>,
+    tokens: Vec<TokenOccurrence>,
+}
+
+#[derive(Debug, Serialize)]
+struct HighlightedLine {
+    line_number: u32,
+    segments: Vec<HighlightedSegment>,
+}
+
+#[derive(Debug, Serialize)]
+struct HighlightedSegment {
+    text: String,
+    foreground: Option<String>,
+    background: Option<String>,
+    bold: bool,
+    italic: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct TokenOccurrence {
+    token: String,
+    line: u32,
+    column: u32,
+    length: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct SymbolReferenceRequest {
+    repository: String,
+    commit_sha: String,
+    fully_qualified: String,
+}
+
+#[derive(Debug, Serialize)]
+struct SymbolReferenceResponse {
+    references: Vec<FileReference>,
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+struct FileReference {
+    repository: String,
+    commit_sha: String,
+    file_path: String,
+    namespace: Option<String>,
+    name: String,
+    kind: Option<String>,
+    line: i32,
+    column: i32,
 }
 
 #[tokio::main]
@@ -210,7 +310,12 @@ async fn main() -> Result<()> {
         .route("/api/v1/index/manifest/chunk", post(manifest_chunk))
         .route("/api/v1/index/manifest/finalize", post(manifest_finalize))
         .route("/api/v1/index/manifest", post(ingest_manifest))
+        .route("/api/v1/repos", get(list_repositories))
+        .route("/api/v1/repos/:repo/commits", get(list_commits))
+        .route("/api/v1/repos/:repo/tree", get(repo_tree))
+        .route("/api/v1/repos/:repo/file", get(repo_file))
         .route("/api/v1/files/snippet", post(file_snippet))
+        .route("/api/v1/symbols/references", post(symbol_references))
         .route("/api/v1/search", post(search_symbols))
         .route("/healthz", get(health_check))
         .with_state(state)
@@ -450,6 +555,179 @@ async fn manifest_finalize(
     Ok(StatusCode::CREATED)
 }
 
+async fn list_repositories(State(state): State<AppState>) -> ApiResult<Json<RepoListResponse>> {
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT repository, COUNT(*) as file_count FROM files GROUP BY repository ORDER BY repository",
+    )
+    .fetch_all(&state.pool)
+    .await
+    .map_err(ApiErrorKind::from)?;
+
+    let repos = rows
+        .into_iter()
+        .map(|(repository, file_count)| RepoSummary {
+            repository,
+            file_count,
+        })
+        .collect();
+
+    Ok(Json(RepoListResponse { repos }))
+}
+
+async fn list_commits(
+    State(state): State<AppState>,
+    axum::extract::Path(repo): axum::extract::Path<String>,
+) -> ApiResult<Json<CommitListResponse>> {
+    let commits: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT commit_sha FROM files WHERE repository = $1 ORDER BY commit_sha DESC",
+    )
+    .bind(&repo)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(ApiErrorKind::from)?;
+
+    Ok(Json(CommitListResponse { commits }))
+}
+
+async fn repo_tree(
+    State(state): State<AppState>,
+    axum::extract::Path(repo): axum::extract::Path<String>,
+    axum::extract::Query(query): axum::extract::Query<RepoTreeQuery>,
+) -> ApiResult<Json<TreeResponse>> {
+    if query.commit.is_empty() {
+        return Err(AppError::new(
+            StatusCode::BAD_REQUEST,
+            "missing commit parameter",
+        ));
+    }
+
+    let prefix = query.path.unwrap_or_default();
+    let normalized_prefix = prefix.trim_matches('/');
+
+    let like_pattern = if normalized_prefix.is_empty() {
+        "%".to_string()
+    } else {
+        format!("{}%", normalized_prefix.trim_start_matches('/').to_string() + "/")
+    };
+
+    let rows: Vec<String> = sqlx::query_scalar(
+        "SELECT file_path FROM files WHERE repository = $1 AND commit_sha = $2 AND (file_path = $3 OR file_path LIKE $4)",
+    )
+    .bind(&repo)
+    .bind(&query.commit)
+    .bind(normalized_prefix)
+    .bind(like_pattern)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(ApiErrorKind::from)?;
+
+    if rows.is_empty() && !normalized_prefix.is_empty() {
+        return Err(AppError::new(StatusCode::NOT_FOUND, "path not found"));
+    }
+
+    let mut directories: HashSet<String> = HashSet::new();
+    let mut files: HashSet<String> = HashSet::new();
+
+    for path in rows {
+        let relative = if normalized_prefix.is_empty() {
+            path.clone()
+        } else if path == normalized_prefix {
+            continue;
+        } else {
+            path.trim_start_matches(normalized_prefix)
+                .trim_start_matches('/')
+                .to_string()
+        };
+
+        if relative.is_empty() {
+            continue;
+        }
+
+        if let Some((head, _)) = relative.split_once('/') {
+            if !head.is_empty() {
+                let dir_path = if normalized_prefix.is_empty() {
+                    head.to_string()
+                } else {
+                    format!("{}/{}", normalized_prefix, head)
+                };
+                directories.insert(dir_path);
+            }
+        } else {
+            let file_path = if normalized_prefix.is_empty() {
+                relative
+            } else {
+                format!("{}/{}", normalized_prefix, relative)
+            };
+            files.insert(file_path);
+        }
+    }
+
+    let mut entries: Vec<TreeEntry> = directories
+        .into_iter()
+        .map(|dir| TreeEntry {
+            name: dir.rsplit('/').next().unwrap_or(&dir).to_string(),
+            path: dir,
+            kind: "dir".to_string(),
+        })
+        .collect();
+
+    entries.extend(files.into_iter().map(|file_path| TreeEntry {
+        name: file_path
+            .rsplit('/')
+            .next()
+            .unwrap_or(&file_path)
+            .to_string(),
+        path: file_path,
+        kind: "file".to_string(),
+    }));
+
+    entries.sort_by(|a, b| match (a.kind.as_str(), b.kind.as_str()) {
+        ("dir", "file") => std::cmp::Ordering::Less,
+        ("file", "dir") => std::cmp::Ordering::Greater,
+        _ => a.name.cmp(&b.name),
+    });
+
+    Ok(Json(TreeResponse {
+        repository: repo,
+        commit_sha: query.commit,
+        path: normalized_prefix.to_string(),
+        entries,
+    }))
+}
+
+async fn repo_file(
+    State(state): State<AppState>,
+    axum::extract::Path(repo): axum::extract::Path<String>,
+    axum::extract::Query(query): axum::extract::Query<RepoTreeQuery>,
+) -> ApiResult<Json<FileContentResponse>> {
+    if query.commit.is_empty() {
+        return Err(AppError::new(
+            StatusCode::BAD_REQUEST,
+            "missing commit parameter",
+        ));
+    }
+
+    let path = query.path.unwrap_or_default();
+    if path.is_empty() {
+        return Err(AppError::new(StatusCode::BAD_REQUEST, "missing file path"));
+    }
+
+    let data = load_file_data(&state.pool, &repo, &query.commit, &path).await?;
+
+    let text = String::from_utf8_lossy(&data.bytes).to_string();
+    let highlight = highlight_text(&text, data.language.as_deref());
+    let tokens = compute_tokens(&text);
+
+    Ok(Json(FileContentResponse {
+        repository: repo,
+        commit_sha: query.commit,
+        file_path: path,
+        language: data.language,
+        lines: highlight,
+        tokens,
+    }))
+}
+
 async fn file_snippet(
     State(state): State<AppState>,
     Json(request): Json<SnippetRequest>,
@@ -461,53 +739,10 @@ async fn file_snippet(
         ));
     }
 
-    let chunk_rows: Vec<FileChunkDataRow> = sqlx::query_as(
-        "SELECT chunk_hash, byte_len
-         FROM file_chunks
-         WHERE repository = $1 AND commit_sha = $2 AND file_path = $3
-         ORDER BY chunk_order",
-    )
-    .bind(&request.repository)
-    .bind(&request.commit_sha)
-    .bind(&request.file_path)
-    .fetch_all(&state.pool)
-    .await
-    .map_err(ApiErrorKind::from)?;
+    let data = load_file_data(&state.pool, &request.repository, &request.commit_sha, &request.file_path)
+        .await?;
 
-    if chunk_rows.is_empty() {
-        return Err(AppError::new(StatusCode::NOT_FOUND, "file not found"));
-    }
-
-    let hashes: Vec<String> = chunk_rows
-        .iter()
-        .map(|row| row.chunk_hash.clone())
-        .collect();
-    let data_rows: Vec<(String, Vec<u8>)> =
-        sqlx::query_as("SELECT hash, data FROM chunks WHERE hash = ANY($1)")
-            .bind(&hashes)
-            .fetch_all(&state.pool)
-            .await
-            .map_err(ApiErrorKind::from)?;
-
-    let chunk_map: HashMap<String, Vec<u8>> = data_rows.into_iter().collect();
-
-    let capacity: usize = chunk_rows
-        .iter()
-        .map(|row| row.byte_len.max(0) as usize)
-        .sum();
-    let mut file_bytes = Vec::with_capacity(capacity);
-
-    for row in &chunk_rows {
-        let data = chunk_map.get(&row.chunk_hash).ok_or_else(|| {
-            AppError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("missing chunk data for {}", row.chunk_hash),
-            )
-        })?;
-        file_bytes.extend_from_slice(data);
-    }
-
-    let file_text = String::from_utf8_lossy(&file_bytes);
+    let file_text = String::from_utf8_lossy(&data.bytes);
     let lines: Vec<String> = file_text.lines().map(|line| line.to_string()).collect();
 
     if lines.is_empty() {
@@ -546,6 +781,226 @@ async fn file_snippet(
         lines: snippet_lines,
         truncated,
     }))
+}
+
+async fn symbol_references(
+    State(state): State<AppState>,
+    Json(request): Json<SymbolReferenceRequest>,
+) -> ApiResult<Json<SymbolReferenceResponse>> {
+    let rows: Vec<FileReference> = sqlx::query_as(
+        "SELECT f.repository, f.commit_sha, f.file_path, r.namespace, r.name, r.kind,
+                r.line_number AS line, r.column_number AS column
+         FROM symbol_references r
+         JOIN files f ON f.content_hash = r.content_hash
+         WHERE f.repository = $1 AND f.commit_sha = $2 AND r.fully_qualified = $3
+         ORDER BY f.file_path, r.line_number, r.column_number",
+    )
+    .bind(&request.repository)
+    .bind(&request.commit_sha)
+    .bind(&request.fully_qualified)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(ApiErrorKind::from)?;
+
+    Ok(Json(SymbolReferenceResponse { references: rows }))
+}
+
+struct FileData {
+    bytes: Vec<u8>,
+    language: Option<String>,
+}
+
+async fn load_file_data(
+    pool: &PgPool,
+    repository: &str,
+    commit_sha: &str,
+    file_path: &str,
+) -> Result<FileData, AppError> {
+    let language_row = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT cb.language
+         FROM files f
+         LEFT JOIN content_blobs cb ON cb.hash = f.content_hash
+         WHERE f.repository = $1 AND f.commit_sha = $2 AND f.file_path = $3",
+    )
+    .bind(repository)
+    .bind(commit_sha)
+    .bind(file_path)
+    .fetch_optional(pool)
+    .await
+    .map_err(ApiErrorKind::from)?;
+
+    let language = match language_row {
+        Some(lang) => lang,
+        None => {
+            return Err(AppError::new(
+                StatusCode::NOT_FOUND,
+                "file not found",
+            ))
+        }
+    };
+
+    let chunk_rows: Vec<FileChunkDataRow> = sqlx::query_as(
+        "SELECT chunk_order, chunk_hash, byte_len
+         FROM file_chunks
+         WHERE repository = $1 AND commit_sha = $2 AND file_path = $3
+         ORDER BY chunk_order",
+    )
+    .bind(repository)
+    .bind(commit_sha)
+    .bind(file_path)
+    .fetch_all(pool)
+    .await
+    .map_err(ApiErrorKind::from)?;
+
+    if chunk_rows.is_empty() {
+        return Err(AppError::new(
+            StatusCode::NOT_FOUND,
+            "file does not have chunk data",
+        ));
+    }
+
+    let hashes: Vec<String> = chunk_rows
+        .iter()
+        .map(|row| row.chunk_hash.clone())
+        .collect();
+    let chunk_data: Vec<(String, Vec<u8>)> = sqlx::query_as(
+        "SELECT hash, data FROM chunks WHERE hash = ANY($1)",
+    )
+    .bind(&hashes)
+    .fetch_all(pool)
+    .await
+    .map_err(ApiErrorKind::from)?;
+
+    let map: HashMap<String, Vec<u8>> = chunk_data.into_iter().collect();
+
+    let capacity: usize = chunk_rows
+        .iter()
+        .map(|row| row.byte_len.max(0) as usize)
+        .sum();
+    let mut bytes = Vec::with_capacity(capacity);
+
+    for row in &chunk_rows {
+        let data = map.get(&row.chunk_hash).ok_or_else(|| {
+            AppError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("missing chunk data for {}", row.chunk_hash),
+            )
+        })?;
+        bytes.extend_from_slice(data);
+    }
+
+    Ok(FileData { bytes, language })
+}
+
+fn highlight_text(text: &str, language: Option<&str>) -> Vec<HighlightedLine> {
+    let mut highlighter = HighlightLines::new(
+        select_syntax(language),
+        &THEME,
+    );
+
+    text.lines()
+        .enumerate()
+        .map(|(idx, line)| {
+            let ranges = highlighter
+                .highlight_line(line, &SYNTAX_SET)
+                .unwrap_or_else(|_| vec![(Style::default(), line)]);
+
+            let segments = ranges
+                .into_iter()
+                .map(|(style, segment)| HighlightedSegment {
+                    text: segment.to_string(),
+                    foreground: Some(format_color(style.foreground)),
+                    background: if style.background.a == 0 {
+                        None
+                    } else {
+                        Some(format_color(style.background))
+                    },
+                    bold: style.font_style.contains(FontStyle::BOLD),
+                    italic: style.font_style.contains(FontStyle::ITALIC),
+                })
+                .collect();
+
+            HighlightedLine {
+                line_number: idx as u32 + 1,
+                segments,
+            }
+        })
+        .collect()
+}
+
+fn select_syntax(language: Option<&str>) -> &syntect::parsing::SyntaxReference {
+    if let Some(token) = language.and_then(map_language_to_token) {
+        if let Some(syntax) = SYNTAX_SET.find_syntax_by_token(token) {
+            return syntax;
+        }
+    }
+
+    SYNTAX_SET.find_syntax_plain_text()
+}
+
+fn map_language_to_token(language: &str) -> Option<&'static str> {
+    match language.to_ascii_lowercase().as_str() {
+        "c" => Some("c"),
+        "cpp" | "c++" => Some("cpp"),
+        "objc" | "objective-c" | "objectivec" => Some("objective-c"),
+        "go" => Some("go"),
+        "java" => Some("java"),
+        "js" | "javascript" => Some("javascript"),
+        "ts" | "typescript" => Some("typescript"),
+        "python" | "py" => Some("python"),
+        "rust" => Some("rust"),
+        "swift" => Some("swift"),
+        "proto" | "protobuf" => Some("protobuf"),
+        "nix" => Some("nix"),
+        _ => None,
+    }
+}
+
+fn format_color(color: syntect::highlighting::Color) -> String {
+    format!("#{:02x}{:02x}{:02x}", color.r, color.g, color.b)
+}
+
+fn compute_tokens(text: &str) -> Vec<TokenOccurrence> {
+    let mut result = Vec::new();
+
+    for (line_idx, line) in text.lines().enumerate() {
+        let line_number = line_idx as u32 + 1;
+        let mut column: u32 = 1;
+        let mut current = String::new();
+        let mut start_column: u32 = 1;
+
+        for ch in line.chars() {
+            let is_token_char = ch.is_alphanumeric() || ch == '_';
+            if is_token_char {
+                if current.is_empty() {
+                    start_column = column;
+                }
+                current.push(ch);
+            } else if !current.is_empty() {
+                let length = current.chars().count() as u32;
+                result.push(TokenOccurrence {
+                    token: current.clone(),
+                    line: line_number,
+                    column: start_column,
+                    length,
+                });
+                current.clear();
+            }
+            column += 1;
+        }
+
+        if !current.is_empty() {
+            let length = current.chars().count() as u32;
+            result.push(TokenOccurrence {
+                token: current.clone(),
+                line: line_number,
+                column: start_column,
+                length,
+            });
+        }
+    }
+
+    result
 }
 
 async fn ingest_manifest(
@@ -596,6 +1051,17 @@ async fn ingest_report(pool: &PgPool, report: IndexReport) -> Result<(), ApiErro
 }
 
 const INSERT_BATCH_SIZE: usize = 1000;
+
+static SYNTAX_SET: Lazy<SyntaxSet> = Lazy::new(SyntaxSet::load_defaults_newlines);
+static THEME_SET: Lazy<ThemeSet> = Lazy::new(ThemeSet::load_defaults);
+static THEME: Lazy<Theme> = Lazy::new(|| {
+    THEME_SET
+        .themes
+        .get("base16-ocean.dark")
+        .cloned()
+        .or_else(|| THEME_SET.themes.values().next().cloned())
+        .unwrap_or_else(Theme::default)
+});
 
 fn dedup_by_key<'a, T, K, F>(items: &'a [T], mut key: F) -> Vec<&'a T>
 where
