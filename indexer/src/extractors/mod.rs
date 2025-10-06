@@ -87,8 +87,8 @@ fn collect_references(language: &str, source: &str) -> Vec<ExtractedReference> {
                         name: name.to_string(),
                         kind: None,
                         namespace: None,
-                        line: pos.row as usize,
-                        column: pos.column as usize,
+                        line: pos.row.saturating_add(1) as usize,
+                        column: pos.column.saturating_add(1) as usize,
                     });
                 }
             }
