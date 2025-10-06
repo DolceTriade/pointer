@@ -35,3 +35,11 @@ pub struct FilePointer {
     pub file_path: String,
     pub content_hash: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct IndexReport {
+    pub content_blobs: Vec<ContentBlob>,
+    pub symbol_records: Vec<SymbolRecord>,
+    pub file_pointers: Vec<FilePointer>,
+    pub reference_records: Vec<ReferenceRecord>,
+}

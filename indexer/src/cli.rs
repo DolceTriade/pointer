@@ -8,6 +8,7 @@ use tracing::info;
 use crate::config::IndexerConfig;
 use crate::engine::Indexer;
 use crate::output;
+use crate::upload;
 use crate::utils;
 
 #[derive(Debug, Parser)]
@@ -35,6 +36,12 @@ pub struct Cli {
     /// Increase logging verbosity (use -vv for trace level).
     #[arg(short, long, action = ArgAction::Count)]
     pub verbose: u8,
+    /// URL of the backend ingestion endpoint. When provided, the generated index will be uploaded.
+    #[arg(long)]
+    pub upload_url: Option<String>,
+    /// API key used when uploading to the backend (sent as a Bearer token).
+    #[arg(long)]
+    pub upload_api_key: Option<String>,
 }
 
 pub fn run() -> Result<()> {
@@ -62,6 +69,11 @@ pub fn run() -> Result<()> {
     let indexer = Indexer::new(config);
     let report = indexer.run()?;
     output::write_report(&output_dir, &report)?;
+
+    if let Some(url) = cli.upload_url.as_deref() {
+        info!("uploading index to backend", %url);
+        upload::upload_report(url, cli.upload_api_key.as_deref(), &report)?;
+    }
 
     info!(
         repo = repository,

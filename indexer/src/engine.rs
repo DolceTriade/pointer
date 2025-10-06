@@ -8,16 +8,8 @@ use tracing::{debug, trace, warn};
 
 use crate::config::IndexerConfig;
 use crate::extractors::{self, ExtractedSymbol, Extraction};
-use crate::models::{ContentBlob, FilePointer, ReferenceRecord, SymbolRecord};
+use crate::models::{ContentBlob, FilePointer, IndexReport, ReferenceRecord, SymbolRecord};
 use crate::utils;
-
-#[derive(Debug, Default)]
-pub struct IndexReport {
-    pub content_blobs: Vec<ContentBlob>,
-    pub symbol_records: Vec<SymbolRecord>,
-    pub file_pointers: Vec<FilePointer>,
-    pub reference_records: Vec<ReferenceRecord>,
-}
 
 pub struct Indexer {
     config: IndexerConfig,
