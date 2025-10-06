@@ -18,6 +18,17 @@ pub struct SymbolRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReferenceRecord {
+    pub content_hash: String,
+    pub namespace: Option<String>,
+    pub name: String,
+    pub fully_qualified: String,
+    pub kind: Option<String>,
+    pub line: usize,
+    pub column: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FilePointer {
     pub repository: String,
     pub commit_sha: String,

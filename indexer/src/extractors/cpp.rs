@@ -356,7 +356,9 @@ mod tests {
         assert!(var_names.iter().any(|(name, _)| *name == "result"));
         assert!(!var_names.contains(&("global_handler", None)));
         assert!(!var_names.contains(&("foo_handler", Some("foo"))));
-        assert!(!var_names.iter().any(|(name, ns)| *name == "on_ready" && *ns == Some("foo::Bar")));
+        assert!(!var_names
+            .iter()
+            .any(|(name, ns)| *name == "on_ready" && *ns == Some("foo::Bar")));
         assert!(!var_names
             .iter()
             .any(|(name, ns)| *name == "local_callback" && *ns == Some("foo::Bar::method")));

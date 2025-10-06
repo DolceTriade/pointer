@@ -144,8 +144,7 @@ fn symbols_from_variable_declaration(
                 for name in names {
                     results.push(ExtractedSymbol {
                         name,
-                        kind: if is_function_like { "function" } else { &kind }
-                            .to_string(),
+                        kind: if is_function_like { "function" } else { &kind }.to_string(),
                         namespace: namespace.clone(),
                     });
                 }

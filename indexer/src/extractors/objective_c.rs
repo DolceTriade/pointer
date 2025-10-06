@@ -142,8 +142,12 @@ fn symbols_from_property(node: &Node, source: &[u8]) -> Vec<ExtractedSymbol> {
                         let is_function_like = declarator_contains_function(&declarator);
                         results.push(ExtractedSymbol {
                             name,
-                            kind: if is_function_like { "function" } else { "property" }
-                                .to_string(),
+                            kind: if is_function_like {
+                                "function"
+                            } else {
+                                "property"
+                            }
+                            .to_string(),
                             namespace,
                         });
                     }
@@ -167,8 +171,7 @@ fn symbols_from_ivar(node: &Node, source: &[u8]) -> Vec<ExtractedSymbol> {
                         let is_function_like = declarator_contains_function(&declarator);
                         results.push(ExtractedSymbol {
                             name,
-                            kind: if is_function_like { "function" } else { "ivar" }
-                                .to_string(),
+                            kind: if is_function_like { "function" } else { "ivar" }.to_string(),
                             namespace,
                         });
                     }
@@ -205,8 +208,8 @@ fn symbols_from_declaration(node: &Node, source: &[u8]) -> Vec<ExtractedSymbol> 
         ) {
             if let Some(name) = identifier_from_declarator(&child, source) {
                 let namespace = namespace_for_node(node, source);
-                let is_function_like =
-                    declarator_contains_function(&child) || identifier_in_function_declarator(&child);
+                let is_function_like = declarator_contains_function(&child)
+                    || identifier_in_function_declarator(&child);
                 results.push(ExtractedSymbol {
                     name,
                     kind: if is_function_like { "function" } else { "var" }.to_string(),
@@ -369,8 +372,12 @@ mod tests {
             .collect();
         assert!(fields.contains(&("_count", "ivar")));
         assert!(fields.contains(&("value", "property")));
-        assert!(!fields.iter().any(|(name, kind)| *name == "callback" && *kind == "ivar"));
-        assert!(!fields.iter().any(|(name, kind)| *name == "onReady" && *kind == "property"));
+        assert!(!fields
+            .iter()
+            .any(|(name, kind)| *name == "callback" && *kind == "ivar"));
+        assert!(!fields
+            .iter()
+            .any(|(name, kind)| *name == "onReady" && *kind == "property"));
 
         let vars: Vec<_> = symbols
             .iter()

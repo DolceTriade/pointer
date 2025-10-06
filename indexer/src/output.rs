@@ -16,6 +16,10 @@ pub fn write_report(output_dir: &Path, report: &IndexReport) -> Result<()> {
         &report.symbol_records,
     )?;
     write_json(output_dir.join("file_pointers.json"), &report.file_pointers)?;
+    write_json(
+        output_dir.join("reference_records.json"),
+        &report.reference_records,
+    )?;
 
     Ok(())
 }

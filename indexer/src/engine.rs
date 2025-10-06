@@ -7,8 +7,8 @@ use ignore::WalkBuilder;
 use tracing::{debug, trace, warn};
 
 use crate::config::IndexerConfig;
-use crate::extractors::{self, ExtractedSymbol};
-use crate::models::{ContentBlob, FilePointer, SymbolRecord};
+use crate::extractors::{self, ExtractedSymbol, Extraction};
+use crate::models::{ContentBlob, FilePointer, ReferenceRecord, SymbolRecord};
 use crate::utils;
 
 #[derive(Debug, Default)]
@@ -16,6 +16,7 @@ pub struct IndexReport {
     pub content_blobs: Vec<ContentBlob>,
     pub symbol_records: Vec<SymbolRecord>,
     pub file_pointers: Vec<FilePointer>,
+    pub reference_records: Vec<ReferenceRecord>,
 }
 
 pub struct Indexer {
@@ -101,7 +102,10 @@ impl Indexer {
                 let source = String::from_utf8_lossy(&bytes);
                 let namespace_hint = utils::namespace_from_path(Some(lang), &relative_path);
 
-                let symbols = extractors::extract(lang, &source);
+                let Extraction {
+                    symbols,
+                    references,
+                } = extractors::extract(lang, &source);
                 if symbols.is_empty() {
                     debug!(file = %normalized_path, language = lang, "no symbols extracted");
                 }
@@ -123,6 +127,24 @@ impl Indexer {
                         symbol: name,
                         fully_qualified,
                         kind: Some(kind),
+                    });
+                }
+
+                for reference in references {
+                    let namespace = reference.namespace.or_else(|| namespace_hint.clone());
+                    let fully_qualified = match &namespace {
+                        Some(ns) => format!("{}::{}", ns, reference.name),
+                        None => reference.name.clone(),
+                    };
+
+                    report.reference_records.push(ReferenceRecord {
+                        content_hash: content_hash.clone(),
+                        namespace,
+                        name: reference.name,
+                        fully_qualified,
+                        kind: reference.kind,
+                        line: reference.line,
+                        column: reference.column,
                     });
                 }
             }

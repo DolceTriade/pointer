@@ -85,11 +85,7 @@ fn symbols_from_assignment(node: &Node, source: &[u8]) -> Vec<ExtractedSymbol> {
         .collect()
 }
 
-fn collect_target_names(
-    node: &Node,
-    source: &[u8],
-    out: &mut Vec<String>,
-) {
+fn collect_target_names(node: &Node, source: &[u8], out: &mut Vec<String>) {
     match node.kind() {
         "identifier" => {
             if let Ok(name) = node.utf8_text(source) {
