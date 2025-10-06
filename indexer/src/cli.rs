@@ -1,3 +1,4 @@
+use std::convert::TryFrom;
 use std::env;
 use std::path::{Path, PathBuf};
 
@@ -166,6 +167,26 @@ struct ReferenceResult {
     column: usize,
 }
 
+#[derive(Debug, Serialize)]
+struct SnippetRequest<'a> {
+    repository: &'a str,
+    commit_sha: &'a str,
+    file_path: &'a str,
+    line: u32,
+    context: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct SnippetResponse {
+    start_line: u32,
+    highlight_line: u32,
+    total_lines: u32,
+    lines: Vec<String>,
+    truncated: bool,
+}
+
+const SNIPPET_CONTEXT: u32 = 2;
+
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     utils::init_tracing(cli.verbose)?;
@@ -243,6 +264,7 @@ fn run_query(args: QueryArgs) -> Result<()> {
     };
 
     let client = Client::new();
+    let snippet_url = snippet_endpoint(&args.url);
     let mut req = client.post(&args.url).json(&request);
 
     if let Some(key) = args.api_key.as_ref() {
@@ -297,6 +319,27 @@ fn run_query(args: QueryArgs) -> Result<()> {
                             "    - {} (line {}, column {})",
                             reference.fully_qualified, reference.line, reference.column
                         );
+                        let line = match u32::try_from(reference.line) {
+                            Ok(line) if line > 0 => line,
+                            _ => {
+                                println!("      (invalid line number)");
+                                continue;
+                            }
+                        };
+
+                        match fetch_snippet(
+                            &client,
+                            &snippet_url,
+                            args.api_key.as_deref(),
+                            &symbol.repository,
+                            &symbol.commit_sha,
+                            &symbol.file_path,
+                            line,
+                            SNIPPET_CONTEXT,
+                        ) {
+                            Ok(snippet) => print_snippet(&snippet),
+                            Err(err) => println!("      (snippet unavailable: {err})"),
+                        }
                     }
                 }
                 _ => println!("  references: none"),
@@ -307,6 +350,78 @@ fn run_query(args: QueryArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn fetch_snippet(
+    client: &Client,
+    url: &str,
+    api_key: Option<&str>,
+    repository: &str,
+    commit_sha: &str,
+    file_path: &str,
+    line: u32,
+    context: u32,
+) -> Result<SnippetResponse> {
+    let payload = SnippetRequest {
+        repository,
+        commit_sha,
+        file_path,
+        line,
+        context,
+    };
+
+    let mut req = client.post(url).json(&payload);
+    if let Some(key) = api_key {
+        req = req.bearer_auth(key);
+    }
+
+    let response = req
+        .send()
+        .with_context(|| format!("failed to request snippet from {}", url))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().unwrap_or_default();
+        anyhow::bail!("snippet request failed with status {status}: {body}");
+    }
+
+    Ok(response
+        .json()
+        .context("failed to parse snippet response")?)
+}
+
+fn snippet_endpoint(search_url: &str) -> String {
+    let trimmed = search_url.trim_end_matches('/');
+    if let Some((base, last)) = trimmed.rsplit_once('/') {
+        if last.eq_ignore_ascii_case("search") {
+            format!("{}/files/snippet", base)
+        } else {
+            format!("{}/files/snippet", trimmed)
+        }
+    } else {
+        format!("{}/files/snippet", trimmed)
+    }
+}
+
+fn print_snippet(snippet: &SnippetResponse) {
+    if snippet.lines.is_empty() {
+        println!("      (no snippet content)");
+        return;
+    }
+
+    for (idx, line) in snippet.lines.iter().enumerate() {
+        let line_number = snippet.start_line + idx as u32;
+        let marker = if line_number == snippet.highlight_line {
+            '>'
+        } else {
+            ' '
+        };
+        println!("      {} {:>6} | {}", marker, line_number, line);
+    }
+
+    if snippet.truncated {
+        println!("      ... ({} total lines)", snippet.total_lines);
+    }
 }
 
 fn resolve_repo_path(path: &Path) -> Result<PathBuf> {

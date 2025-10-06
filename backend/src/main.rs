@@ -152,6 +152,30 @@ struct UploadChunkRow {
     data: Vec<u8>,
 }
 
+#[derive(Debug, Deserialize)]
+struct SnippetRequest {
+    repository: String,
+    commit_sha: String,
+    file_path: String,
+    line: u32,
+    context: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+struct SnippetResponse {
+    start_line: u32,
+    highlight_line: u32,
+    total_lines: u32,
+    lines: Vec<String>,
+    truncated: bool,
+}
+
+#[derive(sqlx::FromRow)]
+struct FileChunkDataRow {
+    chunk_hash: String,
+    byte_len: i32,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
@@ -186,6 +210,7 @@ async fn main() -> Result<()> {
         .route("/api/v1/index/manifest/chunk", post(manifest_chunk))
         .route("/api/v1/index/manifest/finalize", post(manifest_finalize))
         .route("/api/v1/index/manifest", post(ingest_manifest))
+        .route("/api/v1/files/snippet", post(file_snippet))
         .route("/api/v1/search", post(search_symbols))
         .route("/healthz", get(health_check))
         .with_state(state)
@@ -423,6 +448,104 @@ async fn manifest_finalize(
         .map_err(ApiErrorKind::from)?;
 
     Ok(StatusCode::CREATED)
+}
+
+async fn file_snippet(
+    State(state): State<AppState>,
+    Json(request): Json<SnippetRequest>,
+) -> ApiResult<Json<SnippetResponse>> {
+    if request.line == 0 {
+        return Err(AppError::new(
+            StatusCode::BAD_REQUEST,
+            "line numbers are 1-based",
+        ));
+    }
+
+    let chunk_rows: Vec<FileChunkDataRow> = sqlx::query_as(
+        "SELECT chunk_hash, byte_len
+         FROM file_chunks
+         WHERE repository = $1 AND commit_sha = $2 AND file_path = $3
+         ORDER BY chunk_order",
+    )
+    .bind(&request.repository)
+    .bind(&request.commit_sha)
+    .bind(&request.file_path)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(ApiErrorKind::from)?;
+
+    if chunk_rows.is_empty() {
+        return Err(AppError::new(StatusCode::NOT_FOUND, "file not found"));
+    }
+
+    let hashes: Vec<String> = chunk_rows
+        .iter()
+        .map(|row| row.chunk_hash.clone())
+        .collect();
+    let data_rows: Vec<(String, Vec<u8>)> =
+        sqlx::query_as("SELECT hash, data FROM chunks WHERE hash = ANY($1)")
+            .bind(&hashes)
+            .fetch_all(&state.pool)
+            .await
+            .map_err(ApiErrorKind::from)?;
+
+    let chunk_map: HashMap<String, Vec<u8>> = data_rows.into_iter().collect();
+
+    let capacity: usize = chunk_rows
+        .iter()
+        .map(|row| row.byte_len.max(0) as usize)
+        .sum();
+    let mut file_bytes = Vec::with_capacity(capacity);
+
+    for row in &chunk_rows {
+        let data = chunk_map.get(&row.chunk_hash).ok_or_else(|| {
+            AppError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("missing chunk data for {}", row.chunk_hash),
+            )
+        })?;
+        file_bytes.extend_from_slice(data);
+    }
+
+    let file_text = String::from_utf8_lossy(&file_bytes);
+    let lines: Vec<String> = file_text.lines().map(|line| line.to_string()).collect();
+
+    if lines.is_empty() {
+        return Err(AppError::new(StatusCode::BAD_REQUEST, "file is empty"));
+    }
+
+    let total_lines = lines.len() as u32;
+    if request.line > total_lines {
+        return Err(AppError::new(
+            StatusCode::BAD_REQUEST,
+            "line number exceeds file length",
+        ));
+    }
+
+    let context = request.context.unwrap_or(3).min(1000);
+    let start_line = if request.line <= context {
+        1
+    } else {
+        request.line - context
+    };
+    let end_line = (request.line + context).min(total_lines);
+
+    let start_index = (start_line - 1) as usize;
+    let end_index = end_line as usize;
+    let snippet_lines = lines[start_index..end_index]
+        .iter()
+        .map(|line| line.to_string())
+        .collect();
+
+    let truncated = start_line > 1 || end_line < total_lines;
+
+    Ok(Json(SnippetResponse {
+        start_line,
+        highlight_line: request.line,
+        total_lines,
+        lines: snippet_lines,
+        truncated,
+    }))
 }
 
 async fn ingest_manifest(
