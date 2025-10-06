@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
@@ -14,7 +14,8 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use clap::Parser;
 use pointer_indexer::models::{
-    ContentBlob, FilePointer, IndexReport, ReferenceRecord, SymbolRecord,
+    ChunkDescriptor, ContentBlob, FileChunkRecord, FilePointer, IndexReport, ReferenceRecord,
+    SymbolRecord,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
@@ -22,7 +23,7 @@ use sqlx::{PgPool, Postgres, QueryBuilder, Transaction};
 use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio::signal;
-use tracing::info;
+use tracing::{info, warn};
 use zstd::stream::read::Decoder;
 
 #[derive(Debug, Parser)]
@@ -96,7 +97,42 @@ impl IntoResponse for AppError {
 type ApiResult<T> = std::result::Result<T, AppError>;
 
 #[derive(Debug, Deserialize)]
-struct ChunkPayload {
+struct ChunkNeedRequest {
+    chunks: Vec<ChunkDescriptor>,
+}
+
+#[derive(Debug, Serialize)]
+struct ChunkNeedResponse {
+    missing: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChunkUploadRequest {
+    chunks: Vec<ChunkUploadItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChunkUploadItem {
+    hash: String,
+    algorithm: String,
+    byte_len: u32,
+    data: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ManifestRequest {
+    report: IndexReport,
+}
+
+struct DecodedChunk {
+    hash: String,
+    algorithm: String,
+    byte_len: u32,
+    data: Vec<u8>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ManifestChunkPayload {
     upload_id: String,
     chunk_index: i32,
     total_chunks: i32,
@@ -104,8 +140,9 @@ struct ChunkPayload {
 }
 
 #[derive(Debug, Deserialize)]
-struct FinalizePayload {
+struct ManifestFinalizePayload {
     upload_id: String,
+    compressed: Option<bool>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -144,8 +181,11 @@ async fn main() -> Result<()> {
 
     let app = Router::new()
         .route("/api/v1/index", post(ingest_index))
-        .route("/api/v1/index/chunk", post(ingest_chunk))
-        .route("/api/v1/index/finalize", post(finalize_upload))
+        .route("/api/v1/index/chunks/need", post(chunk_need))
+        .route("/api/v1/index/chunks/upload", post(chunk_upload))
+        .route("/api/v1/index/manifest/chunk", post(manifest_chunk))
+        .route("/api/v1/index/manifest/finalize", post(manifest_finalize))
+        .route("/api/v1/index/manifest", post(ingest_manifest))
         .route("/api/v1/search", post(search_symbols))
         .route("/healthz", get(health_check))
         .with_state(state)
@@ -193,9 +233,90 @@ async fn shutdown_signal() {
     info!("shutdown signal received");
 }
 
-async fn ingest_chunk(
+async fn chunk_need(
     State(state): State<AppState>,
-    Json(payload): Json<ChunkPayload>,
+    Json(payload): Json<ChunkNeedRequest>,
+) -> ApiResult<Json<ChunkNeedResponse>> {
+    let requested: HashSet<String> = payload.chunks.into_iter().map(|chunk| chunk.hash).collect();
+
+    if requested.is_empty() {
+        return Ok(Json(ChunkNeedResponse {
+            missing: Vec::new(),
+        }));
+    }
+
+    let hashes: Vec<String> = requested.iter().cloned().collect();
+    let existing: Vec<(String,)> = sqlx::query_as("SELECT hash FROM chunks WHERE hash = ANY($1)")
+        .bind(&hashes)
+        .fetch_all(&state.pool)
+        .await
+        .map_err(ApiErrorKind::from)?;
+
+    let present: HashSet<String> = existing.into_iter().map(|row| row.0).collect();
+    let missing: Vec<String> = requested.difference(&present).cloned().collect();
+
+    Ok(Json(ChunkNeedResponse { missing }))
+}
+
+async fn chunk_upload(
+    State(state): State<AppState>,
+    Json(payload): Json<ChunkUploadRequest>,
+) -> ApiResult<StatusCode> {
+    if payload.chunks.is_empty() {
+        return Ok(StatusCode::ACCEPTED);
+    }
+
+    let mut decoded = Vec::with_capacity(payload.chunks.len());
+    for chunk in payload.chunks {
+        let data = BASE64.decode(chunk.data.as_bytes()).map_err(|err| {
+            AppError::new(
+                StatusCode::BAD_REQUEST,
+                format!("invalid base64 data: {err}"),
+            )
+        })?;
+
+        if chunk.byte_len != data.len() as u32 {
+            warn!(
+                hash = %chunk.hash,
+                expected = chunk.byte_len,
+                actual = data.len(),
+                "chunk length mismatch; using decoded length",
+            );
+        }
+
+        decoded.push(DecodedChunk {
+            hash: chunk.hash,
+            algorithm: chunk.algorithm,
+            byte_len: data.len() as u32,
+            data,
+        });
+    }
+
+    let deduped = dedup_by_key(&decoded, |chunk| chunk.hash.clone());
+
+    for batch in deduped.chunks(INSERT_BATCH_SIZE) {
+        let mut qb = QueryBuilder::new("INSERT INTO chunks (hash, algorithm, byte_len, data) ");
+        qb.push_values(batch.iter().copied(), |mut b, chunk| {
+            let byte_len: i32 = chunk.byte_len.try_into().unwrap_or(i32::MAX);
+            b.push_bind(&chunk.hash)
+                .push_bind(&chunk.algorithm)
+                .push_bind(byte_len)
+                .push_bind(&chunk.data);
+        });
+        qb.push(" ON CONFLICT (hash) DO NOTHING");
+
+        qb.build()
+            .execute(&state.pool)
+            .await
+            .map_err(ApiErrorKind::from)?;
+    }
+
+    Ok(StatusCode::ACCEPTED)
+}
+
+async fn manifest_chunk(
+    State(state): State<AppState>,
+    Json(payload): Json<ManifestChunkPayload>,
 ) -> ApiResult<StatusCode> {
     if payload.chunk_index < 0
         || payload.total_chunks <= 0
@@ -203,11 +324,11 @@ async fn ingest_chunk(
     {
         return Err(AppError::new(
             StatusCode::BAD_REQUEST,
-            "invalid chunk metadata",
+            "invalid manifest chunk metadata",
         ));
     }
 
-    let decoded = BASE64.decode(payload.data.as_bytes()).map_err(|err| {
+    let data = BASE64.decode(payload.data.as_bytes()).map_err(|err| {
         AppError::new(
             StatusCode::BAD_REQUEST,
             format!("invalid base64 data: {err}"),
@@ -223,7 +344,7 @@ async fn ingest_chunk(
     .bind(&payload.upload_id)
     .bind(payload.chunk_index)
     .bind(payload.total_chunks)
-    .bind(decoded)
+    .bind(data)
     .execute(&state.pool)
     .await
     .map_err(ApiErrorKind::from)?;
@@ -231,9 +352,9 @@ async fn ingest_chunk(
     Ok(StatusCode::ACCEPTED)
 }
 
-async fn finalize_upload(
+async fn manifest_finalize(
     State(state): State<AppState>,
-    Json(payload): Json<FinalizePayload>,
+    Json(payload): Json<ManifestFinalizePayload>,
 ) -> ApiResult<StatusCode> {
     let rows: Vec<UploadChunkRow> = sqlx::query_as(
         "SELECT chunk_index, total_chunks, data FROM upload_chunks WHERE upload_id = $1 ORDER BY chunk_index",
@@ -246,7 +367,7 @@ async fn finalize_upload(
     if rows.is_empty() {
         return Err(AppError::new(
             StatusCode::BAD_REQUEST,
-            "no chunks uploaded for the provided id",
+            "no chunks uploaded for manifest",
         ));
     }
 
@@ -261,7 +382,7 @@ async fn finalize_upload(
     if rows.len() != expected_total as usize {
         return Err(AppError::new(
             StatusCode::BAD_REQUEST,
-            "missing chunks for upload",
+            "missing manifest chunks",
         ));
     }
 
@@ -269,7 +390,7 @@ async fn finalize_upload(
         if row.chunk_index != index as i32 || row.total_chunks != expected_total {
             return Err(AppError::new(
                 StatusCode::BAD_REQUEST,
-                "inconsistent chunk metadata",
+                "inconsistent manifest chunk metadata",
             ));
         }
     }
@@ -279,8 +400,19 @@ async fn finalize_upload(
         combined.extend_from_slice(&row.data);
     }
 
-    let mut decoder = Decoder::new(Cursor::new(combined)).map_err(ApiErrorKind::Compression)?;
-    let report: IndexReport = serde_json::from_reader(&mut decoder).map_err(ApiErrorKind::Serde)?;
+    let compressed = payload.compressed.unwrap_or(false);
+    let report_bytes = if compressed {
+        let mut decoder = Decoder::new(Cursor::new(combined)).map_err(ApiErrorKind::Compression)?;
+        let mut buf = Vec::new();
+        decoder
+            .read_to_end(&mut buf)
+            .map_err(ApiErrorKind::Compression)?;
+        buf
+    } else {
+        combined
+    };
+
+    let report: IndexReport = serde_json::from_slice(&report_bytes).map_err(ApiErrorKind::Serde)?;
 
     ingest_report(&state.pool, report).await?;
 
@@ -290,6 +422,14 @@ async fn finalize_upload(
         .await
         .map_err(ApiErrorKind::from)?;
 
+    Ok(StatusCode::CREATED)
+}
+
+async fn ingest_manifest(
+    State(state): State<AppState>,
+    Json(payload): Json<ManifestRequest>,
+) -> ApiResult<StatusCode> {
+    ingest_report(&state.pool, payload.report).await?;
     Ok(StatusCode::CREATED)
 }
 
@@ -325,6 +465,7 @@ async fn ingest_report(pool: &PgPool, report: IndexReport) -> Result<(), ApiErro
     insert_file_pointers(&mut tx, &report.file_pointers).await?;
     insert_symbol_records(&mut tx, &report.symbol_records).await?;
     insert_reference_records(&mut tx, &report.reference_records).await?;
+    insert_file_chunk_records(&mut tx, &report.file_chunks).await?;
 
     tx.commit().await.map_err(ApiErrorKind::from)?;
 
@@ -498,6 +639,56 @@ async fn insert_reference_records(
         });
         qb.push(
             " ON CONFLICT (content_hash, namespace, name, line_number, column_number, kind) DO NOTHING",
+        );
+
+        qb.build()
+            .execute(tx.as_mut())
+            .await
+            .map_err(ApiErrorKind::from)?;
+    }
+
+    Ok(())
+}
+
+async fn insert_file_chunk_records(
+    tx: &mut Transaction<'_, Postgres>,
+    records: &[FileChunkRecord],
+) -> Result<(), ApiErrorKind> {
+    if records.is_empty() {
+        return Ok(());
+    }
+
+    let deduped = dedup_by_key(records, |record| {
+        (
+            record.repository.clone(),
+            record.commit_sha.clone(),
+            record.file_path.clone(),
+            record.sequence,
+        )
+    });
+
+    for chunk in deduped.chunks(INSERT_BATCH_SIZE) {
+        let mut qb = QueryBuilder::new(
+            "INSERT INTO file_chunks (repository, commit_sha, file_path, chunk_order, chunk_hash, byte_offset, byte_len, start_line, line_count) ",
+        );
+        qb.push_values(chunk.iter().copied(), |mut b, record| {
+            let chunk_order: i32 = record.sequence.try_into().unwrap_or(i32::MAX);
+            let byte_offset: i64 = record.byte_offset.try_into().unwrap_or(i64::MAX);
+            let byte_len: i32 = record.byte_len.try_into().unwrap_or(i32::MAX);
+            let start_line: i32 = record.start_line.try_into().unwrap_or(i32::MAX);
+            let line_count: i32 = record.line_count.try_into().unwrap_or(i32::MAX);
+            b.push_bind(&record.repository)
+                .push_bind(&record.commit_sha)
+                .push_bind(&record.file_path)
+                .push_bind(chunk_order)
+                .push_bind(&record.chunk_hash)
+                .push_bind(byte_offset)
+                .push_bind(byte_len)
+                .push_bind(start_line)
+                .push_bind(line_count);
+        });
+        qb.push(
+            " ON CONFLICT (repository, commit_sha, file_path, chunk_order) DO UPDATE SET chunk_hash = EXCLUDED.chunk_hash, byte_offset = EXCLUDED.byte_offset, byte_len = EXCLUDED.byte_len, start_line = EXCLUDED.start_line, line_count = EXCLUDED.line_count",
         );
 
         qb.build()

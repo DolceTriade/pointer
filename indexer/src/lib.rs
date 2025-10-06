@@ -10,4 +10,4 @@ pub mod utils;
 pub use cli::run;
 pub use config::IndexerConfig;
 pub use engine::Indexer;
-pub use models::IndexReport;
+pub use models::{IndexArtifacts, IndexReport};

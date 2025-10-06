@@ -1,15 +1,26 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
 use anyhow::Result;
+use blake3::Hasher;
+use fastcdc::FastCDC;
 use ignore::WalkBuilder;
 use tracing::{debug, trace, warn};
 
 use crate::config::IndexerConfig;
 use crate::extractors::{self, ExtractedSymbol, Extraction};
-use crate::models::{ContentBlob, FilePointer, IndexReport, ReferenceRecord, SymbolRecord};
+use crate::models::{
+    ChunkDescriptor, ChunkPayload, ContentBlob, FileChunkRecord, FilePointer, IndexArtifacts,
+    IndexReport, ReferenceRecord, SymbolRecord,
+};
 use crate::utils;
+
+const SMALL_FILE_THRESHOLD: usize = 8 * 1024; // 8 KiB
+const CDC_MIN: usize = 2 * 1024; // 2 KiB
+const CDC_AVG: usize = 16 * 1024; // 16 KiB
+const CDC_MAX: usize = 32 * 1024; // 32 KiB
+const CHUNK_HASH_ALGORITHM: &str = "blake3";
 
 pub struct Indexer {
     config: IndexerConfig,
@@ -20,9 +31,11 @@ impl Indexer {
         Self { config }
     }
 
-    pub fn run(&self) -> Result<IndexReport> {
+    pub fn run(&self) -> Result<IndexArtifacts> {
         let mut report = IndexReport::default();
         let mut seen_hashes = HashSet::new();
+        let mut chunk_payloads: HashMap<String, ChunkPayload> = HashMap::new();
+        let mut chunk_descriptors: HashMap<String, ChunkDescriptor> = HashMap::new();
 
         let walker = WalkBuilder::new(&self.config.repo_path)
             .git_ignore(true)
@@ -50,7 +63,11 @@ impl Indexer {
             {
                 Ok(path) => path,
                 Err(err) => {
-                    warn!(error = %err, path = %absolute_path.display(), "skipping file outside repo root");
+                    warn!(
+                        error = %err,
+                        path = %absolute_path.display(),
+                        "skipping file outside repo root"
+                    );
                     continue;
                 }
             };
@@ -90,6 +107,66 @@ impl Indexer {
                 content_hash: content_hash.clone(),
             });
 
+            if !bytes.is_empty() {
+                let newline_offsets: Vec<usize> = bytes
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(idx, b)| if *b == b'\n' { Some(idx) } else { None })
+                    .collect();
+
+                let chunk_specs: Vec<(usize, usize)> = if bytes.len() <= SMALL_FILE_THRESHOLD {
+                    vec![(0, bytes.len())]
+                } else {
+                    FastCDC::new(&bytes, CDC_MIN, CDC_AVG, CDC_MAX)
+                        .map(|chunk| (chunk.offset as usize, chunk.length as usize))
+                        .collect()
+                };
+
+                for (sequence, (offset, length)) in chunk_specs.into_iter().enumerate() {
+                    if length == 0 {
+                        continue;
+                    }
+
+                    let end = offset + length;
+                    let slice = &bytes[offset..end];
+                    let mut hasher = Hasher::new();
+                    hasher.update(slice);
+                    let hash = hasher.finalize().to_hex().to_string();
+
+                    chunk_payloads
+                        .entry(hash.clone())
+                        .or_insert_with(|| ChunkPayload {
+                            hash: hash.clone(),
+                            algorithm: CHUNK_HASH_ALGORITHM.to_string(),
+                            data: slice.to_vec(),
+                        });
+
+                    chunk_descriptors
+                        .entry(hash.clone())
+                        .or_insert_with(|| ChunkDescriptor {
+                            hash: hash.clone(),
+                            algorithm: CHUNK_HASH_ALGORITHM.to_string(),
+                            byte_len: slice.len() as u32,
+                        });
+
+                    let start_line = line_number_at_offset(&newline_offsets, offset);
+                    let end_line = line_number_at_offset(&newline_offsets, end.saturating_sub(1));
+                    let line_count = end_line.saturating_sub(start_line) + 1;
+
+                    report.file_chunks.push(FileChunkRecord {
+                        repository: self.config.repository.clone(),
+                        commit_sha: self.config.commit.clone(),
+                        file_path: normalized_path.clone(),
+                        sequence: sequence as u32,
+                        chunk_hash: hash,
+                        byte_offset: offset as u64,
+                        byte_len: slice.len() as u32,
+                        start_line,
+                        line_count,
+                    });
+                }
+            }
+
             if let Some(ref lang) = language {
                 let source = String::from_utf8_lossy(&bytes);
                 let namespace_hint = utils::namespace_from_path(Some(lang), &relative_path);
@@ -101,6 +178,7 @@ impl Indexer {
                 if symbols.is_empty() {
                     debug!(file = %normalized_path, language = lang, "no symbols extracted");
                 }
+
                 for ExtractedSymbol {
                     name,
                     kind,
@@ -142,12 +220,38 @@ impl Indexer {
             }
         }
 
-        Ok(report)
+        let mut descriptors: Vec<ChunkDescriptor> = chunk_descriptors.into_values().collect();
+        descriptors.sort_by(|a, b| a.hash.cmp(&b.hash));
+        report.chunk_descriptors = descriptors;
+
+        let mut chunks: Vec<ChunkPayload> = chunk_payloads.into_values().collect();
+        chunks.sort_by(|a, b| a.hash.cmp(&b.hash));
+
+        Ok(IndexArtifacts { report, chunks })
     }
 
     pub fn config(&self) -> &IndexerConfig {
         &self.config
     }
+}
+
+fn line_number_at_offset(newlines: &[usize], offset: usize) -> u32 {
+    if newlines.is_empty() {
+        return 1;
+    }
+
+    let mut lo = 0usize;
+    let mut hi = newlines.len();
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        if newlines[mid] < offset {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+
+    (lo as u32) + 1
 }
 
 fn should_skip(path: &Path) -> bool {

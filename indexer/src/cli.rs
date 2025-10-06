@@ -196,18 +196,18 @@ fn run_index(args: IndexArgs) -> Result<()> {
     );
 
     let indexer = Indexer::new(config);
-    let report = indexer.run()?;
-    output::write_report(&output_dir, &report)?;
+    let artifacts = indexer.run()?;
+    output::write_report(&output_dir, &artifacts)?;
 
     if let Some(url) = args.upload_url.as_deref() {
         info!(%url, "uploading index to backend");
-        upload::upload_report(url, args.upload_api_key.as_deref(), &report)?;
+        upload::upload_index(url, args.upload_api_key.as_deref(), &artifacts)?;
     }
 
     info!(
         repo = repository,
         output = ?output_dir,
-        files = report.file_pointers.len(),
+        files = artifacts.report.file_pointers.len(),
         "indexing complete"
     );
 

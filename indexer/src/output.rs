@@ -4,11 +4,13 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use crate::models::IndexReport;
+use crate::models::IndexArtifacts;
 
-pub fn write_report(output_dir: &Path, report: &IndexReport) -> Result<()> {
+pub fn write_report(output_dir: &Path, artifacts: &IndexArtifacts) -> Result<()> {
     fs::create_dir_all(output_dir)
         .with_context(|| format!("failed to create output directory {}", output_dir.display()))?;
+
+    let report = &artifacts.report;
 
     write_json(output_dir.join("content_blobs.json"), &report.content_blobs)?;
     write_json(
@@ -20,6 +22,11 @@ pub fn write_report(output_dir: &Path, report: &IndexReport) -> Result<()> {
         output_dir.join("reference_records.json"),
         &report.reference_records,
     )?;
+    write_json(
+        output_dir.join("chunk_descriptors.json"),
+        &report.chunk_descriptors,
+    )?;
+    write_json(output_dir.join("file_chunks.json"), &report.file_chunks)?;
 
     Ok(())
 }
