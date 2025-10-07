@@ -353,15 +353,19 @@ mod tests {
         assert!(symbols.iter().any(|s| s.name == "Bar"
             && s.kind == "class"
             && s.namespace.as_deref() == Some("foo")));
-        assert!(symbols
-            .iter()
-            .any(|s| s.name == "foo" && s.kind == "namespace"));
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.name == "foo" && s.kind == "namespace")
+        );
         assert!(symbols.iter().any(|s| s.name == "method"
             && s.kind == "fn"
             && s.namespace.as_deref() == Some("foo::Bar")));
-        assert!(symbols
-            .iter()
-            .any(|s| s.name == "run" && s.kind == "fn" && s.namespace.as_deref() == Some("foo")));
+        assert!(
+            symbols.iter().any(|s| s.name == "run"
+                && s.kind == "fn"
+                && s.namespace.as_deref() == Some("foo"))
+        );
 
         let var_names: Vec<_> = symbols
             .iter()
@@ -375,12 +379,16 @@ mod tests {
         assert!(var_names.iter().any(|(name, _)| *name == "result"));
         assert!(!var_names.contains(&("global_handler", None)));
         assert!(!var_names.contains(&("foo_handler", Some("foo"))));
-        assert!(!var_names
-            .iter()
-            .any(|(name, ns)| *name == "on_ready" && *ns == Some("foo::Bar")));
-        assert!(!var_names
-            .iter()
-            .any(|(name, ns)| *name == "local_callback" && *ns == Some("foo::Bar::method")));
+        assert!(
+            !var_names
+                .iter()
+                .any(|(name, ns)| *name == "on_ready" && *ns == Some("foo::Bar"))
+        );
+        assert!(
+            !var_names
+                .iter()
+                .any(|(name, ns)| *name == "local_callback" && *ns == Some("foo::Bar::method"))
+        );
 
         let fn_symbols: Vec<_> = symbols
             .iter()

@@ -154,15 +154,21 @@ mod tests {
         assert!(symbols.iter().any(|s| s.name == "Foo"
             && s.kind == "message"
             && s.namespace.as_deref() == Some("demo.api")));
-        assert!(symbols
-            .iter()
-            .any(|s| s.name == "Nested" && s.namespace.as_deref() == Some("demo.api.Foo")));
-        assert!(symbols
-            .iter()
-            .any(|s| s.name == "Status" && s.kind == "enum"));
-        assert!(symbols
-            .iter()
-            .any(|s| s.name == "Demo" && s.kind == "service"));
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.name == "Nested" && s.namespace.as_deref() == Some("demo.api.Foo"))
+        );
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.name == "Status" && s.kind == "enum")
+        );
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.name == "Demo" && s.kind == "service")
+        );
         assert!(symbols.iter().any(|s| s.name == "Run"
             && s.kind == "rpc"
             && s.namespace.as_deref() == Some("demo.api.Demo")));

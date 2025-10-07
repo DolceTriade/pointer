@@ -43,10 +43,14 @@ pub fn Header() -> impl IntoView {
                                             type="checkbox"
                                             class="toggle toggle-primary"
                                             prop:checked={
-                                                darkmode.clone().map(|v| v.get()).unwrap_or_default()
+                                                let darkmode = darkmode.clone();
+                                                move || {
+                                                    darkmode.clone().map(|v| v.get()).unwrap_or_default()
+                                                }
                                             }
                                             on:change=move |ev| {
                                                 let val = event_target_checked(&ev);
+                                                tracing::info!("clicked {val:#?}");
                                                 darkmode.as_mut().and_then(|v| Some(v.set(val)));
                                             }
                                         />

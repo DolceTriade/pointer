@@ -1,12 +1,37 @@
 #[cfg(feature = "ssr")]
 #[tokio::main]
 async fn main() {
+    // Initialize logging system with colored output
+    #[cfg(feature = "ssr")]
+    {
+        use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
+        use tracing_subscriber::{EnvFilter, fmt};
+
+        let fmt_layer = fmt::layer()
+            .with_ansi(true) // Enable colored output
+            .with_line_number(true)
+            .with_file(true)
+            .with_thread_ids(false)
+            .with_thread_names(true);
+
+        let filter_layer =
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+
+        tracing_subscriber::registry()
+            .with(filter_layer)
+            .with(fmt_layer)
+            .init();
+    }
+
     use axum::Router;
     use leptos::prelude::*;
-    use leptos_axum::{generate_route_list, LeptosRoutes};
+    use leptos_axum::{LeptosRoutes, generate_route_list};
     use pointer::app::*;
 
-    let conf = get_configuration(None).unwrap();
+    tracing::info!("Starting pointer web UI");
+
+    let conf = get_configuration(Some("Cargo.toml")).expect("Failed to read configuration");
     let addr = conf.leptos_options.site_addr;
     let leptos_options = conf.leptos_options;
     let shell_options = leptos_options.clone();
@@ -21,12 +46,18 @@ async fn main() {
         .fallback(leptos_axum::file_and_error_handler(shell))
         .with_state(leptos_options);
 
-    // run our app with hyper
-    leptos::logging::log!("listening on http://{}", &addr);
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-    axum::serve(listener, app.into_make_service())
-        .await
-        .unwrap();
+    tracing::info!("listening on http://{}", &addr);
+
+    match tokio::net::TcpListener::bind(&addr).await {
+        Ok(listener) => {
+            if let Err(e) = axum::serve(listener, app.into_make_service()).await {
+                eprintln!("Server error: {}", e);
+            }
+        }
+        Err(e) => {
+            eprintln!("Failed to bind to address {}: {}", addr, e);
+        }
+    }
 }
 
 #[cfg(not(feature = "ssr"))]

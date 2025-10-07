@@ -322,18 +322,24 @@ mod tests {
         let mut symbols = extract(source);
         symbols.sort_by(|a, b| a.name.cmp(&b.name));
 
-        assert!(symbols
-            .iter()
-            .any(|s| s.name == "Demo" && s.kind == "class"));
-        assert!(symbols
-            .iter()
-            .any(|s| s.name == "Value" && s.kind == "struct"));
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.name == "Demo" && s.kind == "class")
+        );
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.name == "Value" && s.kind == "struct")
+        );
         assert!(symbols.iter().any(|s| {
             s.name == "doThing" && s.kind == "function" && s.namespace.as_deref() == Some("Demo")
         }));
-        assert!(symbols
-            .iter()
-            .any(|s| s.name == "helper" && s.kind == "function"));
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.name == "helper" && s.kind == "function")
+        );
 
         let vars: Vec<_> = symbols
             .iter()

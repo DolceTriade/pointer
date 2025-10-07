@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use git2::Repository;
 use sha2::{Digest, Sha256};
 use tracing::warn;
-use tracing_subscriber::{fmt, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt};
 
 #[derive(Debug, Clone)]
 pub struct RepoMetadata {

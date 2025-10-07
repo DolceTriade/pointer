@@ -374,15 +374,19 @@ mod tests {
         let mut symbols = extract(source);
         symbols.sort_by(|a, b| a.name.cmp(&b.name));
 
-        assert!(symbols
-            .iter()
-            .any(|s| s.name == "Demo" && s.kind == "class"));
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.name == "Demo" && s.kind == "class")
+        );
         assert!(symbols.iter().any(|s| {
             s.name == "doThing" && s.kind == "method" && s.namespace.as_deref() == Some("Demo")
         }));
-        assert!(symbols
-            .iter()
-            .any(|s| s.name == "Helper" && s.kind == "function"));
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.name == "Helper" && s.kind == "function")
+        );
 
         let fields: Vec<_> = symbols
             .iter()
@@ -391,12 +395,16 @@ mod tests {
             .collect();
         assert!(fields.contains(&("_count", "ivar")));
         assert!(fields.contains(&("value", "property")));
-        assert!(!fields
-            .iter()
-            .any(|(name, kind)| *name == "callback" && *kind == "ivar"));
-        assert!(!fields
-            .iter()
-            .any(|(name, kind)| *name == "onReady" && *kind == "property"));
+        assert!(
+            !fields
+                .iter()
+                .any(|(name, kind)| *name == "callback" && *kind == "ivar")
+        );
+        assert!(
+            !fields
+                .iter()
+                .any(|(name, kind)| *name == "onReady" && *kind == "property")
+        );
 
         let vars: Vec<_> = symbols
             .iter()

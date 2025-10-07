@@ -256,14 +256,18 @@ mod tests {
         assert!(symbols.iter().any(|s| s.name == "helper"
             && s.kind == "fn"
             && s.namespace.as_deref() == Some("foo")));
-        assert!(symbols
-            .iter()
-            .any(|s| s.name == "TopLevel" && s.kind == "enum"));
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.name == "TopLevel" && s.kind == "enum")
+        );
         assert!(symbols.iter().any(|s| s.name == "top_fn" && s.kind == "fn"));
 
-        assert!(symbols
-            .iter()
-            .any(|s| s.name == "private_fn" && s.kind == "fn"));
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.name == "private_fn" && s.kind == "fn")
+        );
         assert!(symbols.iter().any(|s| {
             s.name == "method" && s.kind == "method" && s.namespace.as_deref() == Some("foo::Bar")
         }));

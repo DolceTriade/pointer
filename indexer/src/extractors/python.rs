@@ -189,12 +189,16 @@ mod tests {
         let mut symbols = extract(source);
         symbols.sort_by(|a, b| a.name.cmp(&b.name));
 
-        assert!(symbols
-            .iter()
-            .any(|s| s.name == "Outer" && s.kind == "class"));
-        assert!(symbols
-            .iter()
-            .any(|s| s.name == "Inner" && s.namespace.as_deref() == Some("Outer")));
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.name == "Outer" && s.kind == "class")
+        );
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.name == "Inner" && s.namespace.as_deref() == Some("Outer"))
+        );
         assert!(symbols.iter().any(|s| s.name == "nested_async"
             && s.kind == "async_fn"
             && s.namespace.as_deref() == Some("Outer.Inner")));
@@ -204,9 +208,11 @@ mod tests {
         assert!(symbols.iter().any(|s| s.name == "helper"
             && s.kind == "fn"
             && s.namespace.as_deref() == Some("Outer.method")));
-        assert!(symbols
-            .iter()
-            .any(|s| s.name == "top_level" && s.kind == "fn" && s.namespace.is_none()));
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.name == "top_level" && s.kind == "fn" && s.namespace.is_none())
+        );
 
         let vars: Vec<_> = symbols
             .iter()

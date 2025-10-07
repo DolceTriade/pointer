@@ -72,11 +72,7 @@ fn attrpath_segments(node: &Node, source: &[u8]) -> Option<Vec<String>> {
         .map(|segment| segment.trim_matches('"').to_string())
         .collect::<Vec<_>>();
 
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts)
-    }
+    if parts.is_empty() { None } else { Some(parts) }
 }
 
 fn ancestor_namespaces(node: &Node, source: &[u8]) -> Vec<String> {
@@ -125,17 +121,25 @@ mod tests {
         let mut symbols = extract(source);
         symbols.sort_by(|a, b| a.name.cmp(&b.name));
 
-        assert!(symbols
-            .iter()
-            .any(|s| s.name == "bar" && s.kind == "attr" && s.namespace.as_deref() == Some("foo")));
-        assert!(symbols
-            .iter()
-            .any(|s| s.name == "qux" && s.namespace.as_deref() == Some("foo.baz")));
-        assert!(symbols
-            .iter()
-            .any(|s| s.name == "nested" && s.namespace.is_none()));
-        assert!(symbols
-            .iter()
-            .any(|s| s.name == "inner" && s.namespace.as_deref() == Some("nested")));
+        assert!(
+            symbols.iter().any(|s| s.name == "bar"
+                && s.kind == "attr"
+                && s.namespace.as_deref() == Some("foo"))
+        );
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.name == "qux" && s.namespace.as_deref() == Some("foo.baz"))
+        );
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.name == "nested" && s.namespace.is_none())
+        );
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.name == "inner" && s.namespace.as_deref() == Some("nested"))
+        );
     }
 }

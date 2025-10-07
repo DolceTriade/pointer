@@ -4,14 +4,14 @@ use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
 use axum::{
+    Json, Router,
     extract::{DefaultBodyLimit, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
-    Json, Router,
 };
-use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use clap::Parser;
 use once_cell::sync::Lazy;
 use pointer_indexer::models::{
@@ -607,7 +607,10 @@ async fn repo_tree(
     let like_pattern = if normalized_prefix.is_empty() {
         "%".to_string()
     } else {
-        format!("{}%", normalized_prefix.trim_start_matches('/').to_string() + "/")
+        format!(
+            "{}%",
+            normalized_prefix.trim_start_matches('/').to_string() + "/"
+        )
     };
 
     let rows: Vec<String> = sqlx::query_scalar(
@@ -671,14 +674,16 @@ async fn repo_tree(
         })
         .collect();
 
-    entries.extend(files.into_iter().map(|file_path| TreeEntry {
-        name: file_path
-            .rsplit('/')
-            .next()
-            .unwrap_or(&file_path)
-            .to_string(),
-        path: file_path,
-        kind: "file".to_string(),
+    entries.extend(files.into_iter().map(|file_path| {
+        TreeEntry {
+            name: file_path
+                .rsplit('/')
+                .next()
+                .unwrap_or(&file_path)
+                .to_string(),
+            path: file_path,
+            kind: "file".to_string(),
+        }
     }));
 
     entries.sort_by(|a, b| match (a.kind.as_str(), b.kind.as_str()) {
@@ -739,8 +744,13 @@ async fn file_snippet(
         ));
     }
 
-    let data = load_file_data(&state.pool, &request.repository, &request.commit_sha, &request.file_path)
-        .await?;
+    let data = load_file_data(
+        &state.pool,
+        &request.repository,
+        &request.commit_sha,
+        &request.file_path,
+    )
+    .await?;
 
     let file_text = String::from_utf8_lossy(&data.bytes);
     let lines: Vec<String> = file_text.lines().map(|line| line.to_string()).collect();
@@ -831,12 +841,7 @@ async fn load_file_data(
 
     let language = match language_row {
         Some(lang) => lang,
-        None => {
-            return Err(AppError::new(
-                StatusCode::NOT_FOUND,
-                "file not found",
-            ))
-        }
+        None => return Err(AppError::new(StatusCode::NOT_FOUND, "file not found")),
     };
 
     let chunk_rows: Vec<FileChunkDataRow> = sqlx::query_as(
@@ -863,13 +868,12 @@ async fn load_file_data(
         .iter()
         .map(|row| row.chunk_hash.clone())
         .collect();
-    let chunk_data: Vec<(String, Vec<u8>)> = sqlx::query_as(
-        "SELECT hash, data FROM chunks WHERE hash = ANY($1)",
-    )
-    .bind(&hashes)
-    .fetch_all(pool)
-    .await
-    .map_err(ApiErrorKind::from)?;
+    let chunk_data: Vec<(String, Vec<u8>)> =
+        sqlx::query_as("SELECT hash, data FROM chunks WHERE hash = ANY($1)")
+            .bind(&hashes)
+            .fetch_all(pool)
+            .await
+            .map_err(ApiErrorKind::from)?;
 
     let map: HashMap<String, Vec<u8>> = chunk_data.into_iter().collect();
 
@@ -893,10 +897,7 @@ async fn load_file_data(
 }
 
 fn highlight_text(text: &str, language: Option<&str>) -> Vec<HighlightedLine> {
-    let mut highlighter = HighlightLines::new(
-        select_syntax(language),
-        &THEME,
-    );
+    let mut highlighter = HighlightLines::new(select_syntax(language), &THEME);
 
     text.lines()
         .enumerate()

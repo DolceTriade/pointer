@@ -361,30 +361,44 @@ mod tests {
         let mut symbols = extract(source);
         symbols.sort_by(|a, b| a.name.cmp(&b.name));
 
-        assert!(symbols
-            .iter()
-            .any(|s| s.name == "Alias" && s.kind == "type"));
-        assert!(symbols
-            .iter()
-            .any(|s| s.name == "Container" && s.kind == "class"));
-        assert!(symbols
-            .iter()
-            .any(|s| s.name == "Thing" && s.kind == "interface"));
-        assert!(symbols
-            .iter()
-            .any(|s| s.name == "Status" && s.kind == "enum"));
-        assert!(symbols
-            .iter()
-            .any(|s| s.name == "helper" && s.kind == "function"));
-        assert!(symbols
-            .iter()
-            .any(|s| s.name == "Utils" && s.kind == "namespace"));
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.name == "Alias" && s.kind == "type")
+        );
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.name == "Container" && s.kind == "class")
+        );
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.name == "Thing" && s.kind == "interface")
+        );
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.name == "Status" && s.kind == "enum")
+        );
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.name == "helper" && s.kind == "function")
+        );
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.name == "Utils" && s.kind == "namespace")
+        );
         assert!(symbols.iter().any(|s| s.name == "inner"
             && s.kind == "function"
             && s.namespace.as_deref() == Some("Utils")));
-        assert!(symbols
-            .iter()
-            .any(|s| s.name == "hidden" && s.kind == "function"));
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.name == "hidden" && s.kind == "function")
+        );
 
         let fields: Vec<_> = symbols
             .iter()

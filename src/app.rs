@@ -1,14 +1,13 @@
-use leptos::prelude::*;
-use leptos_meta::{provide_meta_context, Title};
-use leptos_darkmode::Darkmode;
 use crate::components::{Header, SearchBar};
+use leptos::prelude::*;
+use leptos_darkmode::Darkmode;
+use leptos_meta::{Html, Title, provide_meta_context};
 
 pub fn shell(options: LeptosOptions) -> impl IntoView {
     provide_meta_context();
-    let darkmode = Darkmode::init();
     view! {
         <!DOCTYPE html>
-        <html lang="en" class:dark=move || darkmode.get()>
+        <html lang="en">
             <head>
                 <meta charset="utf-8" />
                 <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -28,10 +27,12 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
 
 #[component]
 pub fn App() -> impl IntoView {
+    let darkmode = Darkmode::init();
     view! {
-        <div class="flex flex-col min-h-screen">
+        <Html class:dark=move || darkmode.is_dark() />
+        <div class="flex flex-col">
             <Header />
-            <main class="flex-grow flex items-center justify-center">
+            <main class="flex-grow h-full">
                 <SearchBar />
             </main>
         </div>

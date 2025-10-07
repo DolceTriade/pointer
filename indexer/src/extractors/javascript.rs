@@ -286,15 +286,21 @@ mod tests {
         let mut symbols = extract(source);
         symbols.sort_by(|a, b| a.name.cmp(&b.name));
 
-        assert!(symbols
-            .iter()
-            .any(|s| s.name == "foo" && s.kind == "function"));
-        assert!(symbols
-            .iter()
-            .any(|s| s.name == "hidden" && s.kind == "function"));
-        assert!(symbols
-            .iter()
-            .any(|s| s.name == "Widget" && s.kind == "class"));
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.name == "foo" && s.kind == "function")
+        );
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.name == "hidden" && s.kind == "function")
+        );
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.name == "Widget" && s.kind == "class")
+        );
         assert!(symbols.iter().any(|s| {
             s.name == "method" && s.kind == "method" && s.namespace.as_deref() == Some("Widget")
         }));

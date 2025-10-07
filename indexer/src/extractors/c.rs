@@ -333,9 +333,11 @@ mod tests {
         let mut symbols = extract(source);
         symbols.sort_by(|a, b| a.name.cmp(&b.name));
 
-        assert!(symbols
-            .iter()
-            .any(|s| s.name == "Foo" && s.kind == "struct"));
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.name == "Foo" && s.kind == "struct")
+        );
         assert!(symbols.iter().any(|s| s.name == "Bar" && s.kind == "enum"));
         assert!(symbols.iter().any(|s| s.name == "helper" && s.kind == "fn"));
         assert!(symbols.iter().any(|s| s.name == "run" && s.kind == "fn"));
