@@ -30,9 +30,9 @@ pub fn App() -> impl IntoView {
     let darkmode = Darkmode::init();
     view! {
         <Html class:dark=move || darkmode.is_dark() />
-        <div class="flex flex-col">
+        <div class="flex flex-col min-h-screen">
             <Header />
-            <main class="flex-grow h-full">
+            <main class="flex-grow flex items-center justify-center">
                 <SearchBar />
             </main>
         </div>
