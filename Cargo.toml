@@ -55,27 +55,40 @@ web-sys = { version = "=0.3.81", features = [
     "HtmlElement",
     "CssStyleDeclaration",
 ] }
+clap = { version = "4.5.48", optional = true }
+dotenvy = { version = "0.15.7", optional = true }
+sqlx = { version = "0.7", optional = true }
+anyhow = "1.0.100"
 
 [features]
 hydrate = [
-    "leptos/hydrate",
     "dep:console_error_panic_hook",
-    "dep:wasm-bindgen",
     "dep:console_log",
     "dep:tracing-web",
+    "dep:wasm-bindgen",
+    "leptos/hydrate",
 ]
 ssr = [
     "dep:axum",
-    "dep:tokio",
-    "dep:leptos_axum",
-    "dep:reqwest",
     "dep:colored",
     "dep:console_log",
-    "leptos/ssr",
+    "dep:leptos_axum",
+    "dep:reqwest",
+    "dep:tokio",
+    "clap/derive",
+    "clap/wrap_help",
+    "clap/env",
+    "dotenvy/cli",
     "leptos_meta/ssr",
     "leptos_router/ssr",
+    "leptos/ssr",
+    "sqlx/macros",
+    "sqlx/postgres",
+    "sqlx/runtime-tokio",
 ]
 tracing-web = ["dep:tracing-web"]
+dotenvy = ["dep:dotenvy"]
+sqlx = ["dep:sqlx"]
 
 # Defines a size-optimized profile for the WASM bundle in release mode
 [profile.wasm-release]
