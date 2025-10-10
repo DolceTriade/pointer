@@ -1,5 +1,5 @@
 use crate::components::Header;
-use crate::pages::{HomePage, PlaceholderPage};
+use crate::pages::{HomePage, PlaceholderPage, RepoDetailPage};
 use leptos::prelude::*;
 use leptos_router::components::{Route, Router, Routes};
 use leptos_router::path;
@@ -38,6 +38,7 @@ pub fn App() -> impl IntoView {
                 <Routes fallback=|| "Page not found".into_view()>
                     <Route path=path!("/") view=HomePage />
                     <Route path=path!("/placeholder") view=PlaceholderPage />
+                    <Route path=path!("/repo/:repo") view=RepoDetailPage />
                 </Routes>
             </div>
         </Router>

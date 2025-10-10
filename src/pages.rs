@@ -1,6 +1,9 @@
 use leptos::prelude::*;
 use crate::components::{SearchBar, RepositoriesList};
 
+pub mod repo_detail;
+pub use repo_detail::RepoDetailPage;
+
 #[component]
 pub fn HomePage() -> impl IntoView {
     view! {

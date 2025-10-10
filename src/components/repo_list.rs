@@ -1,5 +1,6 @@
-use leptos::prelude::*;
+use leptos::{either::Either, prelude::*};
 use crate::services::repo_service::get_repositories;
+use leptos_router::components::A;
 
 #[component]
 pub fn RepositoriesList() -> impl IntoView {
@@ -15,46 +16,42 @@ pub fn RepositoriesList() -> impl IntoView {
                     {move || {
                         repos_resource
                             .get()
-                            .map(|result| {
-                                match result {
-                                    Ok(repos) => {
-                                        repos
-                                            .into_iter()
-                                            .map(|repo| {
+                            .map(|result| match result {
+                                Ok(repos) => {
+                                    Either::Left(view! {
+                                        <For
+                                            each=move || repos.clone()
+                                            key=|repo| repo.repository.clone()
+                                            children=move |repo| {
                                                 let repo_name = repo.repository.clone();
                                                 let file_count = repo.file_count;
                                                 let file_count_text = format!("{} files", file_count);
-                                                let repo_name_str = repo_name;
-                                                // Ensure this is a String
+                                                let repo_encoded = urlencoding::encode(&repo_name).to_string();
                                                 view! {
-                                                    <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4 border border-gray-200 dark:border-gray-700">
-                                                        <h3 class="font-semibold text-lg text-gray-900 dark:text-gray-100">
-                                                            {repo_name_str}
-                                                        </h3>
-                                                        <p class="text-gray-600 dark:text-gray-400 text-sm">
-                                                            {file_count_text}
-                                                        </p>
-                                                    </div>
+                                                    <A
+                                                        href=move || format!("/repo/{}", repo_encoded)
+                                                    >
+                                                        <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4 border border-gray-200 dark:border-gray-700 hover:shadow-md transition-shadow duration-200 cursor-pointer block">
+                                                            <h3 class="font-semibold text-lg text-gray-900 dark:text-gray-100">
+                                                                {repo_name.clone()}
+                                                            </h3>
+                                                            <p class="text-gray-600 dark:text-gray-400 text-sm">
+                                                                {file_count_text}
+                                                            </p>
+                                                        </div>
+                                                    </A>
                                                 }
-                                            })
-                                            .collect_view()
-                                    }
-                                    Err(e) => {
-                                        let error_msg = e.to_string();
-                                        let error_title = "Error".to_string();
-                                        vec![
-                                            view! {
-                                                <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4 border border-gray-200 dark:border-gray-700">
-                                                    <h3 class="font-semibold text-lg text-gray-900 dark:text-gray-100">
-                                                        {error_title}
-                                                    </h3>
-                                                    <p class="text-gray-600 dark:text-gray-400 text-sm">
-                                                        {error_msg}
-                                                    </p>
-                                                </div>
-                                            },
-                                        ]
-                                    }
+                                            }
+                                        />
+                                    })
+                                }
+                                Err(e) => {
+                                    Either::Right(view! {
+                                        <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4 border border-gray-200 dark:border-gray-700">
+                                            <h3 class="font-semibold text-lg text-gray-900 dark:text-gray-100">"Error"</h3>
+                                            <p class="text-gray-600 dark:text-gray-400 text-sm">{e.to_string()}</p>
+                                        </div>
+                                    })
                                 }
                             })
                     }}
