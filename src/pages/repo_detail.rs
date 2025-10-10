@@ -10,7 +10,7 @@ struct RepoParams {
 
 #[server]
 pub async fn get_repo_branches(repo: String) -> Result<Vec<String>, ServerFnError> {
-    use crate::db::{postgres::PostgresDb, Database};
+    use crate::db::{Database, postgres::PostgresDb};
 
     let state = expect_context::<crate::server::GlobalAppState>();
     let state = state.lock().await;

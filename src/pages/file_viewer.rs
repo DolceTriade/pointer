@@ -4,6 +4,7 @@ use leptos_router::components::A;
 use leptos_router::hooks::use_params;
 use leptos_router::params::Params;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 #[derive(Params, PartialEq, Clone, Debug)]
 pub struct FileViewerParams {
@@ -29,7 +30,7 @@ pub async fn get_file_viewer_data(
     branch: String,
     path: Option<String>,
 ) -> Result<FileViewerData, ServerFnError> {
-    use crate::db::{postgres::PostgresDb, Database, RepoTreeQuery};
+    use crate::db::{Database, RepoTreeQuery, postgres::PostgresDb};
 
     let state = expect_context::<crate::server::GlobalAppState>();
     let state = state.lock().await;
@@ -97,7 +98,7 @@ pub async fn get_file_viewer_data(
 }
 
 pub fn render_markdown(markdown: &str) -> String {
-    use pulldown_cmark::{html, Options, Parser};
+    use pulldown_cmark::{Options, Parser, html};
 
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
@@ -111,6 +112,120 @@ pub fn render_markdown(markdown: &str) -> String {
     html::push_html(&mut html_output, parser);
 
     html_output
+}
+
+#[component]
+fn FileTreeNode(
+    entry: TreeEntry,
+    repo: Signal<String>,
+    branch: Signal<String>,
+    expanded: RwSignal<HashSet<String>>,
+) -> impl IntoView {
+    let is_dir = entry.kind == "dir";
+    let children: RwSignal<Option<Vec<TreeEntry>>> = RwSignal::new(None);
+
+    let path = entry.path.clone();
+    let link_path = entry.path.clone();
+    let dir_path = entry.path.clone();
+    let child_entry = entry.clone();
+    let expand_entry = entry.clone();
+    let child_resource = Resource::new(
+        move || (is_dir, expanded.get().contains(&path)),
+        move |(is_dir, is_expanded)| {
+            let entry = child_entry.clone();
+            async move {
+                if is_dir && is_expanded {
+                    if let Ok(FileViewerData::Directory { entries, .. }) = get_file_viewer_data(
+                        repo.get(),
+                        branch.get(),
+                        Some(entry.path.clone() + "/"),
+                    )
+                    .await
+                    {
+                        children.set(Some(entries));
+                    }
+                }
+            }
+        },
+    );
+
+    let on_click = move |_| {
+        if is_dir {
+            expanded.update(|dirs| {
+                if dirs.contains(&entry.path) {
+                    dirs.remove(&entry.path);
+                } else {
+                    dirs.insert(entry.path.clone());
+                }
+            });
+            // Trigger resource loading
+            child_resource.refetch();
+        }
+    };
+
+    let link = format!("/repo/{}/tree/{}/{}", repo.get(), branch.get(), link_path);
+
+    view! {
+        <li>
+            <div
+                class="flex items-center cursor-pointer py-1"
+                on:click=on_click
+                // Use a normal link for files, but handle dirs with the on:click
+                role=if is_dir { "button" } else { "" }
+            >
+                {if is_dir {
+                    let icon = move || {
+                        if expanded.get().contains(&dir_path) { "▼" } else { "▶" }
+                    };
+                    Either::Left(
+                        // "▶" "▼"
+                        view! {
+                            <span class="w-4">{icon}</span>
+                            <span class="ml-1 text-blue-600 hover:underline">{entry.name}</span>
+                        },
+                    )
+                } else {
+                    Either::Right(
+                        view! {
+                            <span class="w-4"></span>
+                            <A href=link.clone() attr:class="ml-1 text-blue-600 hover:underline">
+                                {entry.name}
+                            </A>
+                        },
+                    )
+                }}
+            </div>
+            {
+                let entry = expand_entry.clone();
+                move || {
+                    if is_dir && expanded.get().contains(&entry.path) {
+                        Either::Left(
+                            view! {
+                                <ul class="pl-4">
+                                    <For
+                                        each=move || children.get().unwrap_or_default()
+                                        key=|child| child.path.clone()
+                                        children=move |child| {
+                                            view! {
+                                                <FileTreeNode
+                                                    entry=child
+                                                    repo=repo
+                                                    branch=branch
+                                                    expanded=expanded
+                                                />
+                                            }
+                                        }
+                                    />
+                                </ul>
+                            },
+                        )
+                    } else {
+                        Either::Right(view! { <ul class="hidden"></ul> })
+                    }
+                }
+            }
+        </li>
+    }
 }
 
 #[component]
@@ -132,6 +247,8 @@ pub fn FileViewer() -> impl IntoView {
         |(repo, branch)| get_file_viewer_data(repo, branch, Some("".to_string())),
     );
 
+    let expanded_dirs = RwSignal::new(HashSet::<String>::new());
+
     view! {
         <main class="flex-grow flex flex-col items-center justify-start pt-8 p-4">
             <div class="max-w-7xl w-full">
@@ -149,47 +266,38 @@ pub fn FileViewer() -> impl IntoView {
                         <Suspense fallback=move || {
                             view! { <p>"Loading tree..."</p> }
                         }>
-                            {move || {
-                                tree_resource
-                                    .get()
-                                    .map(|result| match result {
-                                        Ok(FileViewerData::Directory { entries, .. }) => {
-                                            Either::Left(
-                                                view! {
-                                                    <ul>
-                                                        {entries
-                                                            .into_iter()
-                                                            .map(|entry| {
-                                                                let link = format!(
-                                                                    "/repo/{}/tree/{}/{}",
-                                                                    repo(),
-                                                                    branch(),
-                                                                    entry.path,
-                                                                );
-                                                                let icon = if entry.kind == "dir" {
-                                                                    "📁"
-                                                                } else {
-                                                                    "📄"
-                                                                };
+                            <ul class="font-mono text-sm">
+                                {move || {
+                                    tree_resource
+                                        .get()
+                                        .map(|result| match result {
+                                            Ok(FileViewerData::Directory { entries, .. }) => {
+                                                Either::Left(
+                                                    // The fix is here: pass `repo()` and `branch()` directly
+                                                    view! {
+                                                        <For
+                                                            each=move || entries.clone()
+                                                            key=|e| e.path.clone()
+                                                            children=move |entry| {
                                                                 view! {
-                                                                    <li class="py-1">
-                                                                        <A href=link attr:class="text-blue-600 hover:underline">
-                                                                            {icon}
-                                                                            {entry.name}
-                                                                        </A>
-                                                                    </li>
+                                                                    <FileTreeNode
+                                                                        entry=entry
+                                                                        repo=Signal::derive(repo)
+                                                                        branch=Signal::derive(branch)
+                                                                        expanded=expanded_dirs
+                                                                    />
                                                                 }
-                                                            })
-                                                            .collect_view()}
-                                                    </ul>
-                                                },
-                                            )
-                                        }
-                                        _ => {
-                                            Either::Right(view! { <p>"Error loading file tree."</p> })
-                                        }
-                                    })
-                            }}
+                                                            }
+                                                        />
+                                                    },
+                                                )
+                                            }
+                                            _ => {
+                                                Either::Right(view! { <p>"Error loading file tree."</p> })
+                                            }
+                                        })
+                                }}
+                            </ul>
                         </Suspense>
                     </div>
 
@@ -237,7 +345,7 @@ pub fn FileViewer() -> impl IntoView {
                                                                                 view! {
                                                                                     <A
                                                                                         href=link
-                                                                                        attr:class="text-blue-600 hover:underline p-2 rounded hover:bg-gray-100 dark:hover:bg-gray-700"
+                                                                                        attr:class="text-blue-600 hover:underline p-2 rounded hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-2"
                                                                                     >
                                                                                         {icon}
                                                                                         {entry.name}
