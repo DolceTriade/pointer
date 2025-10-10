@@ -124,7 +124,12 @@ fn FileIcon() -> impl IntoView {
             viewBox="0 0 24 24"
             stroke="currentColor"
         >
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+            <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
+            ></path>
         </svg>
     }
 }
@@ -132,9 +137,79 @@ fn FileIcon() -> impl IntoView {
 #[component]
 fn DirectoryIcon() -> impl IntoView {
     view! {
-        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-yellow-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"></path>
+        <svg
+            xmlns="http://www.w3.org/2000/svg"
+            class="h-5 w-5 text-yellow-500"
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+        >
+            <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"
+            ></path>
         </svg>
+    }
+}
+
+#[component]
+fn Breadcrumbs(
+    repo: Signal<String>,
+    branch: Signal<String>,
+    path: Signal<String>,
+) -> impl IntoView {
+    let segments = Memo::new(move |_| {
+        let mut segs = Vec::new();
+        let mut current_path = String::new();
+        let path_val = path.get();
+        let path_parts: Vec<&str> = path_val.split('/').filter(|s| !s.is_empty()).collect();
+
+        for (i, segment) in path_parts.iter().enumerate() {
+            current_path.push_str(segment);
+            let is_last = i == path_parts.len() - 1;
+            // All non-last segments are directories and need a trailing slash.
+            // The last segment is a directory only if the original path ends with a slash.
+            if !is_last || path_val.ends_with('/') {
+                current_path.push('/');
+            }
+            segs.push((
+                segment.to_string(),
+                current_path.clone(),
+                is_last && !path_val.ends_with('/'),
+            ));
+        }
+        segs
+    });
+
+    view! {
+        <div class="text-sm breadcrumbs mb-6">
+            <ul>
+                <li>
+                    <A href=move || format!("/repo/{}", repo())>{repo()}</A>
+                </li>
+                <li>
+                    <A href=move || format!("/repo/{}/tree/{}/", repo(), branch())>{branch()}</A>
+                </li>
+                <For
+                    each=move || segments.get()
+                    key=|(_, p, _)| p.clone()
+                    children=move |(name, p, is_last)| {
+                        let full_path = format!("/repo/{}/tree/{}/{}", repo.get(), branch.get(), p);
+                        view! {
+                            <li>
+                                {if is_last {
+                                    Either::Left(view! { <span>{name}</span> })
+                                } else {
+                                    Either::Right(view! { <A href=full_path>{name}</A> })
+                                }}
+                            </li>
+                        }
+                    }
+                />
+            </ul>
+        </div>
     }
 }
 
@@ -207,10 +282,7 @@ fn FileTreeNode(
                         view! {
                             <span class="w-4 text-gray-500">{icon}</span>
                             <DirectoryIcon />
-                            <span
-                                class="ml-1 text-blue-600 hover:underline truncate"
-                                title=name
-                            >
+                            <span class="ml-1 text-blue-600 hover:underline truncate" title=name>
                                 {entry.name}
                             </span>
                         },
@@ -221,7 +293,11 @@ fn FileTreeNode(
                         view! {
                             <FileIcon />
                             <span class="w-4"></span>
-                            <A href=link.clone() attr:class="ml-1 text-blue-600 hover:underline truncate" attr:title=name.clone()>
+                            <A
+                                href=link.clone()
+                                attr:class="ml-1 text-blue-600 hover:underline truncate"
+                                attr:title=name.clone()
+                            >
                                 {entry.name}
                             </A>
                         },
@@ -285,11 +361,11 @@ pub fn FileViewer() -> impl IntoView {
     view! {
         <main class="flex-grow flex flex-col items-center justify-start pt-8 p-4">
             <div class="max-w-7xl w-full">
-                <h1 class="text-3xl font-bold mb-6 text-gray-800 dark:text-gray-200">
-                    <A href=move || format!("/repo/{}", repo())>{repo()}</A>
-                    <span class="text-gray-500">" / "</span>
-                    <span>{branch}</span>
-                </h1>
+                <Breadcrumbs
+                    repo=Signal::derive(repo)
+                    branch=Signal::derive(branch)
+                    path=Signal::derive(move || path().unwrap_or_default())
+                />
                 <div class="flex gap-6">
                     // Left Panel: File Tree
                     <div class="w-1/4 bg-white dark:bg-gray-800 rounded-lg shadow p-4 border border-gray-200 dark:border-gray-700 self-start">
@@ -363,14 +439,21 @@ pub fn FileViewer() -> impl IntoView {
                                                                     <div class="grid grid-cols-2 md:grid-cols-3 gap-4">
                                                                         {entries
                                                                             .into_iter()
-                                                                        .map(move |entry| {
-                                                                            let mut link = format!(
-                                                                                "/repo/{}/tree/{}/{}", repo(), branch(), entry.path
-                                                                            );
-                                                                            if entry.kind == "dir" {
-                                                                                link.push('/');
-                                                                            }
-                                                                                let icon = if entry.kind == "dir" { Either::Left(view! { <DirectoryIcon /> }) } else { Either::Right(view! { <FileIcon /> }) };
+                                                                            .map(move |entry| {
+                                                                                let mut link = format!(
+                                                                                    "/repo/{}/tree/{}/{}",
+                                                                                    repo(),
+                                                                                    branch(),
+                                                                                    entry.path,
+                                                                                );
+                                                                                if entry.kind == "dir" {
+                                                                                    link.push('/');
+                                                                                }
+                                                                                let icon = if entry.kind == "dir" {
+                                                                                    Either::Left(view! { <DirectoryIcon /> })
+                                                                                } else {
+                                                                                    Either::Right(view! { <FileIcon /> })
+                                                                                };
                                                                                 let name = entry.name.clone();
                                                                                 view! {
                                                                                     <A
