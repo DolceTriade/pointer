@@ -4,7 +4,7 @@ pub mod db;
 pub mod pages;
 pub mod services;
 
-#[cfg(feature="ssr")]
+#[cfg(feature = "ssr")]
 pub mod server;
 
 #[cfg(feature = "hydrate")]

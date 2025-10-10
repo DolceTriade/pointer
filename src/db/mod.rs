@@ -1,12 +1,12 @@
 pub mod models;
-#[cfg(feature="ssr")]
+#[cfg(feature = "ssr")]
 pub mod postgres;
 
+use crate::db::models::{FileReference, HighlightedLine, SymbolResult, TokenOccurrence};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use crate::db::models::{FileReference, HighlightedLine, TokenOccurrence, SymbolResult};
 
-#[cfg(feature="ssr")]
+#[cfg(feature = "ssr")]
 use crate::db::models::{HighlightedSegment, ReferenceResult};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,7 +74,7 @@ pub struct TreeResponse {
     pub entries: Vec<TreeEntry>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TreeEntry {
     pub name: String,
     pub path: String,
@@ -100,13 +100,35 @@ pub trait Database: Clone + Send + Sync + 'static {
     // Existing backend operations
     async fn chunk_need(&self, hashes: Vec<String>) -> Result<Vec<String>, DbError>;
     async fn chunk_upload(&self, chunks: Vec<ChunkUploadItem>) -> Result<(), DbError>;
-    async fn store_manifest_chunk(&self, upload_id: String, chunk_index: i32, total_chunks: i32, data: Vec<u8>) -> Result<(), DbError>;
-    async fn finalize_manifest(&self, upload_id: String, compressed: Option<bool>) -> Result<(), DbError>;
+    async fn store_manifest_chunk(
+        &self,
+        upload_id: String,
+        chunk_index: i32,
+        total_chunks: i32,
+        data: Vec<u8>,
+    ) -> Result<(), DbError>;
+    async fn finalize_manifest(
+        &self,
+        upload_id: String,
+        compressed: Option<bool>,
+    ) -> Result<(), DbError>;
     async fn list_commits(&self, repository: &str) -> Result<Vec<String>, DbError>;
-    async fn get_repo_tree(&self, repository: &str, query: RepoTreeQuery) -> Result<TreeResponse, DbError>;
-    async fn get_file_content(&self, repository: &str, commit_sha: &str, file_path: &str) -> Result<FileContentResponse, DbError>;
+    async fn get_repo_tree(
+        &self,
+        repository: &str,
+        query: RepoTreeQuery,
+    ) -> Result<TreeResponse, DbError>;
+    async fn get_file_content(
+        &self,
+        repository: &str,
+        commit_sha: &str,
+        file_path: &str,
+    ) -> Result<FileContentResponse, DbError>;
     async fn get_file_snippet(&self, request: SnippetRequest) -> Result<SnippetResponse, DbError>;
-    async fn get_symbol_references(&self, request: SymbolReferenceRequest) -> Result<SymbolReferenceResponse, DbError>;
+    async fn get_symbol_references(
+        &self,
+        request: SymbolReferenceRequest,
+    ) -> Result<SymbolReferenceResponse, DbError>;
     async fn search_symbols(&self, request: SearchRequest) -> Result<SearchResponse, DbError>;
     async fn health_check(&self) -> Result<String, DbError>;
 }

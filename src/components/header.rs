@@ -9,7 +9,9 @@ pub fn Header() -> impl IntoView {
     view! {
         <header class="navbar bg-base-100 shadow-md w-full">
             <div class="flex-1">
-                <a href="/" class="text-xl font-bold">Pointer</a>
+                <a href="/" class="text-xl font-bold">
+                    Pointer
+                </a>
             </div>
             <div class="flex-none">
                 <nav class="flex space-x-4 items-center">

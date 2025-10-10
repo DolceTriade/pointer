@@ -177,7 +177,7 @@ struct SnippetResponse {
 
 #[derive(sqlx::FromRow)]
 struct FileChunkDataRow {
-    _chunk_order: i32,
+    chunk_order: i32,
     chunk_hash: String,
     byte_len: i32,
 }

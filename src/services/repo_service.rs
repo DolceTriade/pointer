@@ -2,7 +2,7 @@ use crate::db::RepoSummary;
 use leptos::prelude::*;
 
 #[cfg(feature = "ssr")]
-use crate::db::{postgres::PostgresDb, Database};
+use crate::db::{Database, postgres::PostgresDb};
 
 #[server]
 pub async fn get_repositories(limit: usize) -> Result<Vec<RepoSummary>, ServerFnError> {

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature="ssr", derive(sqlx::FromRow))]
+#[cfg_attr(feature = "ssr", derive(sqlx::FromRow))]
 pub struct FileReference {
     pub repository: String,
     pub commit_sha: String,

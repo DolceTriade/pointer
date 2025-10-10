@@ -1,12 +1,14 @@
 use crate::components::Header;
+use crate::pages::file_viewer::FileViewer;
 use crate::pages::{HomePage, PlaceholderPage, RepoDetailPage};
 use leptos::prelude::*;
+use leptos_darkmode::Darkmode;
+use leptos_meta::{Html, Title, provide_meta_context};
 use leptos_router::components::{Route, Router, Routes};
 use leptos_router::path;
-use leptos_darkmode::Darkmode;
-use leptos_meta::{Html, Title};
 
 pub fn shell(options: LeptosOptions) -> impl IntoView {
+    provide_meta_context();
     view! {
         <!DOCTYPE html>
         <html lang="en">
@@ -29,7 +31,7 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
 
 #[component]
 pub fn App() -> impl IntoView {
-    let darkmode = expect_context::<Darkmode>();
+    let darkmode = Darkmode::init();
     view! {
         <Html class:dark=move || darkmode.is_dark() />
         <Router>
@@ -39,6 +41,7 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("/") view=HomePage />
                     <Route path=path!("/placeholder") view=PlaceholderPage />
                     <Route path=path!("/repo/:repo") view=RepoDetailPage />
+                    <Route path=path!("/repo/:repo/tree/:branch/*path") view=FileViewer />
                 </Routes>
             </div>
         </Router>

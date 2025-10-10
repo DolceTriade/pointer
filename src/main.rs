@@ -14,7 +14,7 @@ async fn main() -> anyhow::Result<()> {
     // Initialize logging system with colored output
     use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
-    use tracing_subscriber::{fmt, EnvFilter};
+    use tracing_subscriber::{EnvFilter, fmt};
 
     let fmt_layer = fmt::layer()
         .with_ansi(true) // Enable colored output
@@ -30,8 +30,8 @@ async fn main() -> anyhow::Result<()> {
         .with(fmt_layer)
         .init();
 
-    use anyhow::bail;
     use anyhow::Context;
+    use anyhow::bail;
     use axum::Router;
     use leptos::prelude::*;
     use leptos_axum::{LeptosRoutes, generate_route_list_with_exclusions_and_ssg_and_context};
@@ -57,26 +57,20 @@ async fn main() -> anyhow::Result<()> {
     // Generate the list of routes in your Leptos App
 
     let context = move || {
-        use leptos_darkmode::Darkmode;
-        use leptos_meta::provide_meta_context;
-        provide_meta_context();
         provide_context(render_state.clone());
-        let _ = Darkmode::init();
-
     };
 
-    let routes = generate_route_list_with_exclusions_and_ssg_and_context(App, None, context.clone()).0;
+    let routes =
+        generate_route_list_with_exclusions_and_ssg_and_context(App, None, context.clone()).0;
     let app = Router::new()
-        .leptos_routes_with_context(
-            &leptos_options,
-            routes,
-            context.clone(),
-            move || {
-                let val = shell_options.clone();
-                move || shell(val.clone())
-            },
-        )
-        .fallback(leptos_axum::file_and_error_handler_with_context(move || provide_context(file_state.clone()), shell))
+        .leptos_routes_with_context(&leptos_options, routes, context.clone(), move || {
+            let val = shell_options.clone();
+            move || shell(val.clone())
+        })
+        .fallback(leptos_axum::file_and_error_handler_with_context(
+            move || provide_context(file_state.clone()),
+            shell,
+        ))
         .with_state(leptos_options);
 
     tracing::info!("listening on http://{}", &addr);

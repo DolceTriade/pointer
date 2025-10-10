@@ -1,9 +1,14 @@
-use std::io::Read;
+use crate::db::models::FileReference as DbFileReference;
+use crate::db::{
+    ChunkUploadItem, Database, DbError, FileContentResponse, FileReference, HighlightedLine,
+    HighlightedSegment, ReferenceResult, RepoSummary, RepoTreeQuery, SearchRequest, SearchResponse,
+    SnippetRequest, SnippetResponse, SymbolReferenceRequest, SymbolReferenceResponse, SymbolResult,
+    TokenOccurrence, TreeEntry, TreeResponse,
+};
 use async_trait::async_trait;
 use base64::Engine;
 use sqlx::{PgPool, Postgres, QueryBuilder, Transaction};
-use crate::db::{Database, DbError, RepoSummary, ChunkUploadItem, SnippetRequest, SnippetResponse, SymbolReferenceRequest, SymbolReferenceResponse, SearchRequest, SearchResponse, RepoTreeQuery, TreeResponse, TreeEntry, FileContentResponse, FileReference, HighlightedLine, HighlightedSegment, TokenOccurrence, SymbolResult, ReferenceResult};
-use crate::db::models::FileReference as DbFileReference;
+use std::io::Read;
 
 #[derive(Clone)]
 pub struct PostgresDb {
@@ -56,13 +61,15 @@ impl Database for PostgresDb {
             return Ok(Vec::new());
         }
 
-        let existing: Vec<(String,)> = sqlx::query_as("SELECT hash FROM chunks WHERE hash = ANY($1)")
-            .bind(&hashes)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| DbError::Database(e.to_string()))?;
+        let existing: Vec<(String,)> =
+            sqlx::query_as("SELECT hash FROM chunks WHERE hash = ANY($1)")
+                .bind(&hashes)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| DbError::Database(e.to_string()))?;
 
-        let present: std::collections::HashSet<String> = existing.into_iter().map(|row| row.0).collect();
+        let present: std::collections::HashSet<String> =
+            existing.into_iter().map(|row| row.0).collect();
         let requested: std::collections::HashSet<String> = hashes.into_iter().collect();
         let missing: Vec<String> = requested.difference(&present).cloned().collect();
 
@@ -76,7 +83,8 @@ impl Database for PostgresDb {
 
         let mut decoded = Vec::with_capacity(chunks.len());
         for chunk in chunks {
-            let data = base64::engine::general_purpose::STANDARD.decode(&chunk.data)
+            let data = base64::engine::general_purpose::STANDARD
+                .decode(&chunk.data)
                 .map_err(|e| DbError::Internal(format!("invalid base64 data: {}", e)))?;
 
             if chunk.byte_len != data.len() as u32 {
@@ -118,9 +126,17 @@ impl Database for PostgresDb {
         Ok(())
     }
 
-    async fn store_manifest_chunk(&self, upload_id: String, chunk_index: i32, total_chunks: i32, data: Vec<u8>) -> Result<(), DbError> {
+    async fn store_manifest_chunk(
+        &self,
+        upload_id: String,
+        chunk_index: i32,
+        total_chunks: i32,
+        data: Vec<u8>,
+    ) -> Result<(), DbError> {
         if chunk_index < 0 || total_chunks <= 0 || chunk_index >= total_chunks {
-            return Err(DbError::Internal("invalid manifest chunk metadata".to_string()));
+            return Err(DbError::Internal(
+                "invalid manifest chunk metadata".to_string(),
+            ));
         }
 
         sqlx::query(
@@ -140,7 +156,11 @@ impl Database for PostgresDb {
         Ok(())
     }
 
-    async fn finalize_manifest(&self, upload_id: String, compressed: Option<bool>) -> Result<(), DbError> {
+    async fn finalize_manifest(
+        &self,
+        upload_id: String,
+        compressed: Option<bool>,
+    ) -> Result<(), DbError> {
         use zstd::stream::read::Decoder;
 
         let rows: Vec<UploadChunkRow> = sqlx::query_as(
@@ -152,7 +172,9 @@ impl Database for PostgresDb {
         .map_err(|e| DbError::Database(e.to_string()))?;
 
         if rows.is_empty() {
-            return Err(DbError::Internal("no chunks uploaded for manifest".to_string()));
+            return Err(DbError::Internal(
+                "no chunks uploaded for manifest".to_string(),
+            ));
         }
 
         let expected_total = rows[0].total_chunks;
@@ -166,7 +188,9 @@ impl Database for PostgresDb {
 
         for (index, row) in rows.iter().enumerate() {
             if row.chunk_index != index as i32 || row.total_chunks != expected_total {
-                return Err(DbError::Internal("inconsistent manifest chunk metadata".to_string()));
+                return Err(DbError::Internal(
+                    "inconsistent manifest chunk metadata".to_string(),
+                ));
             }
         }
 
@@ -178,8 +202,8 @@ impl Database for PostgresDb {
         let compressed = compressed.unwrap_or(false);
         let report_bytes = if compressed {
             let cursor = std::io::Cursor::new(combined);
-            let mut decoder = Decoder::new(cursor)
-                .map_err(|e| DbError::Compression(e.to_string()))?;
+            let mut decoder =
+                Decoder::new(cursor).map_err(|e| DbError::Compression(e.to_string()))?;
             let mut buf = Vec::new();
             decoder
                 .read_to_end(&mut buf)
@@ -215,7 +239,11 @@ impl Database for PostgresDb {
         Ok(commits)
     }
 
-    async fn get_repo_tree(&self, repository: &str, query: RepoTreeQuery) -> Result<TreeResponse, DbError> {
+    async fn get_repo_tree(
+        &self,
+        repository: &str,
+        query: RepoTreeQuery,
+    ) -> Result<TreeResponse, DbError> {
         if query.commit.is_empty() {
             return Err(DbError::Internal("missing commit parameter".to_string()));
         }
@@ -319,7 +347,12 @@ impl Database for PostgresDb {
         })
     }
 
-    async fn get_file_content(&self, repository: &str, commit_sha: &str, file_path: &str) -> Result<FileContentResponse, DbError> {
+    async fn get_file_content(
+        &self,
+        repository: &str,
+        commit_sha: &str,
+        file_path: &str,
+    ) -> Result<FileContentResponse, DbError> {
         if commit_sha.is_empty() {
             return Err(DbError::Internal("missing commit parameter".to_string()));
         }
@@ -328,7 +361,9 @@ impl Database for PostgresDb {
             return Err(DbError::Internal("missing file path".to_string()));
         }
 
-        let data = self.load_file_data(repository, commit_sha, file_path).await?;
+        let data = self
+            .load_file_data(repository, commit_sha, file_path)
+            .await?;
 
         let text = String::from_utf8_lossy(&data.bytes).to_string();
         let highlight = self.highlight_text(&text, data.language.as_deref());
@@ -349,11 +384,9 @@ impl Database for PostgresDb {
             return Err(DbError::Internal("line numbers are 1-based".to_string()));
         }
 
-        let data = self.load_file_data(
-            &request.repository,
-            &request.commit_sha,
-            &request.file_path,
-        ).await?;
+        let data = self
+            .load_file_data(&request.repository, &request.commit_sha, &request.file_path)
+            .await?;
 
         let file_text = String::from_utf8_lossy(&data.bytes);
         let lines: Vec<String> = file_text.lines().map(|line| line.to_string()).collect();
@@ -364,7 +397,9 @@ impl Database for PostgresDb {
 
         let total_lines = lines.len() as u32;
         if request.line > total_lines {
-            return Err(DbError::Internal("line number exceeds file length".to_string()));
+            return Err(DbError::Internal(
+                "line number exceeds file length".to_string(),
+            ));
         }
 
         let context = request.context.unwrap_or(3).min(1000);
@@ -393,7 +428,10 @@ impl Database for PostgresDb {
         })
     }
 
-    async fn get_symbol_references(&self, request: SymbolReferenceRequest) -> Result<SymbolReferenceResponse, DbError> {
+    async fn get_symbol_references(
+        &self,
+        request: SymbolReferenceRequest,
+    ) -> Result<SymbolReferenceResponse, DbError> {
         let rows: Vec<DbFileReference> = sqlx::query_as(
             "SELECT f.repository, f.commit_sha, f.file_path, r.namespace, r.name, r.kind,
                     r.line_number AS line, r.column_number AS column
@@ -409,32 +447,36 @@ impl Database for PostgresDb {
         .await
         .map_err(|e| DbError::Database(e.to_string()))?;
 
-        Ok(SymbolReferenceResponse { 
-            references: rows.into_iter().map(|r| FileReference {
-                repository: r.repository,
-                commit_sha: r.commit_sha,
-                file_path: r.file_path,
-                namespace: r.namespace,
-                name: r.name,
-                kind: r.kind,
-                line: r.line,
-                column: r.column,
-            }).collect()
+        Ok(SymbolReferenceResponse {
+            references: rows
+                .into_iter()
+                .map(|r| FileReference {
+                    repository: r.repository,
+                    commit_sha: r.commit_sha,
+                    file_path: r.file_path,
+                    namespace: r.namespace,
+                    name: r.name,
+                    kind: r.kind,
+                    line: r.line,
+                    column: r.column,
+                })
+                .collect(),
         })
     }
 
     async fn search_symbols(&self, request: SearchRequest) -> Result<SearchResponse, DbError> {
         let mut qb = QueryBuilder::new(
-            "SELECT s.symbol, s.namespace, s.kind, s.fully_qualified, cb.language, 
-             f.repository, f.commit_sha, f.file_path 
-             FROM symbols s 
-             JOIN content_blobs cb ON cb.hash = s.content_hash 
-             JOIN files f ON f.content_hash = s.content_hash 
+            "SELECT s.symbol, s.namespace, s.kind, s.fully_qualified, cb.language,
+             f.repository, f.commit_sha, f.file_path
+             FROM symbols s
+             JOIN content_blobs cb ON cb.hash = s.content_hash
+             JOIN files f ON f.content_hash = s.content_hash
              WHERE 1 = 1",
         );
 
         if let Some(name) = &request.name {
-            qb.push(" AND s.symbol ILIKE ").push_bind(format!("%{}%", name));
+            qb.push(" AND s.symbol ILIKE ")
+                .push_bind(format!("%{}%", name));
         }
 
         if let Some(regex) = &request.name_regex {
@@ -446,7 +488,8 @@ impl Database for PostgresDb {
         }
 
         if let Some(prefix) = &request.namespace_prefix {
-            qb.push(" AND s.namespace LIKE ").push_bind(format!("{}%", prefix));
+            qb.push(" AND s.namespace LIKE ")
+                .push_bind(format!("{}%", prefix));
         }
 
         if let Some(kinds) = &request.kind {
@@ -454,7 +497,9 @@ impl Database for PostgresDb {
         }
 
         if let Some(languages) = &request.language {
-            qb.push(" AND cb.language = ANY(").push_bind(languages).push(")");
+            qb.push(" AND cb.language = ANY(")
+                .push_bind(languages)
+                .push(")");
         }
 
         if let Some(repo) = &request.repository {
@@ -466,7 +511,8 @@ impl Database for PostgresDb {
         }
 
         if let Some(path) = &request.path {
-            qb.push(" AND f.file_path ILIKE ").push_bind(format!("%{}%", path));
+            qb.push(" AND f.file_path ILIKE ")
+                .push_bind(format!("%{}%", path));
         }
 
         if let Some(regex) = &request.path_regex {
@@ -483,7 +529,8 @@ impl Database for PostgresDb {
             .map_err(|e| DbError::Database(e.to_string()))?;
 
         let include_refs = request.include_references.unwrap_or(false);
-        let mut reference_map: std::collections::HashMap<String, Vec<ReferenceRow>> = std::collections::HashMap::new();
+        let mut reference_map: std::collections::HashMap<String, Vec<ReferenceRow>> =
+            std::collections::HashMap::new();
 
         if include_refs {
             let fully_qualified: std::collections::HashSet<String> =
@@ -491,7 +538,7 @@ impl Database for PostgresDb {
             if !fully_qualified.is_empty() {
                 let lookup: Vec<String> = fully_qualified.into_iter().collect();
                 let ref_rows: Vec<ReferenceRow> = sqlx::query_as(
-                    "SELECT fully_qualified, name, namespace, kind, line_number AS line, column_number AS column 
+                    "SELECT fully_qualified, name, namespace, kind, line_number AS line, column_number AS column
                      FROM symbol_references WHERE fully_qualified = ANY($1)",
                 )
                 .bind(&lookup)
@@ -549,13 +596,18 @@ impl Database for PostgresDb {
             .fetch_one(&self.pool)
             .await
             .map_err(|e| DbError::Database(e.to_string()))?;
-        
+
         Ok("ok".to_string())
     }
 }
 
 impl PostgresDb {
-    async fn load_file_data(&self, repository: &str, commit_sha: &str, file_path: &str) -> Result<FileData, DbError> {
+    async fn load_file_data(
+        &self,
+        repository: &str,
+        commit_sha: &str,
+        file_path: &str,
+    ) -> Result<FileData, DbError> {
         let language_row = sqlx::query_scalar::<_, Option<String>>(
             "SELECT cb.language
              FROM files f
@@ -687,23 +739,39 @@ impl PostgresDb {
         result
     }
 
-    async fn ingest_report(&self, report: pointer_indexer::models::IndexReport) -> Result<(), DbError> {
-        let mut tx = self.pool.begin().await
+    async fn ingest_report(
+        &self,
+        report: pointer_indexer::models::IndexReport,
+    ) -> Result<(), DbError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
             .map_err(|e| DbError::Database(e.to_string()))?;
 
-        self.insert_content_blobs(&mut tx, &report.content_blobs).await?;
-        self.insert_file_pointers(&mut tx, &report.file_pointers).await?;
-        self.insert_symbol_records(&mut tx, &report.symbol_records).await?;
-        self.insert_reference_records(&mut tx, &report.reference_records).await?;
-        self.insert_file_chunk_records(&mut tx, &report.file_chunks).await?;
+        self.insert_content_blobs(&mut tx, &report.content_blobs)
+            .await?;
+        self.insert_file_pointers(&mut tx, &report.file_pointers)
+            .await?;
+        self.insert_symbol_records(&mut tx, &report.symbol_records)
+            .await?;
+        self.insert_reference_records(&mut tx, &report.reference_records)
+            .await?;
+        self.insert_file_chunk_records(&mut tx, &report.file_chunks)
+            .await?;
 
-        tx.commit().await
+        tx.commit()
+            .await
             .map_err(|e| DbError::Database(e.to_string()))?;
 
         Ok(())
     }
 
-    async fn insert_content_blobs(&self, tx: &mut Transaction<'_, Postgres>, blobs: &[pointer_indexer::models::ContentBlob]) -> Result<(), DbError> {
+    async fn insert_content_blobs(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        blobs: &[pointer_indexer::models::ContentBlob],
+    ) -> Result<(), DbError> {
         if blobs.is_empty() {
             return Ok(());
         }
@@ -711,7 +779,9 @@ impl PostgresDb {
         let deduped = dedup_by_key(blobs, |blob| blob.hash.clone());
 
         for chunk in deduped.chunks(INSERT_BATCH_SIZE) {
-            let mut qb = QueryBuilder::new("INSERT INTO content_blobs (hash, language, byte_len, line_count) ");
+            let mut qb = QueryBuilder::new(
+                "INSERT INTO content_blobs (hash, language, byte_len, line_count) ",
+            );
             qb.push_values(chunk.iter().copied(), |mut b, blob| {
                 b.push_bind(&blob.hash)
                     .push_bind(&blob.language)
@@ -731,7 +801,11 @@ impl PostgresDb {
         Ok(())
     }
 
-    async fn insert_file_pointers(&self, tx: &mut Transaction<'_, Postgres>, files: &[pointer_indexer::models::FilePointer]) -> Result<(), DbError> {
+    async fn insert_file_pointers(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        files: &[pointer_indexer::models::FilePointer],
+    ) -> Result<(), DbError> {
         if files.is_empty() {
             return Ok(());
         }
@@ -767,7 +841,11 @@ impl PostgresDb {
         Ok(())
     }
 
-    async fn insert_symbol_records(&self, tx: &mut Transaction<'_, Postgres>, symbols: &[pointer_indexer::models::SymbolRecord]) -> Result<(), DbError> {
+    async fn insert_symbol_records(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        symbols: &[pointer_indexer::models::SymbolRecord],
+    ) -> Result<(), DbError> {
         if symbols.is_empty() {
             return Ok(());
         }
@@ -805,7 +883,11 @@ impl PostgresDb {
         Ok(())
     }
 
-    async fn insert_reference_records(&self, tx: &mut Transaction<'_, Postgres>, references: &[pointer_indexer::models::ReferenceRecord]) -> Result<(), DbError> {
+    async fn insert_reference_records(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        references: &[pointer_indexer::models::ReferenceRecord],
+    ) -> Result<(), DbError> {
         if references.is_empty() {
             return Ok(());
         }
@@ -849,7 +931,11 @@ impl PostgresDb {
         Ok(())
     }
 
-    async fn insert_file_chunk_records(&self, tx: &mut Transaction<'_, Postgres>, records: &[pointer_indexer::models::FileChunkRecord]) -> Result<(), DbError> {
+    async fn insert_file_chunk_records(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        records: &[pointer_indexer::models::FileChunkRecord],
+    ) -> Result<(), DbError> {
         if records.is_empty() {
             return Ok(());
         }
@@ -913,7 +999,7 @@ struct FileData {
 
 #[derive(sqlx::FromRow)]
 struct FileChunkDataRow {
-    _chunk_order: i32,
+    chunk_order: i32,
     chunk_hash: String,
     byte_len: i32,
 }
