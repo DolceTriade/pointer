@@ -58,7 +58,13 @@ web-sys = { version = "=0.3.81", features = [
 clap = { version = "4.5.48", optional = true }
 dotenvy = { version = "0.15.7", optional = true }
 sqlx = { version = "0.7", optional = true }
+async-trait = { version = "0.1" }
+base64 = { version = "0.22", optional = true }
+zstd = { version = "0.13", optional = true }
+pointer-indexer = { path = "./indexer", optional = true }
 anyhow = "1.0.100"
+server_fn_macro_default = { version = "0.8.5", optional = true }
+
 
 [features]
 hydrate = [
@@ -68,6 +74,7 @@ hydrate = [
     "dep:wasm-bindgen",
     "leptos/hydrate",
 ]
+pointer-indexer = ["dep:pointer-indexer"]
 ssr = [
     "dep:axum",
     "dep:colored",
@@ -75,6 +82,10 @@ ssr = [
     "dep:leptos_axum",
     "dep:reqwest",
     "dep:tokio",
+    "dep:base64",
+    "dep:zstd",
+    "dep:pointer-indexer",
+    "server_fn_macro_default/axum",
     "clap/derive",
     "clap/wrap_help",
     "clap/env",
@@ -89,6 +100,9 @@ ssr = [
 tracing-web = ["dep:tracing-web"]
 dotenvy = ["dep:dotenvy"]
 sqlx = ["dep:sqlx"]
+base64 = ["dep:base64"]
+zstd = ["dep:zstd"]
+server_fn_macro_default = ["dep:server_fn_macro_default"]
 
 # Defines a size-optimized profile for the WASM bundle in release mode
 [profile.wasm-release]
