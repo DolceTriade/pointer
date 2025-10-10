@@ -8,6 +8,7 @@
     --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
       "Courier New", monospace;
     --color-red-500: oklch(63.7% 0.237 25.331);
+    --color-yellow-500: oklch(79.5% 0.184 86.047);
     --color-blue-600: oklch(54.6% 0.245 262.881);
     --color-gray-100: oklch(96.7% 0.003 264.542);
     --color-gray-200: oklch(92.8% 0.006 264.531);
@@ -2647,6 +2648,9 @@
     width: var(--size);
     height: var(--size);
   }
+  .h-5 {
+    height: calc(var(--spacing) * 5);
+  }
   .h-6 {
     height: calc(var(--spacing) * 6);
   }
@@ -2674,11 +2678,17 @@
   .w-4 {
     width: calc(var(--spacing) * 4);
   }
+  .w-5 {
+    width: calc(var(--spacing) * 5);
+  }
   .w-6 {
     width: calc(var(--spacing) * 6);
   }
   .w-56 {
     width: calc(var(--spacing) * 56);
+  }
+  .w-\[1em\] {
+    width: 1em;
   }
   .w-full {
     width: 100%;
@@ -2694,6 +2704,9 @@
   }
   .max-w-none {
     max-width: none;
+  }
+  .min-w-\[1em\] {
+    min-width: 1em;
   }
   .flex-1 {
     flex: 1;
@@ -2962,6 +2975,9 @@
   }
   .text-red-500 {
     color: var(--color-red-500);
+  }
+  .text-yellow-500 {
+    color: var(--color-yellow-500);
   }
   .uppercase {
     text-transform: uppercase;
