@@ -1,6 +1,7 @@
 pub mod app;
 pub mod components;
 pub mod db;
+pub mod pages;
 pub mod services;
 
 #[cfg(feature="ssr")]

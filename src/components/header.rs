@@ -1,6 +1,7 @@
 use leptos::prelude::*;
 use leptos::tachys::dom::event_target_checked;
 use leptos_darkmode::Darkmode;
+use leptos_router::components::A;
 
 #[component]
 pub fn Header() -> impl IntoView {
@@ -8,9 +9,17 @@ pub fn Header() -> impl IntoView {
     view! {
         <header class="navbar bg-base-100 shadow-md w-full">
             <div class="flex-1">
-                <label class="text-xl font-bold">Pointer</label>
+                <a href="/" class="text-xl font-bold">Pointer</a>
             </div>
             <div class="flex-none">
+                <nav class="flex space-x-4 items-center">
+                    <A href="/">
+                        <span class="btn btn-ghost">Home</span>
+                    </A>
+                    <A href="/placeholder">
+                        <span class="btn btn-ghost">Placeholder</span>
+                    </A>
+                </nav>
                 <details class="dropdown dropdown-end">
                     <summary class="btn btn-ghost btn-circle">
                         <svg

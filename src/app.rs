@@ -1,5 +1,8 @@
-use crate::components::{Header, SearchBar, RepositoriesList};
+use crate::components::Header;
+use crate::pages::{HomePage, PlaceholderPage};
 use leptos::prelude::*;
+use leptos_router::components::{Route, Router, Routes};
+use leptos_router::path;
 use leptos_darkmode::Darkmode;
 use leptos_meta::{Html, Title};
 
@@ -29,12 +32,14 @@ pub fn App() -> impl IntoView {
     let darkmode = expect_context::<Darkmode>();
     view! {
         <Html class:dark=move || darkmode.is_dark() />
-        <div class="flex flex-col min-h-screen">
-            <Header />
-            <main class="flex-grow flex flex-col items-center justify-start pt-8">
-                <SearchBar />
-                <RepositoriesList />
-            </main>
-        </div>
+        <Router>
+            <div class="flex flex-col min-h-screen">
+                <Header />
+                <Routes fallback=|| "Page not found".into_view()>
+                    <Route path=path!("/") view=HomePage />
+                    <Route path=path!("/placeholder") view=PlaceholderPage />
+                </Routes>
+            </div>
+        </Router>
     }
 }
