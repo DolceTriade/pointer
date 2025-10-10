@@ -330,13 +330,13 @@ pub fn FileViewer() -> impl IntoView {
                                                                     <div class="grid grid-cols-2 md:grid-cols-3 gap-4">
                                                                         {entries
                                                                             .into_iter()
-                                                                            .map(|entry| {
-                                                                                let link = format!(
-                                                                                    "/repo/{}/tree/{}/{}",
-                                                                                    repo(),
-                                                                                    branch(),
-                                                                                    entry.path,
-                                                                                );
+                                                                        .map(move |entry| {
+                                                                            let mut link = format!(
+                                                                                "/repo/{}/tree/{}/{}", repo(), branch(), entry.path
+                                                                            );
+                                                                            if entry.kind == "dir" {
+                                                                                link.push('/');
+                                                                            }
                                                                                 let icon = if entry.kind == "dir" {
                                                                                     "📁"
                                                                                 } else {
