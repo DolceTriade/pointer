@@ -1,10 +1,13 @@
 use crate::db::TreeEntry;
+use leptos::either::EitherOf4;
 use leptos::{either::Either, prelude::*};
 use leptos_router::components::A;
-use leptos_router::hooks::use_params;
+use leptos_router::hooks::{use_location, use_params};
 use leptos_router::params::Params;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, path::Path};
+use web_sys::wasm_bindgen::JsCast;
+use web_sys::wasm_bindgen::UnwrapThrowExt;
 
 #[derive(Params, PartialEq, Clone, Debug)]
 pub struct FileViewerParams {
@@ -16,12 +19,21 @@ pub struct FileViewerParams {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum FileViewerData {
     File {
-        html_content: String,
+        lines: Vec<String>,
+        line_numbers: Vec<usize>,
+    },
+    Binary {
+        download_url: String,
     },
     Directory {
         entries: Vec<TreeEntry>,
         readme: Option<String>,
     },
+}
+
+fn is_binary(content: &str) -> bool {
+    // Simple heuristic: check for NUL byte.
+    content.as_bytes().contains(&0)
 }
 
 #[server]
@@ -80,6 +92,18 @@ pub async fn get_file_viewer_data(
             .await
             .map_err(|e| ServerFnError::new(e.to_string()))?;
 
+        if file_content.language.is_none() && is_binary(&file_content.content) {
+            let download_url = format!(
+                "/api/download_raw?repo={}&branch={}&path={}",
+                repo, branch, path_str
+            );
+            return Ok(FileViewerData::Binary { download_url });
+        }
+
+        // For text files, we'll add line numbers.
+        let line_count = file_content.content.lines().count();
+        let line_numbers: Vec<usize> = (1..=line_count).collect();
+
         use autumnus::{HtmlInlineBuilder, formatter::Formatter, languages::Language, themes};
         let lang = p
             .file_name()
@@ -103,9 +127,19 @@ pub async fn get_file_viewer_data(
             .format(&mut output)
             .map_err(|e| ServerFnError::new(format!("failed to format: {e:#?}")))?;
 
-        let html_content = String::from_utf8(output)
+        let html = String::from_utf8(output)
             .map_err(|e| ServerFnError::new(format!("Failed to convert to utf8: {e:#?}")))?;
-        Ok(FileViewerData::File { html_content })
+
+        let lines = html
+            .lines()
+            .enumerate()
+            .map(|(i, line)| format!(r#"<span id="L{}">{}</span>"#, i + 1, line))
+            .collect();
+
+        Ok(FileViewerData::File {
+            lines,
+            line_numbers,
+        })
     }
 }
 
@@ -350,22 +384,105 @@ fn FileTreeNode(
 }
 
 #[component]
+fn LineHighlighter() -> impl IntoView {
+    let location = use_location();
+
+    Effect::new(move |_| {
+        let hash = location.hash.get();
+        if hash.starts_with("#L") {
+            let line_id = &hash[1..];
+            if let Some(element) = document().get_element_by_id(line_id) {
+                // Remove existing highlights
+                let highlighted = document()
+                    .query_selector_all(".line-highlight")
+                    .unwrap_throw();
+                for i in 0..highlighted.length() {
+                    if let Some(el) = highlighted
+                        .item(i)
+                        .and_then(|n| n.dyn_into::<web_sys::Element>().ok())
+                    {
+                        el.class_list().remove_1("line-highlight").unwrap_throw();
+                    }
+                }
+
+                // Add new highlight
+                element.class_list().add_1("line-highlight").unwrap_throw();
+
+                // Scroll into view
+                let options = web_sys::ScrollIntoViewOptions::new();
+                options.set_behavior(web_sys::ScrollBehavior::Smooth);
+                options.set_block(web_sys::ScrollLogicalPosition::Center);
+                element.scroll_into_view_with_scroll_into_view_options(&options);
+            }
+        }
+    });
+
+    // This component doesn't render anything itself
+    view! { <div class="hidden"></div> }
+}
+
+#[component]
+fn FileContent(lines: Vec<String>, line_numbers: Vec<usize>) -> impl IntoView {
+    view! {
+        <div class="flex font-mono text-sm">
+            <div class="text-right text-gray-500 pr-4 select-none">
+                {line_numbers
+                    .into_iter()
+                    .map(|n| {
+                        view! {
+                            <a href=format!("#L{n}") class="block hover:text-blue-400">
+                                {n}
+                            </a>
+                        }
+                    })
+                    .collect_view()}
+            </div>
+            <pre class="flex-grow overflow-auto">
+                <code inner_html=lines.join("\n")></code>
+            </pre>
+        </div>
+    }
+}
+
+#[component]
 pub fn FileViewer() -> impl IntoView {
     let params = use_params::<FileViewerParams>();
-    let repo = move || params.with(|p| p.clone().map(|p| p.repo).unwrap_or_default());
-    let branch = move || params.with(|p| p.clone().map(|p| p.branch).unwrap_or_default());
-    let path = move || params.with(|p| p.clone().map(|p| p.path).unwrap_or_default());
+    let repo = move || params.read().as_ref().cloned().ok().map(|p| p.repo.clone());
+    let branch = move || {
+        params
+            .read()
+            .as_ref()
+            .cloned()
+            .ok()
+            .map(|p| p.branch.clone())
+    };
+    let path = move || {
+        params
+            .read()
+            .as_ref()
+            .cloned()
+            .ok()
+            .and_then(|p| p.path.clone())
+    };
 
     // Resource for the main content panel (right side)
     let data_resource = Resource::new(
         move || (repo(), branch(), path()),
-        |(repo, branch, path)| get_file_viewer_data(repo, branch, path),
+        |(repo, branch, path)| {
+            get_file_viewer_data(repo.unwrap_or_default(), branch.unwrap_or_default(), path)
+        },
     );
 
     // Resource for the file tree (left side), always fetching the root
     let tree_resource = Resource::new(
         move || (repo(), branch()),
-        |(repo, branch)| get_file_viewer_data(repo, branch, Some("".to_string())),
+        |(repo, branch)| {
+            get_file_viewer_data(
+                repo.unwrap_or_default(),
+                branch.unwrap_or_default(),
+                Some("".to_string()),
+            )
+        },
     );
 
     let expanded_dirs = RwSignal::new(HashSet::<String>::new());
@@ -374,8 +491,8 @@ pub fn FileViewer() -> impl IntoView {
         <main class="flex-grow flex flex-col items-center justify-start pt-8 p-4">
             <div class="max-w-7xl w-full">
                 <Breadcrumbs
-                    repo=Signal::derive(repo)
-                    branch=Signal::derive(branch)
+                    repo=Signal::derive(move || repo().unwrap_or_default())
+                    branch=Signal::derive(move || branch().unwrap_or_default())
                     path=Signal::derive(move || path().unwrap_or_default())
                 />
                 <div class="flex gap-6">
@@ -394,7 +511,6 @@ pub fn FileViewer() -> impl IntoView {
                                         .map(|result| match result {
                                             Ok(FileViewerData::Directory { entries, .. }) => {
                                                 Either::Left(
-                                                    // The fix is here: pass `repo()` and `branch()` directly
                                                     view! {
                                                         <For
                                                             each=move || entries.clone()
@@ -403,8 +519,8 @@ pub fn FileViewer() -> impl IntoView {
                                                                 view! {
                                                                     <FileTreeNode
                                                                         entry=entry
-                                                                        repo=Signal::derive(repo)
-                                                                        branch=Signal::derive(branch)
+                                                                        repo=Signal::derive(move || repo().unwrap_or_default())
+                                                                        branch=Signal::derive(move || branch().unwrap_or_default())
                                                                         expanded=expanded_dirs
                                                                     />
                                                                 }
@@ -430,85 +546,100 @@ pub fn FileViewer() -> impl IntoView {
                             {move || {
                                 data_resource
                                     .get()
-                                    .map(|result| {
-                                        match result {
-                                            Ok(data) => {
-                                                let view: Either<_, _> = match data {
-                                                    FileViewerData::File { html_content } => {
-                                                        Either::Left(
-                                                            view! {
-                                                                <div class="rounded-lg shadow border border-gray-700 font-mono text-sm overflow-auto">
-                                                                    <div inner_html=html_content></div>
+                                    .map(|result| match result {
+                                        Ok(data) => {
+                                            match data {
+                                                FileViewerData::File { lines, line_numbers } => {
+                                                    EitherOf4::A(
+                                                        view! {
+                                                            <LineHighlighter />
+                                                            <div class="bg-white dark:bg-gray-800 rounded-lg shadow border border-gray-200 dark:border-gray-700 p-4 overflow-auto">
+                                                                <FileContent lines=lines line_numbers=line_numbers />
+                                                            </div>
+                                                        },
+                                                    )
+                                                }
+                                                FileViewerData::Binary { download_url } => {
+                                                    EitherOf4::B(
+                                                        view! {
+                                                            <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-8 border border-gray-200 dark:border-gray-700 text-center">
+                                                                <p class="mb-4">
+                                                                    "This is a binary file and cannot be displayed."
+                                                                </p>
+                                                                <a
+                                                                    href=download_url
+                                                                    class="bg-blue-500 text-white font-bold py-2 px-4 rounded hover:bg-blue-700"
+                                                                >
+                                                                    "Download"
+                                                                </a>
+                                                            </div>
+                                                        },
+                                                    )
+                                                }
+                                                FileViewerData::Directory { entries, readme } => {
+                                                    EitherOf4::C(
+                                                        view! {
+                                                            // Top half: File list
+                                                            <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4 border border-gray-200 dark:border-gray-700 mb-6">
+                                                                <div class="grid grid-cols-2 md:grid-cols-3 gap-4">
+                                                                    {entries
+                                                                        .into_iter()
+                                                                        .map(move |entry| {
+                                                                            let mut link = format!(
+                                                                                "/repo/{}/tree/{}/{}",
+                                                                                "",
+                                                                                "",
+                                                                                entry.path,
+                                                                            );
+                                                                            if entry.kind == "dir" {
+                                                                                link.push('/');
+                                                                            }
+                                                                            let icon = if entry.kind == "dir" {
+                                                                                Either::Left(view! { <DirectoryIcon /> })
+                                                                            } else {
+                                                                                Either::Right(view! { <FileIcon /> })
+                                                                            };
+                                                                            let name = entry.name.clone();
+                                                                            view! {
+                                                                                <A
+                                                                                    href=link
+                                                                                    attr:class="text-blue-600 hover:underline p-2 rounded hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-2 overflow-hidden"
+                                                                                    attr:title=name.clone()
+                                                                                >
+                                                                                    {icon}
+                                                                                    <span class="truncate">{entry.name}</span>
+                                                                                </A>
+                                                                            }
+                                                                        })
+                                                                        .collect_view()}
                                                                 </div>
-                                                            },
-                                                        )
-                                                    }
-                                                    FileViewerData::Directory { entries, readme } => {
-                                                        Either::Right(
-                                                            view! {
-                                                                // Top half: File list
-                                                                <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4 border border-gray-200 dark:border-gray-700 mb-6">
-                                                                    <div class="grid grid-cols-2 md:grid-cols-3 gap-4">
-                                                                        {entries
-                                                                            .into_iter()
-                                                                            .map(move |entry| {
-                                                                                let mut link = format!(
-                                                                                    "/repo/{}/tree/{}/{}",
-                                                                                    repo(),
-                                                                                    branch(),
-                                                                                    entry.path,
-                                                                                );
-                                                                                if entry.kind == "dir" {
-                                                                                    link.push('/');
-                                                                                }
-                                                                                let icon = if entry.kind == "dir" {
-                                                                                    Either::Left(view! { <DirectoryIcon /> })
-                                                                                } else {
-                                                                                    Either::Right(view! { <FileIcon /> })
-                                                                                };
-                                                                                let name = entry.name.clone();
-                                                                                view! {
-                                                                                    <A
-                                                                                        href=link
-                                                                                        attr:class="text-blue-600 hover:underline p-2 rounded hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-2 overflow-hidden"
-                                                                                        attr:title=name.clone()
-                                                                                    >
-                                                                                        {icon}
-                                                                                        <span class="truncate">{entry.name}</span>
-                                                                                    </A>
-                                                                                }
-                                                                            })
-                                                                            .collect_view()}
-                                                                    </div>
-                                                                </div>
-                                                                // Bottom half: README
-                                                                {readme
-                                                                    .map(|readme_content| {
-                                                                        view! {
-                                                                            <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-8 border border-gray-200 dark:border-gray-700">
-                                                                                <h2 class="text-2xl font-semibold mb-4 text-gray-800 dark:text-gray-200">
-                                                                                    "README.md"
-                                                                                </h2>
-                                                                                <div
-                                                                                    class="prose dark:prose-invert max-w-none"
-                                                                                    inner_html=render_markdown(&readme_content)
-                                                                                ></div>
-                                                                            </div>
-                                                                        }
-                                                                    })}
-                                                            },
-                                                        )
-                                                    }
-                                                };
-                                                Either::Left(view)
+                                                            </div>
+                                                            // Bottom half: README
+                                                            {readme
+                                                                .map(|readme_content| {
+                                                                    view! {
+                                                                        <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-8 border border-gray-200 dark:border-gray-700">
+                                                                            <h2 class="text-2xl font-semibold mb-4 text-gray-800 dark:text-gray-200">
+                                                                                "README.md"
+                                                                            </h2>
+                                                                            <div
+                                                                                class="prose dark:prose-invert max-w-none"
+                                                                                inner_html=render_markdown(&readme_content)
+                                                                            ></div>
+                                                                        </div>
+                                                                    }
+                                                                })}
+                                                        },
+                                                    )
+                                                }
                                             }
-                                            Err(e) => {
-                                                Either::Right(
-                                                    view! {
-                                                        <p class="text-red-500">"Error: " {e.to_string()}</p>
-                                                    },
-                                                )
-                                            }
+                                        }
+                                        Err(e) => {
+                                            EitherOf4::D(
+                                                view! {
+                                                    <p class="text-red-500">"Error: " {e.to_string()}</p>
+                                                },
+                                            )
                                         }
                                     })
                             }}
