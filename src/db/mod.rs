@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
-use crate::db::models::{ReferenceResult};
+use crate::db::models::ReferenceResult;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnippetRequest {

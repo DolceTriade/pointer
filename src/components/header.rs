@@ -1,27 +1,32 @@
-use leptos::prelude::*;
+use crate::components::search_bar::SearchBar;
 use leptos::tachys::dom::event_target_checked;
+use leptos::{either::Either, prelude::*};
 use leptos_darkmode::Darkmode;
-use leptos_router::components::A;
+use leptos_router::AsPath;
+use leptos_router::hooks::use_url;
 
 #[component]
 pub fn Header() -> impl IntoView {
     let mut darkmode = use_context::<Darkmode>();
+    let route = use_url();
+
     view! {
-        <header class="navbar bg-base-100 shadow-md w-full">
-            <div class="flex-1">
+        <header class="navbar flex justify-between bg-base-100 shadow-md w-full">
+            <div class="flex-none">
                 <a href="/" class="text-xl font-bold">
                     Pointer
                 </a>
             </div>
+            <div class="flex-1 flex justify-center">
+                {move || {
+                    if route.read().path() != "/" {
+                        Either::Left(view! { <SearchBar /> })
+                    } else {
+                        Either::Right(view! { <div /> })
+                    }
+                }}
+            </div>
             <div class="flex-none">
-                <nav class="flex space-x-4 items-center">
-                    <A href="/">
-                        <span class="btn btn-ghost">Home</span>
-                    </A>
-                    <A href="/placeholder">
-                        <span class="btn btn-ghost">Placeholder</span>
-                    </A>
-                </nav>
                 <details class="dropdown dropdown-end">
                     <summary class="btn btn-ghost btn-circle">
                         <svg

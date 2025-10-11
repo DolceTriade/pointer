@@ -5,7 +5,7 @@ use leptos_router::components::A;
 use leptos_router::hooks::{use_location, use_params};
 use leptos_router::params::Params;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashSet};
+use std::collections::HashSet;
 use web_sys::wasm_bindgen::JsCast;
 use web_sys::wasm_bindgen::UnwrapThrowExt;
 
