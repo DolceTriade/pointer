@@ -13,13 +13,13 @@ pub struct FileReference {
     pub column: i32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HighlightedLine {
     pub line_number: u32,
     pub segments: Vec<HighlightedSegment>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HighlightedSegment {
     pub text: String,
     pub foreground: Option<String>,

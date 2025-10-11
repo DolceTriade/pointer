@@ -4,7 +4,7 @@ use leptos_router::components::A;
 use leptos_router::hooks::use_params;
 use leptos_router::params::Params;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::{collections::HashSet, path::Path};
 
 #[derive(Params, PartialEq, Clone, Debug)]
 pub struct FileViewerParams {
@@ -16,7 +16,7 @@ pub struct FileViewerParams {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum FileViewerData {
     File {
-        content: String,
+        html_content: String,
     },
     Directory {
         entries: Vec<TreeEntry>,
@@ -63,14 +63,7 @@ pub async fn get_file_viewer_data(
                 .get_file_content(&repo, &branch, &readme_path)
                 .await
                 .map_err(|e| ServerFnError::new(e.to_string()))?;
-            let mut content = String::new();
-            for line in file_content.lines {
-                for segment in line.segments {
-                    content.push_str(&segment.text);
-                }
-                content.push('\n');
-            }
-            Some(content)
+            Some(file_content.content)
         } else {
             None
         };
@@ -80,20 +73,39 @@ pub async fn get_file_viewer_data(
             readme,
         })
     } else {
+        let p = Path::new(&path_str);
         // This is a file path
         let file_content = db
             .get_file_content(&repo, &branch, &path_str)
             .await
             .map_err(|e| ServerFnError::new(e.to_string()))?;
 
-        let mut content = String::new();
-        for line in file_content.lines {
-            for segment in line.segments {
-                content.push_str(&segment.text);
-            }
-            content.push('\n');
-        }
-        Ok(FileViewerData::File { content })
+        use autumnus::{HtmlInlineBuilder, formatter::Formatter, languages::Language, themes};
+        let lang = p
+            .file_name()
+            .and_then(|file| file.to_str())
+            .map(|file| Language::guess(file, &file_content.content))
+            .unwrap_or(Language::PlainText);
+        tracing::info!("Guessed {lang:#?} for {path_str}");
+        let theme = themes::get("github_light").ok();
+
+        let formatter = HtmlInlineBuilder::new()
+            .source(&file_content.content)
+            .lang(lang)
+            .theme(theme)
+            .italic(false)
+            .include_highlights(false)
+            .build()
+            .map_err(|e| ServerFnError::new(format!("failed to build formatter: {e:#?}")))?;
+
+        let mut output = Vec::new();
+        formatter
+            .format(&mut output)
+            .map_err(|e| ServerFnError::new(format!("failed to format: {e:#?}")))?;
+
+        let html_content = String::from_utf8(output)
+            .map_err(|e| ServerFnError::new(format!("Failed to convert to utf8: {e:#?}")))?;
+        Ok(FileViewerData::File { html_content })
     }
 }
 
@@ -421,12 +433,12 @@ pub fn FileViewer() -> impl IntoView {
                                     .map(|result| {
                                         match result {
                                             Ok(data) => {
-                                                let view = match data {
-                                                    FileViewerData::File { content } => {
+                                                let view: Either<_, _> = match data {
+                                                    FileViewerData::File { html_content } => {
                                                         Either::Left(
                                                             view! {
-                                                                <div class="bg-white dark:bg-gray-800 rounded-lg shadow border border-gray-200 dark:border-gray-700">
-                                                                    <pre class="p-4 overflow-auto text-sm">{content}</pre>
+                                                                <div class="rounded-lg shadow border border-gray-700 font-mono text-sm overflow-auto">
+                                                                    <div inner_html=html_content></div>
                                                                 </div>
                                                             },
                                                         )

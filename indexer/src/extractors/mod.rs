@@ -107,9 +107,9 @@ fn parser_for_language(language: &str) -> Option<Parser> {
     let mut parser = Parser::new();
 
     let language_result = match language {
-        "c" => parser.set_language(&tree_sitter_c::language()),
-        "c++" | "cpp" => parser.set_language(&tree_sitter_cpp::language()),
-        "go" => parser.set_language(&tree_sitter_go::language()),
+        "c" => parser.set_language(&tree_sitter_c::LANGUAGE.into()),
+        "c++" | "cpp" => parser.set_language(&tree_sitter_cpp::LANGUAGE.into()),
+        "go" => parser.set_language(&tree_sitter_go::LANGUAGE.into()),
         "js" | "javascript" => parser.set_language(&tree_sitter_typescript::language_typescript()),
         "java" | "jvm" => parser.set_language(&tree_sitter_java::language()),
         "nix" => parser.set_language(&tree_sitter_nix::LANGUAGE.into()),

@@ -1,9 +1,8 @@
 use crate::db::models::FileReference as DbFileReference;
 use crate::db::{
-    ChunkUploadItem, Database, DbError, FileContentResponse, FileReference, HighlightedLine,
-    HighlightedSegment, ReferenceResult, RepoSummary, RepoTreeQuery, SearchRequest, SearchResponse,
-    SnippetRequest, SnippetResponse, SymbolReferenceRequest, SymbolReferenceResponse, SymbolResult,
-    TokenOccurrence, TreeEntry, TreeResponse,
+    ChunkUploadItem, Database, DbError, FileReference, RawFileContent, ReferenceResult,
+    RepoSummary, RepoTreeQuery, SearchRequest, SearchResponse, SnippetRequest, SnippetResponse,
+    SymbolReferenceRequest, SymbolReferenceResponse, SymbolResult, TreeEntry, TreeResponse,
 };
 use async_trait::async_trait;
 use base64::Engine;
@@ -352,30 +351,24 @@ impl Database for PostgresDb {
         repository: &str,
         commit_sha: &str,
         file_path: &str,
-    ) -> Result<FileContentResponse, DbError> {
+    ) -> Result<RawFileContent, DbError> {
         if commit_sha.is_empty() {
             return Err(DbError::Internal("missing commit parameter".to_string()));
         }
-
         if file_path.is_empty() {
             return Err(DbError::Internal("missing file path".to_string()));
         }
-
         let data = self
             .load_file_data(repository, commit_sha, file_path)
             .await?;
 
         let text = String::from_utf8_lossy(&data.bytes).to_string();
-        let highlight = self.highlight_text(&text, data.language.as_deref());
-        let tokens = self.compute_tokens(&text);
-
-        Ok(FileContentResponse {
+        Ok(RawFileContent {
             repository: repository.to_string(),
             commit_sha: commit_sha.to_string(),
             file_path: file_path.to_string(),
             language: data.language,
-            lines: highlight,
-            tokens,
+            content: text,
         })
     }
 
@@ -672,71 +665,6 @@ impl PostgresDb {
         }
 
         Ok(FileData { bytes, language })
-    }
-
-    fn highlight_text(&self, text: &str, _language: Option<&str>) -> Vec<HighlightedLine> {
-        // For now, we'll return a simple implementation
-        // In a real implementation, you'd use the same highlighting logic as in the backend
-        text.lines()
-            .enumerate()
-            .map(|(idx, line)| {
-                let segments = vec![HighlightedSegment {
-                    text: line.to_string(),
-                    foreground: Some("#000000".to_string()),
-                    background: None,
-                    bold: false,
-                    italic: false,
-                }];
-
-                HighlightedLine {
-                    line_number: idx as u32 + 1,
-                    segments,
-                }
-            })
-            .collect()
-    }
-
-    fn compute_tokens(&self, text: &str) -> Vec<TokenOccurrence> {
-        let mut result = Vec::new();
-
-        for (line_idx, line) in text.lines().enumerate() {
-            let line_number = line_idx as u32 + 1;
-            let mut column: u32 = 1;
-            let mut current = String::new();
-            let mut start_column: u32 = 1;
-
-            for ch in line.chars() {
-                let is_token_char = ch.is_alphanumeric() || ch == '_';
-                if is_token_char {
-                    if current.is_empty() {
-                        start_column = column;
-                    }
-                    current.push(ch);
-                } else if !current.is_empty() {
-                    let length = current.chars().count() as u32;
-                    result.push(TokenOccurrence {
-                        token: current.clone(),
-                        line: line_number,
-                        column: start_column,
-                        length,
-                    });
-                    current.clear();
-                }
-                column += 1;
-            }
-
-            if !current.is_empty() {
-                let length = current.chars().count() as u32;
-                result.push(TokenOccurrence {
-                    token: current.clone(),
-                    line: line_number,
-                    column: start_column,
-                    length,
-                });
-            }
-        }
-
-        result
     }
 
     async fn ingest_report(

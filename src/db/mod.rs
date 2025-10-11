@@ -91,6 +91,15 @@ pub struct FileContentResponse {
     pub tokens: Vec<TokenOccurrence>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawFileContent {
+    pub repository: String,
+    pub commit_sha: String,
+    pub file_path: String,
+    pub content: String,
+    pub language: Option<String>,
+}
+
 #[async_trait]
 pub trait Database: Clone + Send + Sync + 'static {
     // Repository and Branch operations
@@ -123,7 +132,7 @@ pub trait Database: Clone + Send + Sync + 'static {
         repository: &str,
         commit_sha: &str,
         file_path: &str,
-    ) -> Result<FileContentResponse, DbError>;
+    ) -> Result<RawFileContent, DbError>;
     async fn get_file_snippet(&self, request: SnippetRequest) -> Result<SnippetResponse, DbError>;
     async fn get_symbol_references(
         &self,
