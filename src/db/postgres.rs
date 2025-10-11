@@ -927,7 +927,6 @@ struct FileData {
 
 #[derive(sqlx::FromRow)]
 struct FileChunkDataRow {
-    chunk_order: i32,
     chunk_hash: String,
     byte_len: i32,
 }

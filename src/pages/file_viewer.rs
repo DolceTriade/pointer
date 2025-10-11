@@ -5,7 +5,7 @@ use leptos_router::components::A;
 use leptos_router::hooks::{use_location, use_params};
 use leptos_router::params::Params;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashSet, path::Path};
+use std::{collections::HashSet};
 use web_sys::wasm_bindgen::JsCast;
 use web_sys::wasm_bindgen::UnwrapThrowExt;
 
@@ -44,6 +44,7 @@ pub async fn get_file_viewer_data(
     path: Option<String>,
 ) -> Result<FileViewerData, ServerFnError> {
     use crate::db::{Database, RepoTreeQuery, postgres::PostgresDb};
+    use std::path::Path;
 
     let state = expect_context::<crate::server::GlobalAppState>();
     let state = state.lock().await;
