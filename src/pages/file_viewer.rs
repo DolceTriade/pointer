@@ -31,6 +31,7 @@ pub enum FileViewerData {
     },
 }
 
+#[cfg(feature = "ssr")]
 fn is_binary(content: &str) -> bool {
     // Simple heuristic: check for NUL byte.
     content.as_bytes().contains(&0)
@@ -233,10 +234,12 @@ fn Breadcrumbs(
         <div class="text-sm breadcrumbs mb-6">
             <ul>
                 <li>
-                    <A href=move || format!("/repo/{}", repo())>{repo()}</A>
+                    <A href=move || format!("/repo/{}", repo())>{move || repo()}</A>
                 </li>
                 <li>
-                    <A href=move || format!("/repo/{}/tree/{}/", repo(), branch())>{branch()}</A>
+                    <A href=move || {
+                        format!("/repo/{}/tree/{}/", repo(), branch())
+                    }>{move || branch()}</A>
                 </li>
                 <For
                     each=move || segments.get()
@@ -275,17 +278,13 @@ fn FileTreeNode(
     let child_entry = entry.clone();
     let expand_entry = entry.clone();
     let child_resource = Resource::new(
-        move || (is_dir, expanded.get().contains(&path)),
-        move |(is_dir, is_expanded)| {
+        move || (is_dir, expanded.get().contains(&path), repo(), branch()),
+        move |(is_dir, is_expanded, repo, branch)| {
             let entry = child_entry.clone();
             async move {
                 if is_dir && is_expanded {
-                    if let Ok(FileViewerData::Directory { entries, .. }) = get_file_viewer_data(
-                        repo.get(),
-                        branch.get(),
-                        Some(entry.path.clone() + "/"),
-                    )
-                    .await
+                    if let Ok(FileViewerData::Directory { entries, .. }) =
+                        get_file_viewer_data(repo, branch, Some(entry.path.clone() + "/")).await
                     {
                         children.set(Some(entries));
                     }
@@ -308,7 +307,7 @@ fn FileTreeNode(
         }
     };
 
-    let link = format!("/repo/{}/tree/{}/{}", repo.get(), branch.get(), link_path);
+    let link = move || format!("/repo/{}/tree/{}/{}", repo.get(), branch.get(), link_path);
 
     view! {
         <li>
@@ -340,7 +339,7 @@ fn FileTreeNode(
                             <FileIcon />
                             <span class="w-4"></span>
                             <A
-                                href=link.clone()
+                                href=link
                                 attr:class="ml-1 text-blue-600 hover:underline truncate"
                                 attr:title=name.clone()
                             >
@@ -447,42 +446,41 @@ fn FileContent(lines: Vec<String>, line_numbers: Vec<usize>) -> impl IntoView {
 #[component]
 pub fn FileViewer() -> impl IntoView {
     let params = use_params::<FileViewerParams>();
-    let repo = move || params.read().as_ref().cloned().ok().map(|p| p.repo.clone());
-    let branch = move || {
+    let repo = Memo::new(move |_| {
         params
             .read()
             .as_ref()
-            .cloned()
+            .map(|p| p.repo.clone())
             .ok()
+            .unwrap_or_default()
+    });
+    let branch = Memo::new(move |_| {
+        params
+            .read()
+            .as_ref()
             .map(|p| p.branch.clone())
-    };
-    let path = move || {
+            .ok()
+            .unwrap_or_default()
+    });
+    let path = Memo::new(move |_| {
         params
             .read()
             .as_ref()
-            .cloned()
+            .map(|p| p.path.clone())
             .ok()
-            .and_then(|p| p.path.clone())
-    };
+            .flatten()
+    });
 
     // Resource for the main content panel (right side)
     let data_resource = Resource::new(
         move || (repo(), branch(), path()),
-        |(repo, branch, path)| {
-            get_file_viewer_data(repo.unwrap_or_default(), branch.unwrap_or_default(), path)
-        },
+        |(repo, branch, path)| get_file_viewer_data(repo, branch, path),
     );
 
     // Resource for the file tree (left side), always fetching the root
     let tree_resource = Resource::new(
         move || (repo(), branch()),
-        |(repo, branch)| {
-            get_file_viewer_data(
-                repo.unwrap_or_default(),
-                branch.unwrap_or_default(),
-                Some("".to_string()),
-            )
-        },
+        |(repo, branch)| get_file_viewer_data(repo, branch, Some("".to_string())),
     );
 
     let expanded_dirs = RwSignal::new(HashSet::<String>::new());
@@ -491,8 +489,8 @@ pub fn FileViewer() -> impl IntoView {
         <main class="flex-grow flex flex-col items-center justify-start pt-8 p-4">
             <div class="max-w-7xl w-full">
                 <Breadcrumbs
-                    repo=Signal::derive(move || repo().unwrap_or_default())
-                    branch=Signal::derive(move || branch().unwrap_or_default())
+                    repo=repo.into()
+                    branch=branch.into()
                     path=Signal::derive(move || path().unwrap_or_default())
                 />
                 <div class="flex gap-6">
@@ -511,6 +509,7 @@ pub fn FileViewer() -> impl IntoView {
                                         .map(|result| match result {
                                             Ok(FileViewerData::Directory { entries, .. }) => {
                                                 Either::Left(
+                                                    // The fix is here: pass `repo()` and `branch()` directly
                                                     view! {
                                                         <For
                                                             each=move || entries.clone()
@@ -519,8 +518,8 @@ pub fn FileViewer() -> impl IntoView {
                                                                 view! {
                                                                     <FileTreeNode
                                                                         entry=entry
-                                                                        repo=Signal::derive(move || repo().unwrap_or_default())
-                                                                        branch=Signal::derive(move || branch().unwrap_or_default())
+                                                                        repo=repo.into()
+                                                                        branch=branch.into()
                                                                         expanded=expanded_dirs
                                                                     />
                                                                 }
@@ -587,8 +586,8 @@ pub fn FileViewer() -> impl IntoView {
                                                                         .map(move |entry| {
                                                                             let mut link = format!(
                                                                                 "/repo/{}/tree/{}/{}",
-                                                                                "",
-                                                                                "",
+                                                                                repo(),
+                                                                                branch(),
                                                                                 entry.path,
                                                                             );
                                                                             if entry.kind == "dir" {
