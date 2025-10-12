@@ -2,13 +2,13 @@ use crate::components::search_bar::SearchBar;
 use leptos::tachys::dom::event_target_checked;
 use leptos::{either::Either, prelude::*};
 use leptos_darkmode::Darkmode;
-use leptos_router::AsPath;
-use leptos_router::hooks::use_url;
+use leptos_router::hooks::{use_query, use_url};
 
 #[component]
 pub fn Header() -> impl IntoView {
     let mut darkmode = use_context::<Darkmode>();
     let route = use_url();
+    let query = use_query::<crate::pages::search::SearchParams>();
 
     view! {
         <header class="navbar flex justify-between bg-base-100 shadow-md w-full">
@@ -20,7 +20,7 @@ pub fn Header() -> impl IntoView {
             <div class="flex-1 flex justify-center">
                 {move || {
                     if route.read().path() != "/" {
-                        Either::Left(view! { <SearchBar /> })
+                        Either::Left(view! { <SearchBar initial_query=Signal::derive(move||query.get().ok().and_then(|q| q.q).unwrap_or_default()) /> })
                     } else {
                         Either::Right(view! { <div /> })
                     }

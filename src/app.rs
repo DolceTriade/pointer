@@ -1,6 +1,6 @@
 use crate::components::Header;
 use crate::pages::file_viewer::FileViewer;
-use crate::pages::{HomePage, PlaceholderPage, RepoDetailPage};
+use crate::pages::{HomePage, PlaceholderPage, RepoDetailPage, SearchPage};
 use leptos::prelude::*;
 use leptos_darkmode::Darkmode;
 use leptos_meta::{Html, Title, provide_meta_context};
@@ -40,6 +40,7 @@ pub fn App() -> impl IntoView {
                 <Routes fallback=|| "Page not found".into_view()>
                     <Route path=path!("/") view=HomePage />
                     <Route path=path!("/placeholder") view=PlaceholderPage />
+                    <Route path=path!("/search") view=SearchPage />
                     <Route path=path!("/repo/:repo") view=RepoDetailPage />
                     <Route path=path!("/repo/:repo/tree/:branch/*path") view=FileViewer />
                 </Routes>

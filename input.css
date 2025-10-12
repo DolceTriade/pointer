@@ -43,10 +43,10 @@
 }
 @custom-variant dark (&:where(.dark, .dark *));
 
-.line-hightlight {
+.line-highlight {
     background-color: rgba(120, 53, 15, 0.3);
 }
 
-.dark .line-hightlight {
+.dark .line-highlight {
     background-color: rgba(120, 53, 15, 0.3);
 }

@@ -3,13 +3,15 @@ use leptos::prelude::*;
 
 pub mod file_viewer;
 pub mod repo_detail;
+pub mod search;
 pub use repo_detail::RepoDetailPage;
+pub use search::SearchPage;
 
 #[component]
 pub fn HomePage() -> impl IntoView {
     view! {
         <main class="flex-grow flex flex-col items-center justify-start pt-8">
-            <SearchBar />
+            <SearchBar initial_query="".into() />
             <RepositoriesList />
         </main>
     }
