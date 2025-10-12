@@ -53,7 +53,7 @@ pub fn SearchPage() -> impl IntoView {
                                                                             result.repository,
                                                                             result.commit_sha,
                                                                             result.file_path,
-                                                                            result.start_line,
+                                                                            result.match_line,
                                                                         )
                                                                         class="hover:underline text-blue-600 dark:text-blue-400 break-all"
                                                                     >
@@ -61,7 +61,7 @@ pub fn SearchPage() -> impl IntoView {
                                                                             "{}/{}:{}",
                                                                             result.repository,
                                                                             result.file_path,
-                                                                            result.start_line,
+                                                                            result.match_line,
                                                                         )}
                                                                     </a>
                                                                 </p>

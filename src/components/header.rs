@@ -8,7 +8,11 @@ use leptos_router::hooks::{use_query, use_url};
 pub fn Header() -> impl IntoView {
     let mut darkmode = use_context::<Darkmode>();
     let route = use_url();
-    let query = use_query::<crate::pages::search::SearchParams>();
+    let query_struct = use_query::<crate::pages::search::SearchParams>();
+    let query = Memo::new(move |_| {
+        query_struct.read().as_ref().ok().and_then(|q| q.q.clone()).unwrap_or_default()
+    });
+
 
     view! {
         <header class="navbar flex justify-between bg-base-100 shadow-md w-full">
@@ -20,7 +24,7 @@ pub fn Header() -> impl IntoView {
             <div class="flex-1 flex justify-center">
                 {move || {
                     if route.read().path() != "/" {
-                        Either::Left(view! { <SearchBar initial_query=Signal::derive(move||query.get().ok().and_then(|q| q.q).unwrap_or_default()) /> })
+                        Either::Left(view! { <SearchBar initial_query=query.get() /> })
                     } else {
                         Either::Right(view! { <div /> })
                     }
@@ -66,7 +70,6 @@ pub fn Header() -> impl IntoView {
                                             }
                                             on:change=move |ev| {
                                                 let val = event_target_checked(&ev);
-                                                tracing::info!("clicked {val:#?}");
                                                 darkmode.as_mut().and_then(|v| Some(v.set(val)));
                                             }
                                         />

@@ -113,7 +113,7 @@ pub async fn get_file_viewer_data(
             .map(|file| Language::guess(file, &file_content.content))
             .unwrap_or(Language::PlainText);
         tracing::info!("Guessed {lang:#?} for {path_str}");
-        let theme = themes::get("github_light").ok();
+        let theme = themes::get("catppuccin_mocha").ok();
 
         let formatter = HtmlInlineBuilder::new()
             .source(&file_content.content)
