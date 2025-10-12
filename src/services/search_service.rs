@@ -42,14 +42,17 @@ async fn basic_search(pool: &sqlx::PgPool, query: &str) -> Result<Vec<SearchResu
             fc.file_path,
             fc.start_line,
             fc.line_count,
-            ts_headline('simple', safe_bytea_to_utf8(c.data), websearch_to_tsquery('simple', $1), 'StartSel=<mark>, StopSel=</mark>') as content_text
+            ts_headline('simple', cb.text_content, websearch_to_tsquery('simple', $1), 'StartSel=<mark>, StopSel=</mark>') as content_text
         FROM
-            chunks c
+            content_blobs cb
         JOIN
-            file_chunks fc ON c.hash = fc.chunk_hash
+            file_chunks fc ON cb.hash = fc.content_hash
         WHERE
-            c.content_tsv @@ websearch_to_tsquery('simple', $1)
-            OR c.data_text % $1  -- Using pg_trgm fuzzy matching on pre-computed text column
+            cb.text_content IS NOT NULL
+            AND (
+                to_tsvector('simple', cb.text_content) @@ websearch_to_tsquery('simple', $1)
+                OR cb.text_content % $1  -- Using pg_trgm fuzzy matching
+            )
         "#,
     )
     .bind(query)

@@ -1093,12 +1093,14 @@ async fn insert_content_blobs(
 
     for chunk in deduped.chunks(INSERT_BATCH_SIZE) {
         let mut qb =
-            QueryBuilder::new("INSERT INTO content_blobs (hash, language, byte_len, line_count) ");
+            QueryBuilder::new("INSERT INTO content_blobs (hash, language, byte_len, line_count, text_content) ");
         qb.push_values(chunk.iter().copied(), |mut b, blob| {
+            // For now, insert with NULL text_content - actual content needs to be processed separately
             b.push_bind(&blob.hash)
                 .push_bind(&blob.language)
                 .push_bind(blob.byte_len)
-                .push_bind(blob.line_count);
+                .push_bind(blob.line_count)
+                .push_bind(&Option::<String>::None); // text_content is NULL for now
         });
         qb.push(
             " ON CONFLICT (hash) DO UPDATE SET language = EXCLUDED.language, byte_len = EXCLUDED.byte_len, line_count = EXCLUDED.line_count",
