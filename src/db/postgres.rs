@@ -1,11 +1,10 @@
 use crate::db::models::FileReference as DbFileReference;
 use crate::db::{
-    ChunkUploadItem, Database, DbError, FileReference, RawFileContent, ReferenceResult,
-    RepoSummary, RepoTreeQuery, SearchRequest, SearchResponse, SnippetRequest, SnippetResponse,
+    Database, DbError, DbUniqueChunk, FileReference, RawFileContent, ReferenceResult, RepoSummary,
+    RepoTreeQuery, SearchRequest, SearchResponse, SearchResult, SnippetRequest, SnippetResponse,
     SymbolReferenceRequest, SymbolReferenceResponse, SymbolResult, TreeEntry, TreeResponse,
 };
 use async_trait::async_trait;
-use base64::Engine;
 use sqlx::{PgPool, Postgres, QueryBuilder, Transaction};
 use std::io::Read;
 
@@ -61,7 +60,7 @@ impl Database for PostgresDb {
         }
 
         let existing: Vec<(String,)> =
-            sqlx::query_as("SELECT hash FROM chunks WHERE hash = ANY($1)")
+            sqlx::query_as("SELECT chunk_hash FROM chunks WHERE chunk_hash = ANY($1)")
                 .bind(&hashes)
                 .fetch_all(&self.pool)
                 .await
@@ -75,46 +74,18 @@ impl Database for PostgresDb {
         Ok(missing)
     }
 
-    async fn chunk_upload(&self, chunks: Vec<ChunkUploadItem>) -> Result<(), DbError> {
+    async fn chunk_upload(&self, chunks: Vec<DbUniqueChunk>) -> Result<(), DbError> {
         if chunks.is_empty() {
             return Ok(());
         }
 
-        let mut decoded = Vec::with_capacity(chunks.len());
-        for chunk in chunks {
-            let data = base64::engine::general_purpose::STANDARD
-                .decode(&chunk.data)
-                .map_err(|e| DbError::Internal(format!("invalid base64 data: {}", e)))?;
-
-            if chunk.byte_len != data.len() as u32 {
-                log::warn!(
-                    "hash={}, expected={}, actual={}, chunk length mismatch; using decoded length",
-                    chunk.hash,
-                    chunk.byte_len,
-                    data.len()
-                );
-            }
-
-            decoded.push(DecodedChunk {
-                hash: chunk.hash,
-                algorithm: chunk.algorithm,
-                byte_len: data.len() as u32,
-                data,
+        for batch in chunks.chunks(INSERT_BATCH_SIZE) {
+            let mut qb = QueryBuilder::new("INSERT INTO chunks (chunk_hash, text_content) ");
+            qb.push_values(batch, |mut b, chunk| {
+                b.push_bind(chunk.chunk_hash.clone())
+                    .push_bind(chunk.text_content.clone());
             });
-        }
-
-        let deduped = dedup_by_key(&decoded, |chunk| chunk.hash.clone());
-
-        for batch in deduped.chunks(INSERT_BATCH_SIZE) {
-            let mut qb = QueryBuilder::new("INSERT INTO chunks (hash, algorithm, byte_len, data) ");
-            qb.push_values(batch.iter().copied(), |mut b, chunk| {
-                let byte_len: i32 = chunk.byte_len.try_into().unwrap_or(i32::MAX);
-                b.push_bind(&chunk.hash)
-                    .push_bind(&chunk.algorithm)
-                    .push_bind(byte_len)
-                    .push_bind(&chunk.data);
-            });
-            qb.push(" ON CONFLICT (hash) DO NOTHING");
+            qb.push(" ON CONFLICT (chunk_hash) DO NOTHING");
 
             qb.build()
                 .execute(&self.pool)
@@ -459,17 +430,38 @@ impl Database for PostgresDb {
 
     async fn search_symbols(&self, request: SearchRequest) -> Result<SearchResponse, DbError> {
         let mut qb = QueryBuilder::new(
-            "SELECT s.symbol, s.namespace, s.kind, s.fully_qualified, cb.language,
-             f.repository, f.commit_sha, f.file_path
-             FROM symbols s
-             JOIN content_blobs cb ON cb.hash = s.content_hash
-             JOIN files f ON f.content_hash = s.content_hash
-             WHERE 1 = 1",
+            "SELECT s.symbol, s.namespace, s.kind, s.fully_qualified, cb.language, \
+                    f.repository, f.commit_sha, f.file_path \
+             FROM symbols s \
+             JOIN content_blobs cb ON cb.hash = s.content_hash \
+             JOIN files f ON f.content_hash = s.content_hash",
         );
 
+        if let Some(q) = &request.q {
+            let matching_hashes: Vec<String> = sqlx::query_scalar(
+                "SELECT DISTINCT cbc.content_hash \
+                 FROM chunks c \
+                 JOIN content_blob_chunks cbc ON c.chunk_hash = cbc.chunk_hash \
+                 WHERE to_tsvector('simple', c.text_content) @@ to_tsquery('simple', $1)",
+            )
+            .bind(q)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| DbError::Database(e.to_string()))?;
+
+            if matching_hashes.is_empty() {
+                return Ok(SearchResponse { symbols: Vec::new() });
+            }
+
+            qb.push(" WHERE s.content_hash = ANY(")
+                .push_bind(matching_hashes)
+                .push(")");
+        } else {
+            qb.push(" WHERE 1=1");
+        }
+
         if let Some(name) = &request.name {
-            qb.push(" AND s.symbol ILIKE ")
-                .push_bind(format!("%{}%", name));
+            qb.push(" AND s.symbol ILIKE ").push_bind(format!("%{}%", name));
         }
 
         if let Some(regex) = &request.name_regex {
@@ -486,13 +478,17 @@ impl Database for PostgresDb {
         }
 
         if let Some(kinds) = &request.kind {
-            qb.push(" AND s.kind = ANY(").push_bind(kinds).push(")");
+            if !kinds.is_empty() {
+                qb.push(" AND s.kind = ANY(").push_bind(kinds).push(")");
+            }
         }
 
         if let Some(languages) = &request.language {
-            qb.push(" AND cb.language = ANY(")
-                .push_bind(languages)
-                .push(")");
+            if !languages.is_empty() {
+                qb.push(" AND cb.language = ANY(")
+                    .push_bind(languages)
+                    .push(")");
+            }
         }
 
         if let Some(repo) = &request.repository {
@@ -526,13 +522,18 @@ impl Database for PostgresDb {
             std::collections::HashMap::new();
 
         if include_refs {
-            let fully_qualified: std::collections::HashSet<String> =
-                rows.iter().map(|row| row.fully_qualified.clone()).collect();
+            let fully_qualified: std::collections::HashSet<String> = rows
+                .iter()
+                .map(|row| row.fully_qualified.clone())
+                .collect();
+
             if !fully_qualified.is_empty() {
                 let lookup: Vec<String> = fully_qualified.into_iter().collect();
                 let ref_rows: Vec<ReferenceRow> = sqlx::query_as(
-                    "SELECT fully_qualified, name, namespace, kind, line_number AS line, column_number AS column
-                     FROM symbol_references WHERE fully_qualified = ANY($1)",
+                    "SELECT fully_qualified, name, namespace, kind, \
+                            line_number AS line, column_number AS column \
+                     FROM symbol_references \
+                     WHERE fully_qualified = ANY($1)",
                 )
                 .bind(&lookup)
                 .fetch_all(&self.pool)
@@ -542,14 +543,13 @@ impl Database for PostgresDb {
                 for reference in ref_rows {
                     reference_map
                         .entry(reference.fully_qualified.clone())
-                        .or_insert_with(Vec::new)
+                        .or_default()
                         .push(reference);
                 }
             }
         }
 
-        let mut results = Vec::new();
-
+        let mut results = Vec::with_capacity(rows.len());
         for row in rows {
             let references = if include_refs {
                 reference_map.get(row.fully_qualified.as_str()).map(|refs| {
@@ -584,6 +584,105 @@ impl Database for PostgresDb {
         Ok(SearchResponse { symbols: results })
     }
 
+    async fn text_search(&self, query: &str) -> Result<Vec<SearchResult>, DbError> {
+        #[derive(sqlx::FromRow, Debug)]
+        struct SearchResultRow {
+            repository: String,
+            commit_sha: String,
+            file_path: String,
+            start_line: i64,
+            line_count: i32,
+            content_text: String,
+        }
+
+        let results: Vec<SearchResultRow> = sqlx::query_as(
+            r#"
+            WITH chunk_matches AS (
+                SELECT
+                    f.repository,
+                    f.commit_sha,
+                    f.file_path,
+                    cbc.content_hash,
+                    cbc.chunk_index,
+                    cbc.chunk_line_count,
+                    ts_headline(
+                        'simple',
+                        c.text_content,
+                        websearch_to_tsquery('simple', $1),
+                        'StartSel=<mark>, StopSel=</mark>'
+                    ) AS content_text,
+                    COALESCE(
+                        SUM(cbc.chunk_line_count) OVER (
+                            PARTITION BY cbc.content_hash
+                            ORDER BY cbc.chunk_index
+                            ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                        ),
+                        0
+                    ) + 1 AS start_line
+                FROM
+                    chunks c
+                JOIN
+                    content_blob_chunks cbc ON c.chunk_hash = cbc.chunk_hash
+                JOIN
+                    files f ON cbc.content_hash = f.content_hash
+                WHERE
+                    to_tsvector('simple', c.text_content) @@ websearch_to_tsquery('simple', $1)
+                    OR c.text_content % $1
+            )
+            SELECT
+                repository,
+                commit_sha,
+                file_path,
+                start_line,
+                chunk_line_count AS line_count,
+                content_text
+            FROM
+                chunk_matches
+            "#,
+        )
+        .bind(query)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DbError::Database(e.to_string()))?;
+
+        let search_results = results
+            .into_iter()
+            .map(|row| {
+                // Find the first line in the chunk that contains a highlighted match
+                let highlighted_lines: Vec<&str> = row.content_text.lines().collect();
+
+                // Find the first line that contains <mark> tags (highlighted content)
+                let mut match_line_offset = 0;
+                for (i, line) in highlighted_lines.iter().enumerate() {
+                    if line.contains("<mark>") {
+                        match_line_offset = i as i32;
+                        break;
+                    }
+                }
+
+                // Calculate the actual line number in the file
+                let start_line: i32 = row
+                    .start_line
+                    .try_into()
+                    .unwrap_or(i32::MAX);
+                let actual_match_line = start_line.saturating_add(match_line_offset);
+                let end_line = start_line.saturating_add(row.line_count.saturating_sub(1));
+
+                SearchResult {
+                    repository: row.repository,
+                    commit_sha: row.commit_sha,
+                    file_path: row.file_path,
+                    start_line,
+                    end_line,
+                    match_line: actual_match_line,
+                    content_text: row.content_text,
+                }
+            })
+            .collect();
+
+        Ok(search_results)
+    }
+
     async fn health_check(&self) -> Result<String, DbError> {
         sqlx::query_scalar::<_, i32>("SELECT 1")
             .fetch_one(&self.pool)
@@ -601,10 +700,10 @@ impl PostgresDb {
         commit_sha: &str,
         file_path: &str,
     ) -> Result<FileData, DbError> {
-        let language_row = sqlx::query_scalar::<_, Option<String>>(
-            "SELECT cb.language
+        let row: (String, Option<String>) = sqlx::query_as(
+            "SELECT f.content_hash, cb.language
              FROM files f
-             LEFT JOIN content_blobs cb ON cb.hash = f.content_hash
+             JOIN content_blobs cb ON cb.hash = f.content_hash
              WHERE f.repository = $1 AND f.commit_sha = $2 AND f.file_path = $3",
         )
         .bind(repository)
@@ -612,57 +711,32 @@ impl PostgresDb {
         .bind(file_path)
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| DbError::Database(e.to_string()))?;
+        .map_err(|e| DbError::Database(e.to_string()))?
+        .ok_or_else(|| DbError::Internal("file not found".to_string()))?;
 
-        let language = match language_row {
-            Some(lang) => lang,
-            None => return Err(DbError::Internal("file not found".to_string())),
-        };
+        let (content_hash, language) = row;
 
-        let chunk_rows: Vec<FileChunkDataRow> = sqlx::query_as(
-            "SELECT chunk_order, chunk_hash, byte_len
-             FROM file_chunks
-             WHERE repository = $1 AND commit_sha = $2 AND file_path = $3
-             ORDER BY chunk_order",
+        let chunk_rows: Vec<(Vec<u8>,)> = sqlx::query_as(
+            "SELECT c.text_content::bytea
+             FROM content_blob_chunks cbc
+             JOIN chunks c ON cbc.chunk_hash = c.chunk_hash
+             WHERE cbc.content_hash = $1
+             ORDER BY cbc.chunk_index",
         )
-        .bind(repository)
-        .bind(commit_sha)
-        .bind(file_path)
+        .bind(&content_hash)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| DbError::Database(e.to_string()))?;
 
         if chunk_rows.is_empty() {
-            return Err(DbError::Internal(
-                "file does not have chunk data".to_string(),
-            ));
+            // This could happen for binary files or empty files
+            return Ok(FileData {
+                bytes: Vec::new(),
+                language,
+            });
         }
 
-        let hashes: Vec<String> = chunk_rows
-            .iter()
-            .map(|row| row.chunk_hash.clone())
-            .collect();
-        let chunk_data: Vec<(String, Vec<u8>)> =
-            sqlx::query_as("SELECT hash, data FROM chunks WHERE hash = ANY($1)")
-                .bind(&hashes)
-                .fetch_all(&self.pool)
-                .await
-                .map_err(|e| DbError::Database(e.to_string()))?;
-
-        let map: std::collections::HashMap<String, Vec<u8>> = chunk_data.into_iter().collect();
-
-        let capacity: usize = chunk_rows
-            .iter()
-            .map(|row| row.byte_len.max(0) as usize)
-            .sum();
-        let mut bytes = Vec::with_capacity(capacity);
-
-        for row in &chunk_rows {
-            let data = map.get(&row.chunk_hash).ok_or_else(|| {
-                DbError::Internal(format!("missing chunk data for {}", row.chunk_hash))
-            })?;
-            bytes.extend_from_slice(data);
-        }
+        let bytes: Vec<u8> = chunk_rows.into_iter().flat_map(|row| row.0).collect();
 
         Ok(FileData { bytes, language })
     }
@@ -685,8 +759,7 @@ impl PostgresDb {
             .await?;
         self.insert_reference_records(&mut tx, &report.reference_records)
             .await?;
-        self.insert_file_chunk_records(&mut tx, &report.file_chunks)
-            .await?;
+
 
         tx.commit()
             .await
@@ -858,57 +931,6 @@ impl PostgresDb {
 
         Ok(())
     }
-
-    async fn insert_file_chunk_records(
-        &self,
-        tx: &mut Transaction<'_, Postgres>,
-        records: &[pointer_indexer::models::FileChunkRecord],
-    ) -> Result<(), DbError> {
-        if records.is_empty() {
-            return Ok(());
-        }
-
-        let deduped = dedup_by_key(records, |record| {
-            (
-                record.repository.clone(),
-                record.commit_sha.clone(),
-                record.file_path.clone(),
-                record.sequence,
-            )
-        });
-
-        for chunk in deduped.chunks(INSERT_BATCH_SIZE) {
-            let mut qb = QueryBuilder::new(
-                "INSERT INTO file_chunks (repository, commit_sha, file_path, chunk_order, chunk_hash, byte_offset, byte_len, start_line, line_count) ",
-            );
-            qb.push_values(chunk.iter().copied(), |mut b, record| {
-                let chunk_order: i32 = record.sequence.try_into().unwrap_or(i32::MAX);
-                let byte_offset: i64 = record.byte_offset.try_into().unwrap_or(i64::MAX);
-                let byte_len: i32 = record.byte_len.try_into().unwrap_or(i32::MAX);
-                let start_line: i32 = record.start_line.try_into().unwrap_or(i32::MAX);
-                let line_count: i32 = record.line_count.try_into().unwrap_or(i32::MAX);
-                b.push_bind(&record.repository)
-                    .push_bind(&record.commit_sha)
-                    .push_bind(&record.file_path)
-                    .push_bind(chunk_order)
-                    .push_bind(&record.chunk_hash)
-                    .push_bind(byte_offset)
-                    .push_bind(byte_len)
-                    .push_bind(start_line)
-                    .push_bind(line_count);
-            });
-            qb.push(
-                " ON CONFLICT (repository, commit_sha, file_path, chunk_order) DO UPDATE SET chunk_hash = EXCLUDED.chunk_hash, byte_offset = EXCLUDED.byte_offset, byte_len = EXCLUDED.byte_len, start_line = EXCLUDED.start_line, line_count = EXCLUDED.line_count",
-            );
-
-            qb.build()
-                .execute(tx.as_mut())
-                .await
-                .map_err(|e| DbError::Database(e.to_string()))?;
-        }
-
-        Ok(())
-    }
 }
 
 const INSERT_BATCH_SIZE: usize = 1000;
@@ -925,11 +947,7 @@ struct FileData {
     language: Option<String>,
 }
 
-#[derive(sqlx::FromRow)]
-struct FileChunkDataRow {
-    chunk_hash: String,
-    byte_len: i32,
-}
+
 
 #[derive(sqlx::FromRow)]
 struct SymbolRow {
@@ -953,12 +971,7 @@ struct ReferenceRow {
     column: i32,
 }
 
-struct DecodedChunk {
-    hash: String,
-    algorithm: String,
-    byte_len: u32,
-    data: Vec<u8>,
-}
+
 
 fn dedup_by_key<'a, T, K, F>(items: &'a [T], mut key: F) -> Vec<&'a T>
 where

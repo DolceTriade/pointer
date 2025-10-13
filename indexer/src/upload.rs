@@ -1,21 +1,20 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::io::Write;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
 use reqwest::blocking::{Client, Response};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
+use tracing::info;
 use uuid::Uuid;
 use zstd::stream::Encoder;
 
-use crate::models::{ChunkPayload, IndexArtifacts, IndexReport};
+use crate::models::{ChunkMapping, IndexArtifacts, IndexReport, UniqueChunk};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
-const CHUNK_UPLOAD_BATCH: usize = 128;
 const MANIFEST_CHUNK_SIZE: usize = 8 * 1024 * 1024; // 8 MiB
 
 pub fn upload_index(url: &str, api_key: Option<&str>, artifacts: &IndexArtifacts) -> Result<()> {
@@ -26,15 +25,31 @@ pub fn upload_index(url: &str, api_key: Option<&str>, artifacts: &IndexArtifacts
 
     let endpoints = Endpoints::new(url);
 
-    let needed = request_missing_chunks(&client, &endpoints, api_key, &artifacts.report)?;
-    info!(missing = needed.len(), "chunk diff computed");
+    // 1. Upload all content blob metadata
+    upload_content_blobs(&client, &endpoints, api_key, &artifacts.report.content_blobs)?;
 
-    if !needed.is_empty() {
-        upload_chunks(&client, &endpoints, api_key, artifacts, &needed)?;
+    // 2. Check which unique chunks the server needs
+    let needed_chunk_hashes =
+        request_needed_chunks(&client, &endpoints, api_key, &artifacts.unique_chunks)?;
+
+    // 3. Upload the content of the needed chunks
+    if !needed_chunk_hashes.is_empty() {
+        upload_unique_chunks(
+            &client,
+            &endpoints,
+            api_key,
+            &artifacts.unique_chunks,
+            &needed_chunk_hashes,
+        )?;
     } else {
-        info!("no new chunks to upload");
+        info!("no new chunk content to upload");
     }
 
+    // 4. Upload the mappings for how chunks belong to files
+    upload_chunk_mappings(&client, &endpoints, api_key, &artifacts.chunk_mappings)?;
+
+    // 5. Upload the final index manifest
+    info!("uploading index report");
     upload_manifest(&client, &endpoints, api_key, &artifacts.report)?;
     info!("index manifest uploaded");
 
@@ -42,8 +57,10 @@ pub fn upload_index(url: &str, api_key: Option<&str>, artifacts: &IndexArtifacts
 }
 
 struct Endpoints {
-    need: String,
-    upload: String,
+    blobs_upload: String,
+    chunks_need: String,
+    chunks_upload: String,
+    mappings_upload: String,
     manifest_chunk: String,
     manifest_finalize: String,
 }
@@ -52,80 +69,107 @@ impl Endpoints {
     fn new(base: &str) -> Self {
         let trimmed = base.trim_end_matches('/');
         Self {
-            need: format!("{}/chunks/need", trimmed),
-            upload: format!("{}/chunks/upload", trimmed),
+            blobs_upload: format!("{}/blobs/upload", trimmed),
+            chunks_need: format!("{}/chunks/need", trimmed),
+            chunks_upload: format!("{}/chunks/upload", trimmed),
+            mappings_upload: format!("{}/mappings/upload", trimmed),
             manifest_chunk: format!("{}/manifest/chunk", trimmed),
             manifest_finalize: format!("{}/manifest/finalize", trimmed),
         }
     }
 }
 
-fn request_missing_chunks(
+fn upload_content_blobs(
     client: &Client,
     endpoints: &Endpoints,
     api_key: Option<&str>,
-    report: &IndexReport,
+    blobs: &[crate::models::ContentBlob],
+) -> Result<()> {
+    if blobs.is_empty() {
+        return Ok(());
+    }
+    info!(count = blobs.len(), "uploading content blob metadata");
+    for batch in blobs.chunks(1000) {
+        let payload = ContentBlobUploadRequest {
+            blobs: batch.to_vec(),
+        };
+        post_json(client, &endpoints.blobs_upload, api_key, &payload)?;
+    }
+    info!("content blob metadata uploaded");
+    Ok(())
+}
+
+fn request_needed_chunks(
+    client: &Client,
+    endpoints: &Endpoints,
+    api_key: Option<&str>,
+    unique_chunks: &[UniqueChunk],
 ) -> Result<HashSet<String>> {
-    if report.chunk_descriptors.is_empty() {
+    if unique_chunks.is_empty() {
         return Ok(HashSet::new());
     }
+    info!(count = unique_chunks.len(), "checking for needed chunks");
 
     let request = ChunkNeedRequest {
-        chunks: &report.chunk_descriptors,
+        hashes: unique_chunks.iter().map(|c| c.chunk_hash.clone()).collect(),
     };
 
-    let response: ChunkNeedResponse = post_json(client, &endpoints.need, api_key, &request)?
+    let response: ChunkNeedResponse = post_json(client, &endpoints.chunks_need, api_key, &request)?
         .json()
-        .context("failed to deserialize chunk diff response")?;
+        .context("failed to deserialize chunk need response")?;
 
+    info!(needed = response.missing.len(), "found chunks to upload");
     Ok(response.missing.into_iter().collect())
 }
 
-fn upload_chunks(
+fn upload_unique_chunks(
     client: &Client,
     endpoints: &Endpoints,
     api_key: Option<&str>,
-    artifacts: &IndexArtifacts,
-    needed: &HashSet<String>,
+    unique_chunks: &[UniqueChunk],
+    needed_hashes: &HashSet<String>,
 ) -> Result<()> {
-    let chunk_map: HashMap<&str, &ChunkPayload> = artifacts
-        .chunks
+    let needed_chunks: Vec<&UniqueChunk> = unique_chunks
         .iter()
-        .map(|chunk| (chunk.hash.as_str(), chunk))
+        .filter(|c| needed_hashes.contains(&c.chunk_hash))
         .collect();
 
-    let mut required: Vec<&ChunkPayload> = Vec::new();
-    for hash in needed {
-        match chunk_map.get(hash.as_str()) {
-            Some(chunk) => required.push(*chunk),
-            None => warn!(hash = %hash, "referenced chunk missing from artifacts"),
-        }
+    if needed_chunks.is_empty() {
+        return Ok(());
     }
-    required.sort_by(|a, b| a.hash.cmp(&b.hash));
 
-    for (batch_index, batch) in required.chunks(CHUNK_UPLOAD_BATCH).enumerate() {
-        let payload = ChunkUploadRequest {
-            chunks: batch
-                .iter()
-                .map(|chunk| ChunkUploadItem {
-                    hash: chunk.hash.clone(),
-                    algorithm: chunk.algorithm.clone(),
-                    byte_len: chunk.data.len() as u32,
-                    data: BASE64.encode(&chunk.data),
-                })
-                .collect(),
+    info!(count = needed_chunks.len(), "uploading unique chunk content");
+    for batch in needed_chunks.chunks(100) { // Chunks can be large, use a smaller batch size
+        let payload = UniqueChunkUploadRequest {
+            chunks: batch.iter().map(|c| (*c).clone()).collect(),
         };
-
-        post_json(client, &endpoints.upload, api_key, &payload)?;
-        info!(
-            batch = batch_index + 1,
-            total = (required.len() + CHUNK_UPLOAD_BATCH - 1) / CHUNK_UPLOAD_BATCH,
-            "uploaded chunk batch"
-        );
+        post_json(client, &endpoints.chunks_upload, api_key, &payload)?;
     }
+    info!("unique chunk content uploaded");
 
     Ok(())
 }
+
+fn upload_chunk_mappings(
+    client: &Client,
+    endpoints: &Endpoints,
+    api_key: Option<&str>,
+    mappings: &[ChunkMapping],
+) -> Result<()> {
+    if mappings.is_empty() {
+        return Ok(());
+    }
+    info!(count = mappings.len(), "uploading chunk mappings");
+    for batch in mappings.chunks(1000) {
+        let payload = ChunkMappingUploadRequest {
+            mappings: batch.to_vec(),
+        };
+        post_json(client, &endpoints.mappings_upload, api_key, &payload)?;
+    }
+    info!("chunk mappings uploaded");
+    Ok(())
+}
+
 
 fn upload_manifest(
     client: &Client,
@@ -202,8 +246,13 @@ fn post_json<T: Serialize>(
 }
 
 #[derive(Serialize)]
-struct ChunkNeedRequest<'a> {
-    chunks: &'a [crate::models::ChunkDescriptor],
+struct ContentBlobUploadRequest {
+    blobs: Vec<crate::models::ContentBlob>,
+}
+
+#[derive(Serialize)]
+struct ChunkNeedRequest {
+    hashes: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -212,16 +261,13 @@ struct ChunkNeedResponse {
 }
 
 #[derive(Serialize)]
-struct ChunkUploadRequest {
-    chunks: Vec<ChunkUploadItem>,
+struct UniqueChunkUploadRequest {
+    chunks: Vec<UniqueChunk>,
 }
 
 #[derive(Serialize)]
-struct ChunkUploadItem {
-    hash: String,
-    algorithm: String,
-    byte_len: u32,
-    data: String,
+struct ChunkMappingUploadRequest {
+    mappings: Vec<ChunkMapping>,
 }
 
 #[derive(Serialize)]

@@ -2,12 +2,10 @@ pub mod models;
 #[cfg(feature = "ssr")]
 pub mod postgres;
 
-use crate::db::models::{FileReference, HighlightedLine, SymbolResult, TokenOccurrence};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-#[cfg(feature = "ssr")]
-use crate::db::models::ReferenceResult;
+use crate::db::models::{FileReference, HighlightedLine, ReferenceResult, SearchResult, SymbolResult, TokenOccurrence};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnippetRequest {
@@ -41,6 +39,7 @@ pub struct SymbolReferenceResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchRequest {
+    pub q: Option<String>,
     pub name: Option<String>,
     pub name_regex: Option<String>,
     pub namespace: Option<String>,
@@ -100,6 +99,18 @@ pub struct RawFileContent {
     pub language: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepoSummary {
+    pub repository: String,
+    pub file_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DbUniqueChunk {
+    pub chunk_hash: String,
+    pub text_content: String,
+}
+
 #[async_trait]
 pub trait Database: Clone + Send + Sync + 'static {
     // Repository and Branch operations
@@ -108,7 +119,7 @@ pub trait Database: Clone + Send + Sync + 'static {
 
     // Existing backend operations
     async fn chunk_need(&self, hashes: Vec<String>) -> Result<Vec<String>, DbError>;
-    async fn chunk_upload(&self, chunks: Vec<ChunkUploadItem>) -> Result<(), DbError>;
+    async fn chunk_upload(&self, chunks: Vec<DbUniqueChunk>) -> Result<(), DbError>;
     async fn store_manifest_chunk(
         &self,
         upload_id: String,
@@ -139,22 +150,10 @@ pub trait Database: Clone + Send + Sync + 'static {
         request: SymbolReferenceRequest,
     ) -> Result<SymbolReferenceResponse, DbError>;
     async fn search_symbols(&self, request: SearchRequest) -> Result<SearchResponse, DbError>;
+    async fn text_search(&self, query: &str) -> Result<Vec<SearchResult>, DbError>;
     async fn health_check(&self) -> Result<String, DbError>;
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RepoSummary {
-    pub repository: String,
-    pub file_count: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChunkUploadItem {
-    pub hash: String,
-    pub algorithm: String,
-    pub byte_len: u32,
-    pub data: String,
-}
 
 #[derive(Debug)]
 pub enum DbError {

@@ -58,3 +58,14 @@ pub struct ReferenceResult {
     pub line: usize,
     pub column: usize,
 }
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct SearchResult {
+    pub repository: String,
+    pub commit_sha: String,
+    pub file_path: String,
+    pub start_line: i32,
+    pub end_line: i32,
+    pub match_line: i32,  // The actual line where the match occurs
+    pub content_text: String,
+}

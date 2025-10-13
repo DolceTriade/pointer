@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+// Represents a file's metadata. Content is stored separately.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContentBlob {
     pub hash: String,
@@ -36,45 +37,35 @@ pub struct FilePointer {
     pub content_hash: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChunkDescriptor {
-    pub hash: String,
-    pub algorithm: String,
-    pub byte_len: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FileChunkRecord {
-    pub repository: String,
-    pub commit_sha: String,
-    pub file_path: String,
-    pub sequence: u32,
-    pub chunk_hash: String,
-    pub byte_offset: u64,
-    pub byte_len: u32,
-    pub start_line: u32,
-    pub line_count: u32,
-}
-
+// A report containing all the metadata extracted from a repository.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct IndexReport {
     pub content_blobs: Vec<ContentBlob>,
     pub symbol_records: Vec<SymbolRecord>,
     pub file_pointers: Vec<FilePointer>,
     pub reference_records: Vec<ReferenceRecord>,
-    pub chunk_descriptors: Vec<ChunkDescriptor>,
-    pub file_chunks: Vec<FileChunkRecord>,
 }
 
-#[derive(Debug, Clone)]
-pub struct ChunkPayload {
-    pub hash: String,
-    pub algorithm: String,
-    pub data: Vec<u8>,
+// A unique, deduplicated chunk of text content.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct UniqueChunk {
+    pub chunk_hash: String,
+    pub text_content: String,
 }
 
-#[derive(Debug, Clone)]
+// Maps a file's content hash to a sequence of chunks.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChunkMapping {
+    pub content_hash: String,
+    pub chunk_hash: String,
+    pub chunk_index: usize,
+    pub chunk_line_count: i32,
+}
+
+// The final output of the indexer.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IndexArtifacts {
     pub report: IndexReport,
-    pub chunks: Vec<ChunkPayload>,
+    pub unique_chunks: Vec<UniqueChunk>,
+    pub chunk_mappings: Vec<ChunkMapping>,
 }

@@ -22,11 +22,7 @@ pub fn write_report(output_dir: &Path, artifacts: &IndexArtifacts) -> Result<()>
         output_dir.join("reference_records.json"),
         &report.reference_records,
     )?;
-    write_json(
-        output_dir.join("chunk_descriptors.json"),
-        &report.chunk_descriptors,
-    )?;
-    write_json(output_dir.join("file_chunks.json"), &report.file_chunks)?;
+
 
     Ok(())
 }
