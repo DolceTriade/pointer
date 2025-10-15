@@ -23,7 +23,6 @@ pub fn write_report(output_dir: &Path, artifacts: &IndexArtifacts) -> Result<()>
         &report.reference_records,
     )?;
 
-
     Ok(())
 }
 

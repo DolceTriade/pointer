@@ -450,7 +450,9 @@ impl Database for PostgresDb {
             .map_err(|e| DbError::Database(e.to_string()))?;
 
             if matching_hashes.is_empty() {
-                return Ok(SearchResponse { symbols: Vec::new() });
+                return Ok(SearchResponse {
+                    symbols: Vec::new(),
+                });
             }
 
             qb.push(" WHERE s.content_hash = ANY(")
@@ -461,7 +463,8 @@ impl Database for PostgresDb {
         }
 
         if let Some(name) = &request.name {
-            qb.push(" AND s.symbol ILIKE ").push_bind(format!("%{}%", name));
+            qb.push(" AND s.symbol ILIKE ")
+                .push_bind(format!("%{}%", name));
         }
 
         if let Some(regex) = &request.name_regex {
@@ -522,10 +525,8 @@ impl Database for PostgresDb {
             std::collections::HashMap::new();
 
         if include_refs {
-            let fully_qualified: std::collections::HashSet<String> = rows
-                .iter()
-                .map(|row| row.fully_qualified.clone())
-                .collect();
+            let fully_qualified: std::collections::HashSet<String> =
+                rows.iter().map(|row| row.fully_qualified.clone()).collect();
 
             if !fully_qualified.is_empty() {
                 let lookup: Vec<String> = fully_qualified.into_iter().collect();
@@ -593,6 +594,7 @@ impl Database for PostgresDb {
             start_line: i64,
             line_count: i32,
             content_text: String,
+            match_line_number: i32,
         }
 
         let results: Vec<SearchResultRow> = sqlx::query_as(
@@ -605,12 +607,7 @@ impl Database for PostgresDb {
                     cbc.content_hash,
                     cbc.chunk_index,
                     cbc.chunk_line_count,
-                    ts_headline(
-                        'simple',
-                        c.text_content,
-                        websearch_to_tsquery('simple', $1),
-                        'StartSel=<mark>, StopSel=</mark>'
-                    ) AS content_text,
+                    c.text_content,
                     COALESCE(
                         SUM(cbc.chunk_line_count) OVER (
                             PARTITION BY cbc.content_hash
@@ -626,18 +623,19 @@ impl Database for PostgresDb {
                 JOIN
                     files f ON cbc.content_hash = f.content_hash
                 WHERE
-                    to_tsvector('simple', c.text_content) @@ websearch_to_tsquery('simple', $1)
-                    OR c.text_content % $1
+                    c.text_content LIKE '%' || $1 || '%'
             )
             SELECT
-                repository,
-                commit_sha,
-                file_path,
-                start_line,
-                chunk_line_count AS line_count,
-                content_text
+                cm.repository,
+                cm.commit_sha,
+                cm.file_path,
+                cm.start_line,
+                cm.chunk_line_count AS line_count,
+                ctx.context_snippet AS content_text,
+                ctx.match_line_number
             FROM
-                chunk_matches
+                chunk_matches cm,
+                LATERAL extract_context_with_highlight(cm.text_content, $1, 3) ctx
             "#,
         )
         .bind(query)
@@ -648,24 +646,8 @@ impl Database for PostgresDb {
         let search_results = results
             .into_iter()
             .map(|row| {
-                // Find the first line in the chunk that contains a highlighted match
-                let highlighted_lines: Vec<&str> = row.content_text.lines().collect();
-
-                // Find the first line that contains <mark> tags (highlighted content)
-                let mut match_line_offset = 0;
-                for (i, line) in highlighted_lines.iter().enumerate() {
-                    if line.contains("<mark>") {
-                        match_line_offset = i as i32;
-                        break;
-                    }
-                }
-
-                // Calculate the actual line number in the file
-                let start_line: i32 = row
-                    .start_line
-                    .try_into()
-                    .unwrap_or(i32::MAX);
-                let actual_match_line = start_line.saturating_add(match_line_offset);
+                let start_line: i32 = row.start_line.try_into().unwrap_or(i32::MAX);
+                let actual_match_line = start_line.saturating_add(row.match_line_number - 1);
                 let end_line = start_line.saturating_add(row.line_count.saturating_sub(1));
 
                 SearchResult {
@@ -716,8 +698,8 @@ impl PostgresDb {
 
         let (content_hash, language) = row;
 
-        let chunk_rows: Vec<(Vec<u8>,)> = sqlx::query_as(
-            "SELECT c.text_content::bytea
+        let chunk_rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT c.text_content
              FROM content_blob_chunks cbc
              JOIN chunks c ON cbc.chunk_hash = c.chunk_hash
              WHERE cbc.content_hash = $1
@@ -736,7 +718,11 @@ impl PostgresDb {
             });
         }
 
-        let bytes: Vec<u8> = chunk_rows.into_iter().flat_map(|row| row.0).collect();
+        let bytes = chunk_rows
+            .into_iter()
+            .map(|s| s.0)
+            .flat_map(|v| v.into_bytes().into_iter())
+            .collect();
 
         Ok(FileData { bytes, language })
     }
@@ -759,7 +745,6 @@ impl PostgresDb {
             .await?;
         self.insert_reference_records(&mut tx, &report.reference_records)
             .await?;
-
 
         tx.commit()
             .await
@@ -947,8 +932,6 @@ struct FileData {
     language: Option<String>,
 }
 
-
-
 #[derive(sqlx::FromRow)]
 struct SymbolRow {
     symbol: String,
@@ -970,8 +953,6 @@ struct ReferenceRow {
     line: i32,
     column: i32,
 }
-
-
 
 fn dedup_by_key<'a, T, K, F>(items: &'a [T], mut key: F) -> Vec<&'a T>
 where

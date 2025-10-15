@@ -55,21 +55,17 @@ impl fmt::Display for Filter {
             Filter::Archived(b) => write!(f, "archived:{}", if *b { "yes" } else { "no" }),
             Filter::Fork(b) => write!(f, "fork:{}", if *b { "yes" } else { "no" }),
             Filter::Public(b) => write!(f, "public:{}", if *b { "yes" } else { "no" }),
-            Filter::CaseSensitive(cs) => {
-                match cs {
-                    CaseSensitivity::Yes => write!(f, "case:yes"),
-                    CaseSensitivity::No => write!(f, "case:no"),
-                    CaseSensitivity::Auto => write!(f, "case:auto"),
-                }
-            }
-            Filter::Type(rt) => {
-                match rt {
-                    ResultType::FileMatch => write!(f, "type:filematch"),
-                    ResultType::FileName => write!(f, "type:filename"),
-                    ResultType::File => write!(f, "type:file"),
-                    ResultType::Repo => write!(f, "type:repo"),
-                }
-            }
+            Filter::CaseSensitive(cs) => match cs {
+                CaseSensitivity::Yes => write!(f, "case:yes"),
+                CaseSensitivity::No => write!(f, "case:no"),
+                CaseSensitivity::Auto => write!(f, "case:auto"),
+            },
+            Filter::Type(rt) => match rt {
+                ResultType::FileMatch => write!(f, "type:filematch"),
+                ResultType::FileName => write!(f, "type:filename"),
+                ResultType::File => write!(f, "type:file"),
+                ResultType::Repo => write!(f, "type:repo"),
+            },
         }
     }
 }
@@ -138,15 +134,13 @@ impl QueryParser {
         }
     }
 
-
-
     fn parse_filter(&mut self, filter_type: &str, value: String) -> Result<Filter, ParseError> {
         match filter_type {
             "content" => Ok(Filter::Content(value)),
-            "c" => Ok(Filter::Content(value)),  // alias for content
+            "c" => Ok(Filter::Content(value)), // alias for content
             "repo" | "r" => Ok(Filter::Repo(value)),
             "file" => Ok(Filter::File(value)),
-            "f" => Ok(Filter::File(value)),  // alias for file
+            "f" => Ok(Filter::File(value)), // alias for file
             "lang" | "l" => Ok(Filter::Lang(value)),
             "branch" | "b" => Ok(Filter::Branch(value)),
             "sym" => Ok(Filter::Symbol(value)),

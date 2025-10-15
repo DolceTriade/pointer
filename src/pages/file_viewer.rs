@@ -264,6 +264,26 @@ fn Breadcrumbs(
 }
 
 #[component]
+fn FileTreeNodes(
+    entries: Vec<TreeEntry>,
+    repo: Signal<String>,
+    branch: Signal<String>,
+    expanded: RwSignal<HashSet<String>>,
+) -> impl IntoView {
+    view! {
+        <ul class="pl-4">
+            <For
+                each=move || entries.clone()
+                key=|child| child.path.clone()
+                children=move |child| {
+                    view! { <FileTreeNode entry=child repo=repo branch=branch expanded=expanded /> }
+                }
+            />
+        </ul>
+    }
+}
+
+#[component]
 fn FileTreeNode(
     entry: TreeEntry,
     repo: Signal<String>,
@@ -354,28 +374,20 @@ fn FileTreeNode(
                 let entry = expand_entry.clone();
                 move || {
                     if is_dir && expanded.get().contains(&entry.path) {
-                        Either::Left(
-                            view! {
-                                <ul class="pl-4">
-                                    <For
-                                        each=move || children.get().unwrap_or_default()
-                                        key=|child| child.path.clone()
-                                        children=move |child| {
-                                            view! {
-                                                <FileTreeNode
-                                                    entry=child
-                                                    repo=repo
-                                                    branch=branch
-                                                    expanded=expanded
-                                                />
-                                            }
-                                        }
+                        children
+                            .get()
+                            .map(|nodes| {
+                                view! {
+                                    <FileTreeNodes
+                                        entries=nodes
+                                        repo=repo
+                                        branch=branch
+                                        expanded=expanded
                                     />
-                                </ul>
-                            },
-                        )
+                                }
+                            })
                     } else {
-                        Either::Right(view! { <ul class="hidden"></ul> })
+                        None
                     }
                 }
             }

@@ -10,9 +10,13 @@ pub fn Header() -> impl IntoView {
     let route = use_url();
     let query_struct = use_query::<crate::pages::search::SearchParams>();
     let query = Memo::new(move |_| {
-        query_struct.read().as_ref().ok().and_then(|q| q.q.clone()).unwrap_or_default()
+        query_struct
+            .read()
+            .as_ref()
+            .ok()
+            .and_then(|q| q.q.clone())
+            .unwrap_or_default()
     });
-
 
     view! {
         <header class="navbar flex justify-between bg-base-100 shadow-md w-full">

@@ -3,8 +3,8 @@ use std::io::Write;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use reqwest::blocking::{Client, Response};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
@@ -26,7 +26,12 @@ pub fn upload_index(url: &str, api_key: Option<&str>, artifacts: &IndexArtifacts
     let endpoints = Endpoints::new(url);
 
     // 1. Upload all content blob metadata
-    upload_content_blobs(&client, &endpoints, api_key, &artifacts.report.content_blobs)?;
+    upload_content_blobs(
+        &client,
+        &endpoints,
+        api_key,
+        &artifacts.report.content_blobs,
+    )?;
 
     // 2. Check which unique chunks the server needs
     let needed_chunk_hashes =
@@ -138,8 +143,12 @@ fn upload_unique_chunks(
         return Ok(());
     }
 
-    info!(count = needed_chunks.len(), "uploading unique chunk content");
-    for batch in needed_chunks.chunks(100) { // Chunks can be large, use a smaller batch size
+    info!(
+        count = needed_chunks.len(),
+        "uploading unique chunk content"
+    );
+    for batch in needed_chunks.chunks(100) {
+        // Chunks can be large, use a smaller batch size
         let payload = UniqueChunkUploadRequest {
             chunks: batch.iter().map(|c| (*c).clone()).collect(),
         };
@@ -169,7 +178,6 @@ fn upload_chunk_mappings(
     info!("chunk mappings uploaded");
     Ok(())
 }
-
 
 fn upload_manifest(
     client: &Client,

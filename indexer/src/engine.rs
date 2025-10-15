@@ -10,7 +10,7 @@ use tracing::{debug, trace, warn};
 use crate::config::IndexerConfig;
 use crate::extractors::{self, ExtractedSymbol, Extraction};
 use crate::models::{
-    ContentBlob, ChunkMapping, FilePointer, IndexArtifacts, IndexReport, ReferenceRecord,
+    ChunkMapping, ContentBlob, FilePointer, IndexArtifacts, IndexReport, ReferenceRecord,
     SymbolRecord, UniqueChunk,
 };
 use crate::utils;
@@ -56,18 +56,18 @@ impl Indexer {
             }
 
             let absolute_path = entry.path();
-            let relative_path =
-                match utils::ensure_relative(absolute_path, &self.config.repo_path) {
-                    Ok(path) => path,
-                    Err(err) => {
-                        warn!(
-                            error = %err,
-                            path = %absolute_path.display(),
-                            "skipping file outside repo root"
-                        );
-                        continue;
-                    }
-                };
+            let relative_path = match utils::ensure_relative(absolute_path, &self.config.repo_path)
+            {
+                Ok(path) => path,
+                Err(err) => {
+                    warn!(
+                        error = %err,
+                        path = %absolute_path.display(),
+                        "skipping file outside repo root"
+                    );
+                    continue;
+                }
+            };
 
             if should_skip(&relative_path) {
                 trace!(path = %relative_path.display(), "skipping filtered file");
@@ -98,83 +98,76 @@ impl Indexer {
 
                 let is_binary = bytes.iter().any(|&b| b == 0);
                 if !is_binary {
-                    if bytes.len() < MIN_CHUNK_SIZE as usize {
-                        // Treat small files as a single chunk
-                        let chunk_hash = utils::compute_content_hash(&bytes);
-                        unique_chunks.insert(UniqueChunk {
-                            chunk_hash: chunk_hash.clone(),
-                            text_content: String::from_utf8_lossy(&bytes).to_string(),
-                        });
-                        chunk_mappings.push(ChunkMapping {
-                            content_hash: content_hash.clone(),
-                            chunk_hash,
-                            chunk_index: 0,
-                            chunk_line_count: utils::line_count(&bytes),
-                        });
-                    } else {
-                        // Use fastcdc for large files, aligning to newlines
-                        let mut boundaries: Vec<u64> = vec![0];
-                        let chunker = fastcdc::v2020::StreamCDC::new(
-                            Cursor::new(&bytes),
-                            MIN_CHUNK_SIZE,
-                            AVG_CHUNK_SIZE,
-                            MAX_CHUNK_SIZE,
-                        );
-
-                        for result in chunker {
-                            if let Ok(chunk) = result {
-                                boundaries.push(chunk.offset + chunk.length as u64);
-                            }
-                        }
-
-                        if boundaries.last() != Some(&(bytes.len() as u64)) {
-                            boundaries.push(bytes.len() as u64);
-                        }
-
-                        let mut adjusted_boundaries: Vec<u64> = vec![0];
-                        for &boundary in &boundaries[1..boundaries.len() - 1] {
-                            if boundary >= bytes.len() as u64 {
-                                continue;
-                            }
-                            if let Some(newline_pos) =
-                                bytes[boundary as usize..].iter().position(|&b| b == b'\n')
-                            {
-                                adjusted_boundaries.push(boundary + (newline_pos + 1) as u64);
+                    match std::str::from_utf8(&bytes) {
+                        Ok(full_text) => {
+                            if bytes.len() < MIN_CHUNK_SIZE as usize {
+                                // Treat small files as a single chunk
+                                let chunk_hash = utils::compute_content_hash(&bytes);
+                                unique_chunks.insert(UniqueChunk {
+                                    chunk_hash: chunk_hash.clone(),
+                                    text_content: full_text.to_string(),
+                                });
+                                chunk_mappings.push(ChunkMapping {
+                                    content_hash: content_hash.clone(),
+                                    chunk_hash,
+                                    chunk_index: 0,
+                                    chunk_line_count: utils::line_count(&bytes),
+                                });
                             } else {
-                                adjusted_boundaries.push(boundary);
+                                let (chunk_ranges, used_fallback) =
+                                    compute_chunk_ranges(&bytes, full_text);
+
+                                if used_fallback {
+                                    debug!(
+                                        file = %normalized_path,
+                                        "fallback chunking used due to invalid UTF-8 slice"
+                                    );
+                                }
+
+                                let mut chunk_index = 0;
+                                for (start, end) in chunk_ranges {
+                                    if start >= end || end > bytes.len() {
+                                        continue;
+                                    }
+
+                                    let chunk_content_bytes = &bytes[start..end];
+                                    let chunk_hash =
+                                        utils::compute_content_hash(chunk_content_bytes);
+
+                                    if let Ok(text_content) =
+                                        std::str::from_utf8(chunk_content_bytes)
+                                    {
+                                        unique_chunks.insert(UniqueChunk {
+                                            chunk_hash: chunk_hash.clone(),
+                                            text_content: text_content.to_string(),
+                                        });
+
+                                        let line_count = utils::line_count(chunk_content_bytes);
+                                        chunk_mappings.push(ChunkMapping {
+                                            content_hash: content_hash.clone(),
+                                            chunk_hash,
+                                            chunk_index,
+                                            chunk_line_count: line_count,
+                                        });
+
+                                        chunk_index += 1;
+                                    } else {
+                                        warn!(
+                                            file = %normalized_path,
+                                            start,
+                                            end,
+                                            "skipping chunk that remained invalid UTF-8 after fallback"
+                                        );
+                                    }
+                                }
                             }
                         }
-                        if adjusted_boundaries.last() != Some(&(bytes.len() as u64)) {
-                            adjusted_boundaries.push(bytes.len() as u64);
-                        }
-
-                        let mut chunk_index = 0;
-                        for i in 0..adjusted_boundaries.len() - 1 {
-                            let start = adjusted_boundaries[i];
-                            let end = adjusted_boundaries[i + 1];
-
-                            if start >= end {
-                                continue;
-                            }
-
-                            let chunk_content_bytes = &bytes[start as usize..end as usize];
-                            let chunk_hash = utils::compute_content_hash(chunk_content_bytes);
-
-                            unique_chunks.insert(UniqueChunk {
-                                chunk_hash: chunk_hash.clone(),
-                                text_content: String::from_utf8_lossy(chunk_content_bytes)
-                                    .to_string(),
-                            });
-
-                            let line_count = utils::line_count(chunk_content_bytes);
-                            chunk_mappings.push(ChunkMapping {
-                                content_hash: content_hash.clone(),
-                                chunk_hash,
-                                chunk_index,
-                                chunk_line_count: line_count,
-                            });
-
-                            chunk_index += 1;
+                        Err(err) => {
+                            debug!(
+                                error = %err,
+                                file = %normalized_path,
+                                "skipping chunking for file with invalid UTF-8 content"
+                            );
                         }
                     }
                 }
@@ -260,4 +253,124 @@ fn should_skip(path: &Path) -> bool {
             .map(|s| matches!(s, "target" | "node_modules" | ".git"))
             .unwrap_or(false)
     })
+}
+
+fn compute_chunk_ranges(bytes: &[u8], full_text: &str) -> (Vec<(usize, usize)>, bool) {
+    let fastcdc_ranges = fastcdc_chunk_ranges(bytes);
+    let mut valid = true;
+
+    for (start, end) in &fastcdc_ranges {
+        if start >= end || *end > bytes.len() {
+            continue;
+        }
+
+        if std::str::from_utf8(&bytes[*start..*end]).is_err() {
+            valid = false;
+            break;
+        }
+    }
+
+    if valid {
+        (fastcdc_ranges, false)
+    } else {
+        let fallback = fallback_chunk_ranges(full_text);
+        (fallback, true)
+    }
+}
+
+fn fastcdc_chunk_ranges(bytes: &[u8]) -> Vec<(usize, usize)> {
+    if bytes.is_empty() {
+        return Vec::new();
+    }
+
+    let mut boundaries: Vec<u64> = vec![0];
+    let chunker = fastcdc::v2020::StreamCDC::new(
+        Cursor::new(bytes),
+        MIN_CHUNK_SIZE,
+        AVG_CHUNK_SIZE,
+        MAX_CHUNK_SIZE,
+    );
+
+    for result in chunker {
+        if let Ok(chunk) = result {
+            boundaries.push(chunk.offset + chunk.length as u64);
+        }
+    }
+
+    let total_len = bytes.len() as u64;
+    if boundaries.last() != Some(&total_len) {
+        boundaries.push(total_len);
+    }
+
+    let mut adjusted: Vec<u64> = vec![0];
+    if boundaries.len() > 1 {
+        for boundary in boundaries
+            .iter()
+            .skip(1)
+            .take(boundaries.len().saturating_sub(2))
+        {
+            if *boundary >= total_len {
+                continue;
+            }
+
+            if let Some(newline_pos) = bytes[*boundary as usize..].iter().position(|&b| b == b'\n')
+            {
+                adjusted.push(boundary + (newline_pos + 1) as u64);
+            } else {
+                adjusted.push(*boundary);
+            }
+        }
+    }
+
+    if adjusted.last() != Some(&total_len) {
+        adjusted.push(total_len);
+    }
+
+    let mut ranges = Vec::new();
+    for window in adjusted.windows(2) {
+        let start = window[0] as usize;
+        let end = window[1] as usize;
+        if start < end {
+            ranges.push((start, end));
+        }
+    }
+
+    ranges
+}
+
+fn fallback_chunk_ranges(full_text: &str) -> Vec<(usize, usize)> {
+    if full_text.is_empty() {
+        return Vec::new();
+    }
+
+    let mut ranges = Vec::new();
+    let mut chunk_start = 0usize;
+    let mut last_newline: Option<usize> = None;
+
+    for (idx, ch) in full_text.char_indices() {
+        let next_idx = idx + ch.len_utf8();
+
+        if ch == '\n' {
+            last_newline = Some(next_idx);
+        }
+
+        let span = next_idx - chunk_start;
+        if span >= AVG_CHUNK_SIZE as usize {
+            if let Some(newline_idx) = last_newline {
+                ranges.push((chunk_start, newline_idx));
+                chunk_start = newline_idx;
+                last_newline = None;
+            } else if span >= MAX_CHUNK_SIZE as usize {
+                ranges.push((chunk_start, next_idx));
+                chunk_start = next_idx;
+                last_newline = None;
+            }
+        }
+    }
+
+    if chunk_start < full_text.len() {
+        ranges.push((chunk_start, full_text.len()));
+    }
+
+    ranges
 }

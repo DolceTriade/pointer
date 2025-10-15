@@ -1,10 +1,10 @@
 use leptos::prelude::*;
 
+#[cfg(feature = "ssr")]
+use crate::db::Database;
 use crate::db::models::SearchResult;
 #[cfg(feature = "ssr")]
 use crate::db::postgres::PostgresDb;
-#[cfg(feature = "ssr")]
-use crate::db::Database;
 
 #[server]
 pub async fn search(query: String) -> Result<Vec<SearchResult>, ServerFnError> {

@@ -5,7 +5,9 @@ pub mod postgres;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::db::models::{FileReference, HighlightedLine, ReferenceResult, SearchResult, SymbolResult, TokenOccurrence};
+use crate::db::models::{
+    FileReference, HighlightedLine, ReferenceResult, SearchResult, SymbolResult, TokenOccurrence,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnippetRequest {
@@ -153,7 +155,6 @@ pub trait Database: Clone + Send + Sync + 'static {
     async fn text_search(&self, query: &str) -> Result<Vec<SearchResult>, DbError>;
     async fn health_check(&self) -> Result<String, DbError>;
 }
-
 
 #[derive(Debug)]
 pub enum DbError {

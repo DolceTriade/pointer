@@ -1,6 +1,6 @@
+use crate::dsl::parse_query;
 use leptos::prelude::*;
 use leptos_router::hooks::use_navigate;
-use crate::dsl::parse_query;
 
 #[component]
 pub fn SearchBar(#[prop(optional)] initial_query: String) -> impl IntoView {
@@ -72,28 +72,50 @@ pub fn SearchBar(#[prop(optional)] initial_query: String) -> impl IntoView {
 
                     // Validation indicator
                     {move || {
-                        validation.get().map(|status| {
-                            match status {
-                                ValidationStatus::Valid => {
-                                    view! {
-                                        <div class="absolute right-12 top-1/2 transform -translate-y-1/2">
-                                            <svg class="w-5 h-5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
-                                            </svg>
-                                        </div>
+                        validation
+                            .get()
+                            .map(|status| {
+                                match status {
+                                    ValidationStatus::Valid => {
+                                        view! {
+                                            <div class="absolute right-12 top-1/2 transform -translate-y-1/2">
+                                                <svg
+                                                    class="w-5 h-5 text-green-500"
+                                                    fill="none"
+                                                    stroke="currentColor"
+                                                    viewBox="0 0 24 24"
+                                                >
+                                                    <path
+                                                        stroke-linecap="round"
+                                                        stroke-linejoin="round"
+                                                        stroke-width="2"
+                                                        d="M5 13l4 4L19 7"
+                                                    ></path>
+                                                </svg>
+                                            </div>
+                                        }
                                     }
-                                },
-                                ValidationStatus::Invalid => {
-                                    view! {
-                                        <div class="absolute right-12 top-1/2 transform -translate-y-1/2">
-                                            <svg class="w-5 h-5 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
-                                            </svg>
-                                        </div>
+                                    ValidationStatus::Invalid => {
+                                        view! {
+                                            <div class="absolute right-12 top-1/2 transform -translate-y-1/2">
+                                                <svg
+                                                    class="w-5 h-5 text-red-500"
+                                                    fill="none"
+                                                    stroke="currentColor"
+                                                    viewBox="0 0 24 24"
+                                                >
+                                                    <path
+                                                        stroke-linecap="round"
+                                                        stroke-linejoin="round"
+                                                        stroke-width="2"
+                                                        d="M6 18L18 6M6 6l12 12"
+                                                    ></path>
+                                                </svg>
+                                            </div>
+                                        }
                                     }
-                                },
-                            }
-                        })
+                                }
+                            })
                     }}
 
                     <button
@@ -122,32 +144,46 @@ pub fn SearchBar(#[prop(optional)] initial_query: String) -> impl IntoView {
                     <div class="p-3 text-sm text-gray-600 dark:text-gray-300">
                         <p class="font-semibold mb-2">DSL Search Syntax:</p>
                         <div class="grid grid-cols-2 gap-2">
-                            {dsl_hints.into_iter().map(|(syntax, description)| {
-                                view! {
-                                    <div class="flex cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700 p-1 rounded"
-                                         on:click=move |_| {
-                                             set_query.set(format!("{}{}", query.get(), syntax));
-                                         }>
-                                        <span class="font-mono text-blue-600 dark:text-blue-400 font-semibold mr-2">{syntax}</span>
-                                        <span class="text-gray-600 dark:text-gray-400">{description}</span>
-                                    </div>
-                                }
-                            }).collect_view()}
+                            {dsl_hints
+                                .into_iter()
+                                .map(|(syntax, description)| {
+                                    view! {
+                                        <div
+                                            class="flex cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700 p-1 rounded"
+                                            on:click=move |_| {
+                                                set_query.set(format!("{}{}", query.get(), syntax));
+                                            }
+                                        >
+                                            <span class="font-mono text-blue-600 dark:text-blue-400 font-semibold mr-2">
+                                                {syntax}
+                                            </span>
+                                            <span class="text-gray-600 dark:text-gray-400">
+                                                {description}
+                                            </span>
+                                        </div>
+                                    }
+                                })
+                                .collect_view()}
                         </div>
                         <div class="mt-3 pt-2 border-t border-gray-200 dark:border-gray-700">
                             <p class="font-semibold mb-1">Examples:</p>
                             <div class="space-y-1">
-                                {example_queries.into_iter().map(|ex| {
-                                    let ex_clone = ex.to_string();
-                                    view! {
-                                        <div class="font-mono text-sm bg-gray-100 dark:bg-gray-700 p-2 rounded cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-600"
-                                             on:click=move |_| {
-                                                 set_query.set(ex_clone.clone());
-                                             }>
-                                            {ex}
-                                        </div>
-                                    }
-                                }).collect_view()}
+                                {example_queries
+                                    .into_iter()
+                                    .map(|ex| {
+                                        let ex_clone = ex.to_string();
+                                        view! {
+                                            <div
+                                                class="font-mono text-sm bg-gray-100 dark:bg-gray-700 p-2 rounded cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-600"
+                                                on:click=move |_| {
+                                                    set_query.set(ex_clone.clone());
+                                                }
+                                            >
+                                                {ex}
+                                            </div>
+                                        }
+                                    })
+                                    .collect_view()}
                             </div>
                         </div>
                     </div>

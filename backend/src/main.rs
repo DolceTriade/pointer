@@ -4,19 +4,18 @@ use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
 use axum::{
+    Json, Router,
     extract::{DefaultBodyLimit, State},
-    http::{StatusCode},
+    http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
-    Json, Router,
 };
-use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use clap::Parser;
 use once_cell::sync::Lazy;
 use pointer_indexer::models::{
-    ChunkMapping, ContentBlob, FilePointer, IndexReport, ReferenceRecord, SymbolRecord,
-    UniqueChunk,
+    ChunkMapping, ContentBlob, FilePointer, IndexReport, ReferenceRecord, SymbolRecord, UniqueChunk,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
@@ -123,7 +122,6 @@ struct UniqueChunkUploadRequest {
 struct ChunkMappingUploadRequest {
     mappings: Vec<ChunkMapping>,
 }
-
 
 // Manifest-related structs
 #[derive(Debug, Deserialize)]
@@ -365,9 +363,8 @@ async fn blobs_upload(
         return Ok(StatusCode::ACCEPTED);
     }
 
-    let mut qb = QueryBuilder::new(
-        "INSERT INTO content_blobs (hash, language, byte_len, line_count) ",
-    );
+    let mut qb =
+        QueryBuilder::new("INSERT INTO content_blobs (hash, language, byte_len, line_count) ");
     qb.push_values(payload.blobs, |mut b, blob| {
         b.push_bind(blob.hash)
             .push_bind(blob.language)
@@ -394,7 +391,7 @@ async fn chunks_need(
         }));
     }
 
-    let existing: Vec<(String,)> = 
+    let existing: Vec<(String,)> =
         sqlx::query_as("SELECT chunk_hash FROM chunks WHERE chunk_hash = ANY($1)")
             .bind(&payload.hashes)
             .fetch_all(&state.pool)
@@ -421,8 +418,7 @@ async fn chunks_upload(
 
     let mut qb = QueryBuilder::new("INSERT INTO chunks (chunk_hash, text_content) ");
     qb.push_values(payload.chunks, |mut b, chunk| {
-        b.push_bind(chunk.chunk_hash)
-            .push_bind(chunk.text_content);
+        b.push_bind(chunk.chunk_hash).push_bind(chunk.text_content);
     });
     qb.push(" ON CONFLICT (chunk_hash) DO NOTHING");
 
@@ -460,7 +456,6 @@ async fn mappings_upload(
 
     Ok(StatusCode::ACCEPTED)
 }
-
 
 // Manifest Handlers
 async fn manifest_chunk(
@@ -618,7 +613,7 @@ async fn insert_file_pointers(
     files: &[FilePointer],
 ) -> Result<(), ApiErrorKind> {
     if files.is_empty() {
-        return Ok(())
+        return Ok(());
     }
 
     let deduped = dedup_by_key(files, |file| {
@@ -657,7 +652,7 @@ async fn insert_symbol_records(
     symbols: &[SymbolRecord],
 ) -> Result<(), ApiErrorKind> {
     if symbols.is_empty() {
-        return Ok(())
+        return Ok(());
     }
 
     let deduped = dedup_by_key(symbols, |symbol| {
@@ -698,7 +693,7 @@ async fn insert_reference_records(
     references: &[ReferenceRecord],
 ) -> Result<(), ApiErrorKind> {
     if references.is_empty() {
-        return Ok(())
+        return Ok(());
     }
 
     let deduped = dedup_by_key(references, |reference| {
@@ -739,7 +734,6 @@ async fn insert_reference_records(
 
     Ok(())
 }
-
 
 // Search and Display Handlers
 
@@ -827,7 +821,7 @@ async fn search_symbols(
             "SELECT DISTINCT cbc.content_hash
              FROM chunks c
              JOIN content_blob_chunks cbc ON c.chunk_hash = cbc.chunk_hash
-             WHERE to_tsvector('simple', c.text_content) @@ to_tsquery('simple', $1)"
+             WHERE to_tsvector('simple', c.text_content) @@ to_tsquery('simple', $1)",
         )
         .bind(q)
         .fetch_all(&state.pool)
@@ -836,9 +830,13 @@ async fn search_symbols(
 
         let hashes: Vec<String> = matching_hashes.into_iter().map(|row| row.0).collect();
         if hashes.is_empty() {
-            return Ok(Json(SearchResponse { symbols: Vec::new() }));
+            return Ok(Json(SearchResponse {
+                symbols: Vec::new(),
+            }));
         }
-        qb.push(" WHERE s.content_hash = ANY(").push_bind(hashes).push(")");
+        qb.push(" WHERE s.content_hash = ANY(")
+            .push_bind(hashes)
+            .push(")");
     } else {
         qb.push(" WHERE 1=1");
     }
@@ -905,7 +903,7 @@ async fn search_symbols(
     let mut reference_map: HashMap<String, Vec<ReferenceRow>> = HashMap::new();
 
     if include_refs {
-        let fully_qualified: HashSet<String> = 
+        let fully_qualified: HashSet<String> =
             rows.iter().map(|row| row.fully_qualified.clone()).collect();
         if !fully_qualified.is_empty() {
             let lookup: Vec<String> = fully_qualified.into_iter().collect();
