@@ -14,7 +14,7 @@ pub fn SearchBar(#[prop(optional)] initial_query: String) -> impl IntoView {
     let on_search = move || {
         let q = query.get();
         if !q.is_empty() {
-            navigate(&format!("/search?q={}", q), Default::default());
+            navigate(&format!("/search?q={}&page=1", q), Default::default());
         }
     };
 

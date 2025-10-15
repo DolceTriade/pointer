@@ -1,4 +1,4 @@
-use crate::db::models::FileReference as DbFileReference;
+use crate::db::models::{FileReference as DbFileReference, SearchResultsPage};
 use crate::db::{
     Database, DbError, DbUniqueChunk, FileReference, RawFileContent, ReferenceResult, RepoSummary,
     RepoTreeQuery, SearchRequest, SearchResponse, SearchResult, SnippetRequest, SnippetResponse,
@@ -7,7 +7,6 @@ use crate::db::{
 use crate::dsl::{CaseSensitivity, ContentPredicate, TextSearchPlan, TextSearchRequest};
 use async_trait::async_trait;
 use sqlx::{PgPool, Postgres, QueryBuilder, Transaction};
-use std::collections::HashSet;
 use std::io::Read;
 
 #[derive(Clone)]
@@ -587,7 +586,7 @@ impl Database for PostgresDb {
         Ok(SearchResponse { symbols: results })
     }
 
-    async fn text_search(&self, request: &TextSearchRequest) -> Result<Vec<SearchResult>, DbError> {
+    async fn text_search(&self, request: &TextSearchRequest) -> Result<SearchResultsPage, DbError> {
         #[derive(sqlx::FromRow, Debug)]
         struct SearchResultRow {
             repository: String,
@@ -662,16 +661,36 @@ impl Database for PostgresDb {
             }
         }
 
-        let mut aggregated = Vec::new();
-        let mut seen = HashSet::new();
+        if request.plans.is_empty() {
+            return Ok(SearchResultsPage::empty(
+                request.original_query.clone(),
+                request.page,
+                request.page_size,
+            ));
+        }
 
-        for plan in &request.plans {
+        let mut qb = QueryBuilder::new("WITH plan_results AS (");
+
+        for (idx, plan) in request.plans.iter().enumerate() {
+            if idx > 0 {
+                qb.push(" UNION ALL ");
+            }
+
             let case_mode = resolve_case(plan);
             let highlight_case_sensitive = matches!(case_mode, CaseSensitivity::Yes);
 
-            let mut qb = QueryBuilder::new(
-                r#"
-                WITH chunk_matches AS (
+            qb.push("(");
+            qb.push(
+                "
+                SELECT
+                    cm.repository,
+                    cm.commit_sha,
+                    cm.file_path,
+                    cm.start_line,
+                    cm.chunk_line_count AS line_count,
+                    ctx.context_snippet AS content_text,
+                    ctx.match_line_number
+                FROM (
                     SELECT
                         f.repository,
                         f.commit_sha,
@@ -697,8 +716,7 @@ impl Database for PostgresDb {
                     JOIN
                         content_blobs cb ON cb.hash = f.content_hash
                     WHERE
-                        TRUE
-                "#,
+                        TRUE",
             );
 
             for predicate in &plan.required_terms {
@@ -762,59 +780,78 @@ impl Database for PostgresDb {
             }
 
             qb.push(
-                r#"
-                )
-                SELECT
-                    cm.repository,
-                    cm.commit_sha,
-                    cm.file_path,
-                    cm.start_line,
-                    cm.chunk_line_count AS line_count,
-                    ctx.context_snippet AS content_text,
-                    ctx.match_line_number
-                FROM
-                    chunk_matches cm,
-                    LATERAL extract_context_with_highlight(cm.text_content, "#,
+                "
+                ) cm
+                CROSS JOIN LATERAL extract_context_with_highlight(cm.text_content, ",
             );
             qb.push_bind(&plan.highlight_pattern);
             qb.push(", 3, ");
             qb.push_bind(highlight_case_sensitive);
-            qb.push(") ctx");
+            qb.push(") ctx)");
+        }
 
-            let query = qb.build_query_as::<SearchResultRow>();
-            let rows = query
-                .fetch_all(&self.pool)
-                .await
-                .map_err(|e| DbError::Database(e.to_string()))?;
+        qb.push(
+            ")
+            SELECT DISTINCT ON (repository, commit_sha, file_path, start_line, match_line_number)
+                repository,
+                commit_sha,
+                file_path,
+                start_line,
+                line_count,
+                content_text,
+                match_line_number
+            FROM
+                plan_results
+            ORDER BY
+                repository,
+                commit_sha,
+                file_path,
+                start_line,
+                match_line_number
+            LIMIT ",
+        );
+        qb.push_bind(request.limit_plus_one());
+        qb.push(" OFFSET ");
+        qb.push_bind(request.offset());
 
-            for row in rows {
+        let query = qb.build_query_as::<SearchResultRow>();
+        let mut rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| DbError::Database(e.to_string()))?;
+
+        let mut has_more = false;
+        if rows.len() > request.page_size as usize {
+            has_more = true;
+            rows.truncate(request.page_size as usize);
+        }
+
+        let results = rows
+            .into_iter()
+            .map(|row| {
                 let start_line: i32 = row.start_line.try_into().unwrap_or(i32::MAX);
                 let actual_match_line = start_line.saturating_add(row.match_line_number - 1);
                 let end_line = start_line.saturating_add(row.line_count.saturating_sub(1));
 
-                let key = (
-                    row.repository.clone(),
-                    row.commit_sha.clone(),
-                    row.file_path.clone(),
+                SearchResult {
+                    repository: row.repository,
+                    commit_sha: row.commit_sha,
+                    file_path: row.file_path,
                     start_line,
-                    actual_match_line,
-                );
-
-                if seen.insert(key) {
-                    aggregated.push(SearchResult {
-                        repository: row.repository,
-                        commit_sha: row.commit_sha,
-                        file_path: row.file_path,
-                        start_line,
-                        end_line,
-                        match_line: actual_match_line,
-                        content_text: row.content_text,
-                    });
+                    end_line,
+                    match_line: actual_match_line,
+                    content_text: row.content_text,
                 }
-            }
-        }
+            })
+            .collect();
 
-        Ok(aggregated)
+        Ok(SearchResultsPage {
+            results,
+            has_more,
+            page: request.page,
+            page_size: request.page_size,
+            query: request.original_query.clone(),
+        })
     }
 
     async fn health_check(&self) -> Result<String, DbError> {

@@ -376,6 +376,8 @@ pub fn parse_query(query_str: &str) -> Result<QueryNode, ParseError> {
     parser.parse()
 }
 
+pub const DEFAULT_PAGE_SIZE: u32 = 25;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ContentPredicate {
     Plain(String),
@@ -403,6 +405,8 @@ pub struct TextSearchPlan {
 pub struct TextSearchRequest {
     pub original_query: String,
     pub plans: Vec<TextSearchPlan>,
+    pub page: u32,
+    pub page_size: u32,
 }
 
 #[derive(Debug, PartialEq)]
@@ -434,11 +438,22 @@ impl From<ParseError> for QueryPlanError {
 
 impl TextSearchRequest {
     pub fn from_query_str(query: &str) -> Result<Self, QueryPlanError> {
+        Self::from_query_str_with_page(query, 1, DEFAULT_PAGE_SIZE)
+    }
+
+    pub fn from_query_str_with_page(
+        query: &str,
+        page: u32,
+        page_size: u32,
+    ) -> Result<Self, QueryPlanError> {
         let ast = parse_query(query)?;
         let flats = flatten_query(&ast)?;
         if flats.is_empty() {
             return Err(QueryPlanError::EmptyPlan);
         }
+
+        let page = page.max(1);
+        let page_size = page_size.max(1);
 
         let mut plans = Vec::with_capacity(flats.len());
         for flat in flats {
@@ -449,7 +464,18 @@ impl TextSearchRequest {
         Ok(TextSearchRequest {
             original_query: query.to_string(),
             plans,
+            page,
+            page_size,
         })
+    }
+
+    pub fn limit_plus_one(&self) -> i64 {
+        (self.page_size + 1) as i64
+    }
+
+    pub fn offset(&self) -> i64 {
+        let page_index = self.page.saturating_sub(1) as i64;
+        page_index * self.page_size as i64
     }
 }
 

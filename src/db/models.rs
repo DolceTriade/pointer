@@ -69,3 +69,24 @@ pub struct SearchResult {
     pub match_line: i32, // The actual line where the match occurs
     pub content_text: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchResultsPage {
+    pub results: Vec<SearchResult>,
+    pub has_more: bool,
+    pub page: u32,
+    pub page_size: u32,
+    pub query: String,
+}
+
+impl SearchResultsPage {
+    pub fn empty(query: String, page: u32, page_size: u32) -> Self {
+        Self {
+            results: Vec::new(),
+            has_more: false,
+            page,
+            page_size,
+            query,
+        }
+    }
+}

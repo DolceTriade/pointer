@@ -6,7 +6,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::db::models::{
-    FileReference, HighlightedLine, ReferenceResult, SearchResult, SymbolResult, TokenOccurrence,
+    FileReference, HighlightedLine, ReferenceResult, SearchResult, SearchResultsPage, SymbolResult,
+    TokenOccurrence,
 };
 use crate::dsl::TextSearchRequest;
 
@@ -153,7 +154,7 @@ pub trait Database: Clone + Send + Sync + 'static {
         request: SymbolReferenceRequest,
     ) -> Result<SymbolReferenceResponse, DbError>;
     async fn search_symbols(&self, request: SearchRequest) -> Result<SearchResponse, DbError>;
-    async fn text_search(&self, request: &TextSearchRequest) -> Result<Vec<SearchResult>, DbError>;
+    async fn text_search(&self, request: &TextSearchRequest) -> Result<SearchResultsPage, DbError>;
     async fn health_check(&self) -> Result<String, DbError>;
 }
 
