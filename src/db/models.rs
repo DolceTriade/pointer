@@ -68,6 +68,8 @@ pub struct SearchResult {
     pub end_line: i32,
     pub match_line: i32, // The actual line where the match occurs
     pub content_text: String,
+    pub branches: Vec<String>,
+    pub is_historical: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,8 +1,8 @@
-use crate::db::models::SearchResultsPage;
+use crate::db::models::{SearchResult, SearchResultsPage};
 use crate::dsl::DEFAULT_PAGE_SIZE;
 use crate::services::search_service::search;
 use leptos::Params;
-use leptos::either::EitherOf3;
+use leptos::either::{Either, EitherOf3};
 use leptos::prelude::*;
 use leptos_router::hooks::use_navigate;
 use leptos_router::hooks::use_query;
@@ -80,29 +80,82 @@ pub fn SearchPage() -> impl IntoView {
                                                             .results
                                                             .into_iter()
                                                             .map(|result| {
+                                                                let SearchResult {
+                                                                    repository,
+                                                                    commit_sha,
+                                                                    file_path,
+                                                                    match_line,
+                                                                    content_text,
+                                                                    branches,
+                                                                    is_historical,
+                                                                    ..
+                                                                } = result;
+                                                                let branch_text = if branches.is_empty() {
+                                                                    None
+                                                                } else {
+                                                                    Some(branches.join(", "))
+                                                                };
+                                                                let branch_badge = branch_text
+                                                                    .as_ref()
+                                                                    .map(|text| {
+                                                                        let label = format!("Branches: {}", text);
+                                                                        Either::Left(
+
+                                                                            view! {
+                                                                                <span class="inline-flex items-center rounded-full bg-blue-100 text-blue-700 dark:bg-blue-900/50 dark:text-blue-100 px-2 py-0.5">
+                                                                                    {label}
+                                                                                </span>
+                                                                            },
+                                                                        )
+                                                                    })
+                                                                    .unwrap_or_else(|| Either::Right(view! { <></> }));
+                                                                let historical_badge = if is_historical {
+                                                                    Either::Left(
+
+                                                                        view! {
+                                                                            <span class="inline-flex items-center rounded-full bg-amber-200 text-amber-900 dark:bg-amber-900/60 dark:text-amber-100 px-2 py-0.5">
+                                                                                "Historical"
+                                                                            </span>
+                                                                        },
+                                                                    )
+                                                                } else {
+                                                                    Either::Right(view! { <></> })
+                                                                };
+                                                                let short_commit: String = commit_sha
+                                                                    .chars()
+                                                                    .take(7)
+                                                                    .collect();
+                                                                let location_label = format!(
+                                                                    "{}/{}:{}",
+                                                                    repository,
+                                                                    file_path,
+                                                                    match_line,
+                                                                );
+                                                                let link = format!(
+                                                                    "/repo/{}/tree/{}/{}#L{}",
+                                                                    repository,
+                                                                    commit_sha,
+                                                                    file_path,
+                                                                    match_line,
+                                                                );
+
                                                                 view! {
                                                                     <div class="mt-4 p-4 border border-gray-300 dark:border-gray-700 rounded-md bg-white dark:bg-gray-800 break-words max-w-full">
                                                                         <p class="font-mono text-sm break-all">
                                                                             <a
-                                                                                href=format!(
-                                                                                    "/repo/{}/tree/{}/{}#L{}",
-                                                                                    result.repository,
-                                                                                    result.commit_sha,
-                                                                                    result.file_path,
-                                                                                    result.match_line,
-                                                                                )
+                                                                                href=link
                                                                                 class="hover:underline text-blue-600 dark:text-blue-400 break-all"
                                                                             >
-                                                                                {format!(
-                                                                                    "{}/{}:{}",
-                                                                                    result.repository,
-                                                                                    result.file_path,
-                                                                                    result.match_line,
-                                                                                )}
+                                                                                {location_label.clone()}
                                                                             </a>
                                                                         </p>
+                                                                        <div class="flex flex-wrap items-center gap-2 mt-1 text-xs text-gray-600 dark:text-gray-400">
+                                                                            <span>{format!("Commit {}", short_commit)}</span>
+                                                                            {branch_badge}
+                                                                            {historical_badge}
+                                                                        </div>
                                                                         <pre class="bg-gray-100 dark:bg-gray-900 p-2 rounded-md mt-2 text-sm overflow-x-auto max-w-full">
-                                                                            <code inner_html=result.content_text></code>
+                                                                            <code inner_html=content_text></code>
                                                                         </pre>
                                                                     </div>
                                                                 }

@@ -40,6 +40,7 @@ pub fn SearchBar(#[prop(optional)] initial_query: String) -> impl IntoView {
         ("sym:", "Search for symbols"),
         ("branch:", "Search in specific branch"),
         ("regex:", "Search with regex pattern"),
+        ("historical:", "Include historical commits (historical:yes)"),
     ];
 
     // Example queries for users
@@ -47,7 +48,7 @@ pub fn SearchBar(#[prop(optional)] initial_query: String) -> impl IntoView {
         "repo:myrepo lang:rust",
         "content:\"async fn\" file:*.rs",
         "sym:MyFunction lang:go",
-        "file:README.md content:install",
+        "file:README.md content:install historical:yes",
     ];
 
     view! {

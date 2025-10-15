@@ -5,6 +5,7 @@ use crate::db::Database;
 use crate::db::models::SearchResultsPage;
 #[cfg(feature = "ssr")]
 use crate::db::postgres::PostgresDb;
+#[cfg(feature = "ssr")]
 use crate::dsl::{DEFAULT_PAGE_SIZE, TextSearchRequest};
 
 #[server]

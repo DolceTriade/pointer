@@ -50,6 +50,12 @@ pub async fn get_file_viewer_data(
     let state = state.lock().await;
     let db = PostgresDb::new(state.pool.clone());
 
+    let commit = db
+        .resolve_branch_head(&repo, &branch)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .unwrap_or_else(|| branch.clone());
+
     let path_str = path.unwrap_or_default();
     // An empty path or a path ending in '/' is a directory.
     let is_dir = path_str.is_empty() || path_str.ends_with('/');
@@ -59,7 +65,7 @@ pub async fn get_file_viewer_data(
             .get_repo_tree(
                 &repo,
                 RepoTreeQuery {
-                    commit: branch.clone(),
+                    commit: commit.clone(),
                     path: Some(path_str),
                 },
             )
@@ -74,7 +80,7 @@ pub async fn get_file_viewer_data(
 
         let readme = if let Some(readme_path) = readme_path {
             let file_content = db
-                .get_file_content(&repo, &branch, &readme_path)
+                .get_file_content(&repo, &commit, &readme_path)
                 .await
                 .map_err(|e| ServerFnError::new(e.to_string()))?;
             Some(file_content.content)
@@ -90,14 +96,14 @@ pub async fn get_file_viewer_data(
         let p = Path::new(&path_str);
         // This is a file path
         let file_content = db
-            .get_file_content(&repo, &branch, &path_str)
+            .get_file_content(&repo, &commit, &path_str)
             .await
             .map_err(|e| ServerFnError::new(e.to_string()))?;
 
         if file_content.language.is_none() && is_binary(&file_content.content) {
             let download_url = format!(
                 "/api/download_raw?repo={}&branch={}&path={}",
-                repo, branch, path_str
+                repo, commit, path_str
             );
             return Ok(FileViewerData::Binary { download_url });
         }

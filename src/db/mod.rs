@@ -6,9 +6,10 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::db::models::{
-    FileReference, HighlightedLine, ReferenceResult, SearchResult, SearchResultsPage, SymbolResult,
-    TokenOccurrence,
+    FileReference, HighlightedLine, SearchResultsPage, SymbolResult, TokenOccurrence,
 };
+#[cfg(feature = "ssr")]
+use crate::db::models::{ReferenceResult, SearchResult};
 use crate::dsl::TextSearchRequest;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,6 +121,11 @@ pub trait Database: Clone + Send + Sync + 'static {
     // Repository and Branch operations
     async fn get_all_repositories(&self) -> Result<Vec<RepoSummary>, DbError>;
     async fn get_branches_for_repository(&self, repository: &str) -> Result<Vec<String>, DbError>;
+    async fn resolve_branch_head(
+        &self,
+        repository: &str,
+        branch: &str,
+    ) -> Result<Option<String>, DbError>;
 
     // Existing backend operations
     async fn chunk_need(&self, hashes: Vec<String>) -> Result<Vec<String>, DbError>;

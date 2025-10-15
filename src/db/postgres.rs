@@ -42,17 +42,43 @@ impl Database for PostgresDb {
     }
 
     async fn get_branches_for_repository(&self, repository: &str) -> Result<Vec<String>, DbError> {
-        // Note: The backend binary stores commits, not branches
-        // In Git, branches are references to commits
-        let commits: Vec<String> = sqlx::query_scalar(
-            "SELECT DISTINCT commit_sha FROM files WHERE repository = $1 ORDER BY commit_sha DESC",
+        let branches: Vec<String> =
+            sqlx::query_scalar("SELECT branch FROM branches WHERE repository = $1 ORDER BY branch")
+                .bind(repository)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| DbError::Database(e.to_string()))?;
+
+        if branches.is_empty() {
+            let commits: Vec<String> = sqlx::query_scalar(
+                "SELECT DISTINCT commit_sha FROM files WHERE repository = $1 ORDER BY commit_sha DESC",
+            )
+            .bind(repository)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| DbError::Database(e.to_string()))?;
+
+            Ok(commits)
+        } else {
+            Ok(branches)
+        }
+    }
+
+    async fn resolve_branch_head(
+        &self,
+        repository: &str,
+        branch: &str,
+    ) -> Result<Option<String>, DbError> {
+        let commit: Option<String> = sqlx::query_scalar(
+            "SELECT commit_sha FROM branches WHERE repository = $1 AND branch = $2",
         )
         .bind(repository)
-        .fetch_all(&self.pool)
+        .bind(branch)
+        .fetch_optional(&self.pool)
         .await
         .map_err(|e| DbError::Database(e.to_string()))?;
 
-        Ok(commits)
+        Ok(commit)
     }
 
     async fn chunk_need(&self, hashes: Vec<String>) -> Result<Vec<String>, DbError> {
@@ -596,6 +622,8 @@ impl Database for PostgresDb {
             line_count: i32,
             content_text: String,
             match_line_number: i32,
+            branches: Vec<String>,
+            is_historical: bool,
         }
 
         fn push_content_condition(
@@ -689,7 +717,12 @@ impl Database for PostgresDb {
                     cm.start_line,
                     cm.chunk_line_count AS line_count,
                     ctx.context_snippet AS content_text,
-                    ctx.match_line_number
+                    ctx.match_line_number,
+                ",
+            );
+            qb.push_bind(plan.include_historical);
+            qb.push(
+                " AS include_historical
                 FROM (
                     SELECT
                         f.repository,
@@ -792,22 +825,42 @@ impl Database for PostgresDb {
 
         qb.push(
             ")
-            SELECT DISTINCT ON (repository, commit_sha, file_path, start_line, match_line_number)
-                repository,
-                commit_sha,
-                file_path,
-                start_line,
-                line_count,
-                content_text,
-                match_line_number
+            SELECT DISTINCT ON (pr.repository, pr.commit_sha, pr.file_path, pr.start_line, pr.match_line_number)
+                pr.repository,
+                pr.commit_sha,
+                pr.file_path,
+                pr.start_line,
+                pr.line_count,
+                pr.content_text,
+                pr.match_line_number,
+                COALESCE(branch_match.branches, ARRAY[]::TEXT[]) AS branches,
+                CASE
+                    WHEN repo_branches.repo_has_branches IS TRUE AND branch_match.branches IS NULL THEN TRUE
+                    ELSE FALSE
+                END AS is_historical
             FROM
-                plan_results
+                plan_results pr
+            LEFT JOIN LATERAL (
+                SELECT array_agg(DISTINCT branch) AS branches
+                FROM branches b
+                WHERE b.repository = pr.repository AND b.commit_sha = pr.commit_sha
+            ) branch_match ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT TRUE AS repo_has_branches
+                FROM branches b
+                WHERE b.repository = pr.repository
+                LIMIT 1
+            ) repo_branches ON TRUE
+            WHERE
+                pr.include_historical
+                OR branch_match.branches IS NOT NULL
+                OR repo_branches.repo_has_branches IS NULL
             ORDER BY
-                repository,
-                commit_sha,
-                file_path,
-                start_line,
-                match_line_number
+                pr.repository,
+                pr.commit_sha,
+                pr.file_path,
+                pr.start_line,
+                pr.match_line_number
             LIMIT ",
         );
         qb.push_bind(request.limit_plus_one());
@@ -841,6 +894,8 @@ impl Database for PostgresDb {
                     end_line,
                     match_line: actual_match_line,
                     content_text: row.content_text,
+                    branches: row.branches,
+                    is_historical: row.is_historical,
                 }
             })
             .collect();
@@ -934,6 +989,7 @@ impl PostgresDb {
             .await?;
         self.insert_reference_records(&mut tx, &report.reference_records)
             .await?;
+        self.upsert_branch_heads(&mut tx, &report.branches).await?;
 
         tx.commit()
             .await
@@ -1102,6 +1158,38 @@ impl PostgresDb {
                 .await
                 .map_err(|e| DbError::Database(e.to_string()))?;
         }
+
+        Ok(())
+    }
+
+    async fn upsert_branch_heads(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        branches: &[pointer_indexer::models::BranchHead],
+    ) -> Result<(), DbError> {
+        if branches.is_empty() {
+            return Ok(());
+        }
+
+        let deduped = dedup_by_key(branches, |branch| {
+            (branch.repository.clone(), branch.branch.clone())
+        });
+
+        let mut qb = QueryBuilder::new("INSERT INTO branches (repository, branch, commit_sha) ");
+        qb.push_values(deduped.into_iter(), |mut b, branch| {
+            b.push_bind(&branch.repository)
+                .push_bind(&branch.branch)
+                .push_bind(&branch.commit_sha);
+        });
+        qb.push(
+            " ON CONFLICT (repository, branch)
+              DO UPDATE SET commit_sha = EXCLUDED.commit_sha, indexed_at = NOW()",
+        );
+
+        qb.build()
+            .execute(tx.as_mut())
+            .await
+            .map_err(|e| DbError::Database(e.to_string()))?;
 
         Ok(())
     }

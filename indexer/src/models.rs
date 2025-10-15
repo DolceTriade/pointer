@@ -44,6 +44,14 @@ pub struct IndexReport {
     pub symbol_records: Vec<SymbolRecord>,
     pub file_pointers: Vec<FilePointer>,
     pub reference_records: Vec<ReferenceRecord>,
+    pub branches: Vec<BranchHead>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BranchHead {
+    pub repository: String,
+    pub branch: String,
+    pub commit_sha: String,
 }
 
 // A unique, deduplicated chunk of text content.

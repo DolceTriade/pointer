@@ -13,6 +13,7 @@ pub enum Filter {
     Regex(String),
     CaseSensitive(CaseSensitivity),
     Type(ResultType),
+    Historical(bool),
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -61,6 +62,13 @@ impl fmt::Display for Filter {
                 ResultType::File => write!(f, "type:file"),
                 ResultType::Repo => write!(f, "type:repo"),
             },
+            Filter::Historical(flag) => {
+                if *flag {
+                    write!(f, "historical:yes")
+                } else {
+                    write!(f, "historical:no")
+                }
+            }
         }
     }
 }
@@ -156,6 +164,14 @@ impl QueryParser {
                 "repo" => Ok(Filter::Type(ResultType::Repo)),
                 _ => Err(ParseError::InvalidFilter(format!(
                     "type must be filematch, filename, file, or repo, got {}",
+                    value
+                ))),
+            },
+            "historical" => match value.to_ascii_lowercase().as_str() {
+                "yes" | "true" | "1" => Ok(Filter::Historical(true)),
+                "no" | "false" | "0" => Ok(Filter::Historical(false)),
+                _ => Err(ParseError::InvalidFilter(format!(
+                    "historical must be yes or no, got {}",
                     value
                 ))),
             },
@@ -399,6 +415,7 @@ pub struct TextSearchPlan {
     pub case_sensitivity: Option<CaseSensitivity>,
     pub highlight_pattern: String,
     pub result_type: Option<ResultType>,
+    pub include_historical: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -552,6 +569,7 @@ impl TryFrom<FlatQuery> for TextSearchPlan {
             excluded_branches: value.excluded_branches,
             case_sensitivity: value.case_sensitivity,
             result_type: value.result_type,
+            include_historical: value.include_historical.unwrap_or(false),
         })
     }
 }
@@ -570,6 +588,7 @@ struct FlatQuery {
     excluded_branches: Vec<String>,
     case_sensitivity: Option<CaseSensitivity>,
     result_type: Option<ResultType>,
+    include_historical: Option<bool>,
 }
 
 impl Default for FlatQuery {
@@ -587,6 +606,7 @@ impl Default for FlatQuery {
             excluded_branches: Vec::new(),
             case_sensitivity: None,
             result_type: None,
+            include_historical: None,
         }
     }
 }
@@ -616,6 +636,7 @@ impl FlatQuery {
 
         self.case_sensitivity = merge_case(self.case_sensitivity, other.case_sensitivity.clone())?;
         self.result_type = merge_result_type(self.result_type, other.result_type.clone())?;
+        self.include_historical = merge_bool(self.include_historical, other.include_historical)?;
 
         Ok(self)
     }
@@ -688,6 +709,14 @@ impl FlatQuery {
                     ));
                 }
                 base.result_type = Some(kind.clone());
+            }
+            Filter::Historical(flag) => {
+                if negate {
+                    return Err(QueryPlanError::Unsupported(
+                        "negating historical: filters is not supported".to_string(),
+                    ));
+                }
+                base.include_historical = Some(*flag);
             }
         }
         Ok(base)
@@ -771,6 +800,18 @@ fn merge_result_type(
         (Some(a), Some(b)) if a == b => Ok(Some(a)),
         (Some(a), Some(b)) => Err(QueryPlanError::Invalid(format!(
             "conflicting type filters: {:?} vs {:?}",
+            a, b
+        ))),
+    }
+}
+
+fn merge_bool(left: Option<bool>, right: Option<bool>) -> Result<Option<bool>, QueryPlanError> {
+    match (left, right) {
+        (None, other) => Ok(other),
+        (other, None) => Ok(other),
+        (Some(a), Some(b)) if a == b => Ok(Some(a)),
+        (Some(a), Some(b)) => Err(QueryPlanError::Invalid(format!(
+            "conflicting historical filters: {} vs {}",
             a, b
         ))),
     }

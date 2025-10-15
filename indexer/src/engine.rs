@@ -10,8 +10,8 @@ use tracing::{debug, trace, warn};
 use crate::config::IndexerConfig;
 use crate::extractors::{self, ExtractedSymbol, Extraction};
 use crate::models::{
-    ChunkMapping, ContentBlob, FilePointer, IndexArtifacts, IndexReport, ReferenceRecord,
-    SymbolRecord, UniqueChunk,
+    BranchHead, ChunkMapping, ContentBlob, FilePointer, IndexArtifacts, IndexReport,
+    ReferenceRecord, SymbolRecord, UniqueChunk,
 };
 use crate::utils;
 
@@ -231,6 +231,14 @@ impl Indexer {
                     });
                 }
             }
+        }
+
+        if let Some(branch) = &self.config.branch {
+            report.branches.push(BranchHead {
+                repository: self.config.repository.clone(),
+                branch: branch.clone(),
+                commit_sha: self.config.commit.clone(),
+            });
         }
 
         Ok(IndexArtifacts {

@@ -15,7 +15,8 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use clap::Parser;
 use once_cell::sync::Lazy;
 use pointer_indexer::models::{
-    ChunkMapping, ContentBlob, FilePointer, IndexReport, ReferenceRecord, SymbolRecord, UniqueChunk,
+    BranchHead, ChunkMapping, ContentBlob, FilePointer, IndexReport, ReferenceRecord, SymbolRecord,
+    UniqueChunk,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
@@ -572,6 +573,7 @@ async fn ingest_report(pool: &PgPool, report: IndexReport) -> Result<(), ApiErro
     insert_file_pointers(&mut tx, &report.file_pointers).await?;
     insert_symbol_records(&mut tx, &report.symbol_records).await?;
     insert_reference_records(&mut tx, &report.reference_records).await?;
+    upsert_branch_heads(&mut tx, &report.branches).await?;
 
     tx.commit().await.map_err(ApiErrorKind::from)?;
 
@@ -731,6 +733,37 @@ async fn insert_reference_records(
             .await
             .map_err(ApiErrorKind::from)?;
     }
+
+    Ok(())
+}
+
+async fn upsert_branch_heads(
+    tx: &mut Transaction<'_, Postgres>,
+    branches: &[BranchHead],
+) -> Result<(), ApiErrorKind> {
+    if branches.is_empty() {
+        return Ok(());
+    }
+
+    let deduped = dedup_by_key(branches, |branch| {
+        (branch.repository.clone(), branch.branch.clone())
+    });
+
+    let mut qb = QueryBuilder::new("INSERT INTO branches (repository, branch, commit_sha) ");
+    qb.push_values(deduped.into_iter(), |mut b, branch| {
+        b.push_bind(&branch.repository)
+            .push_bind(&branch.branch)
+            .push_bind(&branch.commit_sha);
+    });
+    qb.push(
+        " ON CONFLICT (repository, branch)
+          DO UPDATE SET commit_sha = EXCLUDED.commit_sha, indexed_at = NOW()",
+    );
+
+    qb.build()
+        .execute(tx.as_mut())
+        .await
+        .map_err(ApiErrorKind::from)?;
 
     Ok(())
 }
