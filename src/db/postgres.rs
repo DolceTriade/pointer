@@ -4,8 +4,10 @@ use crate::db::{
     RepoTreeQuery, SearchRequest, SearchResponse, SearchResult, SnippetRequest, SnippetResponse,
     SymbolReferenceRequest, SymbolReferenceResponse, SymbolResult, TreeEntry, TreeResponse,
 };
+use crate::dsl::{CaseSensitivity, ContentPredicate, TextSearchPlan, TextSearchRequest};
 use async_trait::async_trait;
 use sqlx::{PgPool, Postgres, QueryBuilder, Transaction};
+use std::collections::HashSet;
 use std::io::Read;
 
 #[derive(Clone)]
@@ -585,7 +587,7 @@ impl Database for PostgresDb {
         Ok(SearchResponse { symbols: results })
     }
 
-    async fn text_search(&self, query: &str) -> Result<Vec<SearchResult>, DbError> {
+    async fn text_search(&self, request: &TextSearchRequest) -> Result<Vec<SearchResult>, DbError> {
         #[derive(sqlx::FromRow, Debug)]
         struct SearchResultRow {
             repository: String,
@@ -597,72 +599,222 @@ impl Database for PostgresDb {
             match_line_number: i32,
         }
 
-        let results: Vec<SearchResultRow> = sqlx::query_as(
-            r#"
-            WITH chunk_matches AS (
-                SELECT
-                    f.repository,
-                    f.commit_sha,
-                    f.file_path,
-                    cbc.content_hash,
-                    cbc.chunk_index,
-                    cbc.chunk_line_count,
-                    c.text_content,
-                    COALESCE(
-                        SUM(cbc.chunk_line_count) OVER (
-                            PARTITION BY cbc.content_hash
-                            ORDER BY cbc.chunk_index
-                            ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
-                        ),
-                        0
-                    ) + 1 AS start_line
-                FROM
-                    chunks c
-                JOIN
-                    content_blob_chunks cbc ON c.chunk_hash = cbc.chunk_hash
-                JOIN
-                    files f ON cbc.content_hash = f.content_hash
-                WHERE
-                    c.text_content LIKE '%' || $1 || '%'
-            )
-            SELECT
-                cm.repository,
-                cm.commit_sha,
-                cm.file_path,
-                cm.start_line,
-                cm.chunk_line_count AS line_count,
-                ctx.context_snippet AS content_text,
-                ctx.match_line_number
-            FROM
-                chunk_matches cm,
-                LATERAL extract_context_with_highlight(cm.text_content, $1, 3) ctx
-            "#,
-        )
-        .bind(query)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| DbError::Database(e.to_string()))?;
+        fn push_content_condition(
+            qb: &mut QueryBuilder<'_, Postgres>,
+            predicate: &ContentPredicate,
+            case_mode: CaseSensitivity,
+            negate: bool,
+        ) {
+            let (like_op, regex_op) = match case_mode {
+                CaseSensitivity::Yes => (" LIKE ", " ~ "),
+                _ => (" ILIKE ", " ~* "),
+            };
 
-        let search_results = results
-            .into_iter()
-            .map(|row| {
+            qb.push(" AND ");
+            if negate {
+                qb.push("NOT (");
+            } else {
+                qb.push("(");
+            }
+
+            match predicate {
+                ContentPredicate::Plain(value) => {
+                    qb.push("c.text_content");
+                    qb.push(like_op);
+                    qb.push("'%' || ");
+                    qb.push_bind(value.clone());
+                    qb.push(" || '%'");
+                }
+                ContentPredicate::Regex(pattern) => {
+                    qb.push("c.text_content");
+                    qb.push(regex_op);
+                    qb.push_bind(pattern.clone());
+                }
+            }
+
+            qb.push(")");
+        }
+
+        fn has_uppercase(value: &str) -> bool {
+            value.chars().any(|ch| ch.is_ascii_uppercase())
+        }
+
+        fn resolve_case(plan: &TextSearchPlan) -> CaseSensitivity {
+            match plan.case_sensitivity {
+                Some(CaseSensitivity::Yes) => CaseSensitivity::Yes,
+                Some(CaseSensitivity::No) => CaseSensitivity::No,
+                Some(CaseSensitivity::Auto) => {
+                    let any_upper = plan
+                        .required_terms
+                        .iter()
+                        .filter_map(|term| match term {
+                            ContentPredicate::Plain(ref value) => Some(value),
+                            _ => None,
+                        })
+                        .any(|value| has_uppercase(value));
+                    if any_upper {
+                        CaseSensitivity::Yes
+                    } else {
+                        CaseSensitivity::No
+                    }
+                }
+                None => CaseSensitivity::No,
+            }
+        }
+
+        let mut aggregated = Vec::new();
+        let mut seen = HashSet::new();
+
+        for plan in &request.plans {
+            let case_mode = resolve_case(plan);
+            let highlight_case_sensitive = matches!(case_mode, CaseSensitivity::Yes);
+
+            let mut qb = QueryBuilder::new(
+                r#"
+                WITH chunk_matches AS (
+                    SELECT
+                        f.repository,
+                        f.commit_sha,
+                        f.file_path,
+                        cbc.content_hash,
+                        cbc.chunk_index,
+                        cbc.chunk_line_count,
+                        c.text_content,
+                        COALESCE(
+                            SUM(cbc.chunk_line_count) OVER (
+                                PARTITION BY cbc.content_hash
+                                ORDER BY cbc.chunk_index
+                                ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                            ),
+                            0
+                        ) + 1 AS start_line
+                    FROM
+                        chunks c
+                    JOIN
+                        content_blob_chunks cbc ON c.chunk_hash = cbc.chunk_hash
+                    JOIN
+                        files f ON cbc.content_hash = f.content_hash
+                    JOIN
+                        content_blobs cb ON cb.hash = f.content_hash
+                    WHERE
+                        TRUE
+                "#,
+            );
+
+            for predicate in &plan.required_terms {
+                push_content_condition(&mut qb, predicate, case_mode, false);
+            }
+
+            for predicate in &plan.excluded_terms {
+                push_content_condition(&mut qb, predicate, case_mode, true);
+            }
+
+            if !plan.repos.is_empty() {
+                qb.push(" AND f.repository = ANY(");
+                qb.push_bind(&plan.repos);
+                qb.push(")");
+            }
+
+            if !plan.excluded_repos.is_empty() {
+                qb.push(" AND NOT (f.repository = ANY(");
+                qb.push_bind(&plan.excluded_repos);
+                qb.push("))");
+            }
+
+            if !plan.file_globs.is_empty() {
+                for pattern in &plan.file_globs {
+                    qb.push(" AND f.file_path ILIKE ");
+                    qb.push_bind(pattern);
+                    qb.push(" ESCAPE '\\\\'");
+                }
+            }
+
+            if !plan.excluded_file_globs.is_empty() {
+                for pattern in &plan.excluded_file_globs {
+                    qb.push(" AND f.file_path NOT ILIKE ");
+                    qb.push_bind(pattern);
+                    qb.push(" ESCAPE '\\\\'");
+                }
+            }
+
+            if !plan.langs.is_empty() {
+                qb.push(" AND cb.language = ANY(");
+                qb.push_bind(&plan.langs);
+                qb.push(")");
+            }
+
+            if !plan.excluded_langs.is_empty() {
+                qb.push(" AND NOT (cb.language = ANY(");
+                qb.push_bind(&plan.excluded_langs);
+                qb.push("))");
+            }
+
+            if !plan.branches.is_empty() {
+                qb.push(" AND f.commit_sha = ANY(");
+                qb.push_bind(&plan.branches);
+                qb.push(")");
+            }
+
+            if !plan.excluded_branches.is_empty() {
+                qb.push(" AND NOT (f.commit_sha = ANY(");
+                qb.push_bind(&plan.excluded_branches);
+                qb.push("))");
+            }
+
+            qb.push(
+                r#"
+                )
+                SELECT
+                    cm.repository,
+                    cm.commit_sha,
+                    cm.file_path,
+                    cm.start_line,
+                    cm.chunk_line_count AS line_count,
+                    ctx.context_snippet AS content_text,
+                    ctx.match_line_number
+                FROM
+                    chunk_matches cm,
+                    LATERAL extract_context_with_highlight(cm.text_content, "#,
+            );
+            qb.push_bind(&plan.highlight_pattern);
+            qb.push(", 3, ");
+            qb.push_bind(highlight_case_sensitive);
+            qb.push(") ctx");
+
+            let query = qb.build_query_as::<SearchResultRow>();
+            let rows = query
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| DbError::Database(e.to_string()))?;
+
+            for row in rows {
                 let start_line: i32 = row.start_line.try_into().unwrap_or(i32::MAX);
                 let actual_match_line = start_line.saturating_add(row.match_line_number - 1);
                 let end_line = start_line.saturating_add(row.line_count.saturating_sub(1));
 
-                SearchResult {
-                    repository: row.repository,
-                    commit_sha: row.commit_sha,
-                    file_path: row.file_path,
+                let key = (
+                    row.repository.clone(),
+                    row.commit_sha.clone(),
+                    row.file_path.clone(),
                     start_line,
-                    end_line,
-                    match_line: actual_match_line,
-                    content_text: row.content_text,
-                }
-            })
-            .collect();
+                    actual_match_line,
+                );
 
-        Ok(search_results)
+                if seen.insert(key) {
+                    aggregated.push(SearchResult {
+                        repository: row.repository,
+                        commit_sha: row.commit_sha,
+                        file_path: row.file_path,
+                        start_line,
+                        end_line,
+                        match_line: actual_match_line,
+                        content_text: row.content_text,
+                    });
+                }
+            }
+        }
+
+        Ok(aggregated)
     }
 
     async fn health_check(&self) -> Result<String, DbError> {

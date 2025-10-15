@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fmt;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -10,14 +11,11 @@ pub enum Filter {
     Branch(String),
     Symbol(String),
     Regex(String),
-    Archived(bool),
-    Fork(bool),
-    Public(bool),
     CaseSensitive(CaseSensitivity),
     Type(ResultType),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub enum CaseSensitivity {
     Yes,
     No,
@@ -52,9 +50,6 @@ impl fmt::Display for Filter {
             Filter::Branch(s) => write!(f, "branch:\"{}\"", s),
             Filter::Symbol(s) => write!(f, "sym:\"{}\"", s),
             Filter::Regex(s) => write!(f, "regex:\"{}\"", s),
-            Filter::Archived(b) => write!(f, "archived:{}", if *b { "yes" } else { "no" }),
-            Filter::Fork(b) => write!(f, "fork:{}", if *b { "yes" } else { "no" }),
-            Filter::Public(b) => write!(f, "public:{}", if *b { "yes" } else { "no" }),
             Filter::CaseSensitive(cs) => match cs {
                 CaseSensitivity::Yes => write!(f, "case:yes"),
                 CaseSensitivity::No => write!(f, "case:no"),
@@ -145,30 +140,6 @@ impl QueryParser {
             "branch" | "b" => Ok(Filter::Branch(value)),
             "sym" => Ok(Filter::Symbol(value)),
             "regex" => Ok(Filter::Regex(value)),
-            "archived" | "a" => match value.as_str() {
-                "yes" => Ok(Filter::Archived(true)),
-                "no" => Ok(Filter::Archived(false)),
-                _ => Err(ParseError::InvalidFilter(format!(
-                    "archived must be yes or no, got {}",
-                    value
-                ))),
-            },
-            "fork" => match value.as_str() {
-                "yes" => Ok(Filter::Fork(true)),
-                "no" => Ok(Filter::Fork(false)),
-                _ => Err(ParseError::InvalidFilter(format!(
-                    "fork must be yes or no, got {}",
-                    value
-                ))),
-            },
-            "public" => match value.as_str() {
-                "yes" => Ok(Filter::Public(true)),
-                "no" => Ok(Filter::Public(false)),
-                _ => Err(ParseError::InvalidFilter(format!(
-                    "public must be yes or no, got {}",
-                    value
-                ))),
-            },
             "case" => match value.as_str() {
                 "yes" => Ok(Filter::CaseSensitive(CaseSensitivity::Yes)),
                 "no" => Ok(Filter::CaseSensitive(CaseSensitivity::No)),
@@ -403,6 +374,423 @@ fn tokenize_query(query: &str) -> Vec<String> {
 pub fn parse_query(query_str: &str) -> Result<QueryNode, ParseError> {
     let parser = QueryParser::new(query_str);
     parser.parse()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ContentPredicate {
+    Plain(String),
+    Regex(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct TextSearchPlan {
+    pub required_terms: Vec<ContentPredicate>,
+    pub excluded_terms: Vec<ContentPredicate>,
+    pub repos: Vec<String>,
+    pub excluded_repos: Vec<String>,
+    pub file_globs: Vec<String>,
+    pub excluded_file_globs: Vec<String>,
+    pub langs: Vec<String>,
+    pub excluded_langs: Vec<String>,
+    pub branches: Vec<String>,
+    pub excluded_branches: Vec<String>,
+    pub case_sensitivity: Option<CaseSensitivity>,
+    pub highlight_pattern: String,
+    pub result_type: Option<ResultType>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TextSearchRequest {
+    pub original_query: String,
+    pub plans: Vec<TextSearchPlan>,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum QueryPlanError {
+    Parse(ParseError),
+    EmptyPlan,
+    Unsupported(String),
+    Invalid(String),
+}
+
+impl fmt::Display for QueryPlanError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            QueryPlanError::Parse(err) => write!(f, "failed to parse query: {:?}", err),
+            QueryPlanError::EmptyPlan => write!(f, "query did not produce any executable plan"),
+            QueryPlanError::Unsupported(msg) => write!(f, "unsupported query: {}", msg),
+            QueryPlanError::Invalid(msg) => write!(f, "invalid query: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for QueryPlanError {}
+
+impl From<ParseError> for QueryPlanError {
+    fn from(value: ParseError) -> Self {
+        QueryPlanError::Parse(value)
+    }
+}
+
+impl TextSearchRequest {
+    pub fn from_query_str(query: &str) -> Result<Self, QueryPlanError> {
+        let ast = parse_query(query)?;
+        let flats = flatten_query(&ast)?;
+        if flats.is_empty() {
+            return Err(QueryPlanError::EmptyPlan);
+        }
+
+        let mut plans = Vec::with_capacity(flats.len());
+        for flat in flats {
+            let plan = TextSearchPlan::try_from(flat)?;
+            plans.push(plan);
+        }
+
+        Ok(TextSearchRequest {
+            original_query: query.to_string(),
+            plans,
+        })
+    }
+}
+
+impl TextSearchPlan {
+    fn highlight_from_terms(terms: &[ContentPredicate]) -> String {
+        let mut regex_terms = Vec::new();
+        for term in terms {
+            match term {
+                ContentPredicate::Regex(pattern) => regex_terms.push(pattern.clone()),
+                ContentPredicate::Plain(value) => regex_terms.push(regex_escape(value)),
+            }
+        }
+        if regex_terms.is_empty() {
+            // Fallback highlight that matches anything; this should not happen because
+            // we require at least one required term before constructing a plan.
+            String::from(".+")
+        } else {
+            regex_terms.join("|")
+        }
+    }
+}
+
+impl TryFrom<FlatQuery> for TextSearchPlan {
+    type Error = QueryPlanError;
+
+    fn try_from(mut value: FlatQuery) -> Result<Self, Self::Error> {
+        if value.required_terms.is_empty() {
+            return Err(QueryPlanError::Invalid(
+                "query requires at least one search term".to_string(),
+            ));
+        }
+
+        if let Some(result_type) = &value.result_type {
+            match result_type {
+                ResultType::FileMatch => {}
+                other => {
+                    return Err(QueryPlanError::Unsupported(format!(
+                        "type:{} is not yet supported",
+                        match other {
+                            ResultType::FileMatch => "filematch",
+                            ResultType::FileName => "filename",
+                            ResultType::File => "file",
+                            ResultType::Repo => "repo",
+                        }
+                    )));
+                }
+            }
+        }
+
+        let highlight_pattern = TextSearchPlan::highlight_from_terms(&value.required_terms);
+
+        value.required_terms = dedup_content_terms(value.required_terms);
+        value.excluded_terms = dedup_content_terms(value.excluded_terms);
+        dedup_vec(&mut value.repos);
+        dedup_vec(&mut value.excluded_repos);
+        dedup_vec(&mut value.file_globs);
+        dedup_vec(&mut value.excluded_file_globs);
+        dedup_vec(&mut value.langs);
+        dedup_vec(&mut value.excluded_langs);
+        dedup_vec(&mut value.branches);
+        dedup_vec(&mut value.excluded_branches);
+
+        Ok(TextSearchPlan {
+            highlight_pattern,
+            required_terms: value.required_terms,
+            excluded_terms: value.excluded_terms,
+            repos: value.repos,
+            excluded_repos: value.excluded_repos,
+            file_globs: value.file_globs,
+            excluded_file_globs: value.excluded_file_globs,
+            langs: value.langs,
+            excluded_langs: value.excluded_langs,
+            branches: value.branches,
+            excluded_branches: value.excluded_branches,
+            case_sensitivity: value.case_sensitivity,
+            result_type: value.result_type,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct FlatQuery {
+    required_terms: Vec<ContentPredicate>,
+    excluded_terms: Vec<ContentPredicate>,
+    repos: Vec<String>,
+    excluded_repos: Vec<String>,
+    file_globs: Vec<String>,
+    excluded_file_globs: Vec<String>,
+    langs: Vec<String>,
+    excluded_langs: Vec<String>,
+    branches: Vec<String>,
+    excluded_branches: Vec<String>,
+    case_sensitivity: Option<CaseSensitivity>,
+    result_type: Option<ResultType>,
+}
+
+impl Default for FlatQuery {
+    fn default() -> Self {
+        Self {
+            required_terms: Vec::new(),
+            excluded_terms: Vec::new(),
+            repos: Vec::new(),
+            excluded_repos: Vec::new(),
+            file_globs: Vec::new(),
+            excluded_file_globs: Vec::new(),
+            langs: Vec::new(),
+            excluded_langs: Vec::new(),
+            branches: Vec::new(),
+            excluded_branches: Vec::new(),
+            case_sensitivity: None,
+            result_type: None,
+        }
+    }
+}
+
+impl FlatQuery {
+    fn merge(mut self, other: &FlatQuery) -> Result<Self, QueryPlanError> {
+        self.required_terms
+            .extend(other.required_terms.iter().cloned());
+        self.excluded_terms
+            .extend(other.excluded_terms.iter().cloned());
+
+        self.repos.extend(other.repos.iter().cloned());
+        self.excluded_repos
+            .extend(other.excluded_repos.iter().cloned());
+
+        self.file_globs.extend(other.file_globs.iter().cloned());
+        self.excluded_file_globs
+            .extend(other.excluded_file_globs.iter().cloned());
+
+        self.langs.extend(other.langs.iter().cloned());
+        self.excluded_langs
+            .extend(other.excluded_langs.iter().cloned());
+
+        self.branches.extend(other.branches.iter().cloned());
+        self.excluded_branches
+            .extend(other.excluded_branches.iter().cloned());
+
+        self.case_sensitivity = merge_case(self.case_sensitivity, other.case_sensitivity.clone())?;
+        self.result_type = merge_result_type(self.result_type, other.result_type.clone())?;
+
+        Ok(self)
+    }
+
+    fn from_filter(filter: &Filter, negate: bool) -> Result<Self, QueryPlanError> {
+        let mut base = FlatQuery::default();
+        match filter {
+            Filter::Content(value) => {
+                let predicate = ContentPredicate::Plain(value.clone());
+                if negate {
+                    base.excluded_terms.push(predicate);
+                } else {
+                    base.required_terms.push(predicate);
+                }
+            }
+            Filter::Repo(value) => {
+                if negate {
+                    base.excluded_repos.push(value.clone());
+                } else {
+                    base.repos.push(value.clone());
+                }
+            }
+            Filter::File(value) => {
+                let pattern = glob_to_sql_like(value);
+                if negate {
+                    base.excluded_file_globs.push(pattern);
+                } else {
+                    base.file_globs.push(pattern);
+                }
+            }
+            Filter::Lang(value) => {
+                if negate {
+                    base.excluded_langs.push(value.clone());
+                } else {
+                    base.langs.push(value.clone());
+                }
+            }
+            Filter::Branch(value) => {
+                if negate {
+                    base.excluded_branches.push(value.clone());
+                } else {
+                    base.branches.push(value.clone());
+                }
+            }
+            Filter::Symbol(_) => {
+                return Err(QueryPlanError::Unsupported(
+                    "symbol: filters are not supported in text search".to_string(),
+                ));
+            }
+            Filter::Regex(pattern) => {
+                let predicate = ContentPredicate::Regex(pattern.clone());
+                if negate {
+                    base.excluded_terms.push(predicate);
+                } else {
+                    base.required_terms.push(predicate);
+                }
+            }
+            Filter::CaseSensitive(cs) => {
+                if negate {
+                    return Err(QueryPlanError::Invalid(
+                        "negating case: filters is not supported".to_string(),
+                    ));
+                }
+                base.case_sensitivity = Some(cs.clone());
+            }
+            Filter::Type(kind) => {
+                if negate {
+                    return Err(QueryPlanError::Unsupported(
+                        "negating type: filters is not supported".to_string(),
+                    ));
+                }
+                base.result_type = Some(kind.clone());
+            }
+        }
+        Ok(base)
+    }
+
+    fn from_term(term: &str, negate: bool) -> Result<Self, QueryPlanError> {
+        if term.is_empty() {
+            return Err(QueryPlanError::Invalid("empty search term".to_string()));
+        }
+        let mut base = FlatQuery::default();
+        let predicate = ContentPredicate::Plain(term.to_string());
+        if negate {
+            base.excluded_terms.push(predicate);
+        } else {
+            base.required_terms.push(predicate);
+        }
+        Ok(base)
+    }
+}
+
+fn flatten_query(node: &QueryNode) -> Result<Vec<FlatQuery>, QueryPlanError> {
+    match node {
+        QueryNode::Filter(filter) => Ok(vec![FlatQuery::from_filter(filter, false)?]),
+        QueryNode::Term(term) => Ok(vec![FlatQuery::from_term(term, false)?]),
+        QueryNode::Group(inner) => flatten_query(inner),
+        QueryNode::Not(inner) => match inner.as_ref() {
+            QueryNode::Filter(filter) => Ok(vec![FlatQuery::from_filter(filter, true)?]),
+            QueryNode::Term(term) => Ok(vec![FlatQuery::from_term(term, true)?]),
+            _ => Err(QueryPlanError::Unsupported(
+                "complex negations are not supported yet".to_string(),
+            )),
+        },
+        QueryNode::And(nodes) => {
+            let mut acc = vec![FlatQuery::default()];
+            for child in nodes {
+                let flattened = flatten_query(child)?;
+                let mut next = Vec::new();
+                for existing in acc.into_iter() {
+                    for add in &flattened {
+                        next.push(existing.clone().merge(add)?);
+                    }
+                }
+                acc = next;
+            }
+            Ok(acc)
+        }
+        QueryNode::Or(nodes) => {
+            let mut results = Vec::new();
+            for child in nodes {
+                results.extend(flatten_query(child)?);
+            }
+            Ok(results)
+        }
+    }
+}
+
+fn merge_case(
+    left: Option<CaseSensitivity>,
+    right: Option<CaseSensitivity>,
+) -> Result<Option<CaseSensitivity>, QueryPlanError> {
+    match (left, right) {
+        (None, other) => Ok(other),
+        (other, None) => Ok(other),
+        (Some(CaseSensitivity::Auto), other) => Ok(other),
+        (other, Some(CaseSensitivity::Auto)) => Ok(other),
+        (Some(a), Some(b)) if a == b => Ok(Some(a)),
+        (Some(a), Some(b)) => Err(QueryPlanError::Invalid(format!(
+            "conflicting case sensitivity filters: {:?} vs {:?}",
+            a, b
+        ))),
+    }
+}
+
+fn merge_result_type(
+    left: Option<ResultType>,
+    right: Option<ResultType>,
+) -> Result<Option<ResultType>, QueryPlanError> {
+    match (left, right) {
+        (None, other) => Ok(other),
+        (other, None) => Ok(other),
+        (Some(a), Some(b)) if a == b => Ok(Some(a)),
+        (Some(a), Some(b)) => Err(QueryPlanError::Invalid(format!(
+            "conflicting type filters: {:?} vs {:?}",
+            a, b
+        ))),
+    }
+}
+
+fn regex_escape(input: &str) -> String {
+    let mut escaped = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '\\' | '.' | '+' | '*' | '?' | '^' | '$' | '(' | ')' | '[' | ']' | '{' | '}' | '|' => {
+                escaped.push('\\');
+                escaped.push(ch);
+            }
+            other => escaped.push(other),
+        }
+    }
+    escaped
+}
+
+fn glob_to_sql_like(input: &str) -> String {
+    let mut pattern = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '*' => pattern.push('%'),
+            '?' => pattern.push('_'),
+            '%' | '_' | '\\' => {
+                pattern.push('\\');
+                pattern.push(ch);
+            }
+            other => pattern.push(other),
+        }
+    }
+    pattern
+}
+
+fn dedup_vec(values: &mut Vec<String>) {
+    let mut seen = HashSet::new();
+    values.retain(|val| seen.insert(val.clone()));
+}
+
+fn dedup_content_terms(values: Vec<ContentPredicate>) -> Vec<ContentPredicate> {
+    let mut seen = HashSet::new();
+    values
+        .into_iter()
+        .filter(|term| seen.insert(term.clone()))
+        .collect()
 }
 
 #[cfg(test)]
