@@ -469,7 +469,7 @@ impl Database for PostgresDb {
                 "SELECT DISTINCT cbc.content_hash \
                  FROM chunks c \
                  JOIN content_blob_chunks cbc ON c.chunk_hash = cbc.chunk_hash \
-                 WHERE to_tsvector('simple', c.text_content) @@ to_tsquery('simple', $1)",
+                 WHERE c.text_content LIKE '%' || $1 || '%'",
             )
             .bind(q)
             .fetch_all(&self.pool)

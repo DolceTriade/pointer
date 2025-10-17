@@ -1,4 +1,9 @@
-use crate::db::{TreeEntry, models::SymbolResult};
+#[cfg(feature = "ssr")]
+use crate::db::{SnippetRequest, SymbolReferenceRequest};
+use crate::db::{
+    SnippetResponse, TreeEntry,
+    models::{FileReference, SymbolResult},
+};
 use leptos::either::EitherOf4;
 use leptos::{either::Either, prelude::*};
 use leptos_router::components::A;
@@ -52,8 +57,20 @@ pub struct SymbolInsightsParams {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SymbolInsightsResponse {
     pub symbol: String,
-    pub results: Vec<SymbolResult>,
     pub commit: String,
+    pub matches: Vec<SymbolMatch>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SymbolMatch {
+    pub definition: SymbolResult,
+    pub references: Vec<SymbolReferenceWithSnippet>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SymbolReferenceWithSnippet {
+    pub reference: FileReference,
+    pub snippet: Option<SnippetResponse>,
 }
 
 impl SymbolSearchScope {
@@ -190,8 +207,14 @@ pub async fn get_file_viewer_data(
         let lines = html
             .lines()
             .enumerate()
-            .map(|(i, line)| line.replace(&format!("data-line=\"{}\"", i + 1), &format!("id=\"L{}\" data-line=\"{}\"", i + 1, i + 1)))
+            .map(|(i, line)| {
+                line.replace(
+                    &format!("data-line=\"{}\"", i + 1),
+                    &format!("id=\"L{}\" data-line=\"{}\"", i + 1, i + 1),
+                )
+            })
             .collect();
+
 
         Ok(FileViewerData::File {
             lines,
@@ -233,7 +256,7 @@ pub async fn fetch_symbol_insights(
         commit_sha: Some(commit.clone()),
         path: None,
         path_regex: None,
-        include_references: Some(true),
+        include_references: Some(false),
         limit: Some(50),
     };
 
@@ -272,18 +295,65 @@ pub async fn fetch_symbol_insights(
         request.path = Some(filter);
     }
 
-    let results = db
+    let search_response = db
         .search_symbols(request)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
+    let mut matches = Vec::with_capacity(search_response.symbols.len());
+
+    for definition in search_response.symbols {
+        let references = db
+            .get_symbol_references(SymbolReferenceRequest {
+                repository: definition.repository.clone(),
+                commit_sha: definition.commit_sha.clone(),
+                fully_qualified: definition.fully_qualified.clone(),
+            })
+            .await
+            .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+        let mut enriched = Vec::with_capacity(references.references.len());
+        for reference in references.references {
+            let line = reference.line.max(1) as u32;
+            let snippet = match db
+                .get_file_snippet(SnippetRequest {
+                    repository: reference.repository.clone(),
+                    commit_sha: reference.commit_sha.clone(),
+                    file_path: reference.file_path.clone(),
+                    line,
+                    context: Some(2),
+                })
+                .await
+            {
+                Ok(snippet) => Some(snippet),
+                Err(err) => {
+                    tracing::warn!(
+                        "Failed to fetch snippet for {}:{}:{}: {err}",
+                        reference.repository,
+                        reference.file_path,
+                        line
+                    );
+                    None
+                }
+            };
+
+            enriched.push(SymbolReferenceWithSnippet { reference, snippet });
+        }
+
+        matches.push(SymbolMatch {
+            definition,
+            references: enriched,
+        });
+    }
+
     Ok(SymbolInsightsResponse {
         symbol: params.symbol,
-        results: results.symbols,
         commit,
+        matches,
     })
 }
 
+#[cfg(feature = "pulldown-cmark")]
 pub fn render_markdown(markdown: &str) -> String {
     use pulldown_cmark::{Options, Parser, html};
 
@@ -299,6 +369,11 @@ pub fn render_markdown(markdown: &str) -> String {
     html::push_html(&mut html_output, parser);
 
     html_output
+}
+
+#[cfg(not(feature = "pulldown-cmark"))]
+pub fn render_markdown(markdown: &str) -> String {
+    markdown.to_string()
 }
 
 #[component]
@@ -558,6 +633,12 @@ fn LineHighlighter() -> impl IntoView {
 
                 // Add new highlight
                 element.class_list().add_1("line-highlight").unwrap_throw();
+
+                // Scroll into view
+                let options = web_sys::ScrollIntoViewOptions::new();
+                options.set_behavior(web_sys::ScrollBehavior::Auto);
+                options.set_block(web_sys::ScrollLogicalPosition::Start);
+                element.scroll_into_view_with_scroll_into_view_options(&options);
             }
         }
     });
@@ -790,91 +871,156 @@ fn CodeIntelPanel(
                                 .get()
                                 .map(|result| match result {
                                     Ok(Some(data)) => {
-                                        let SymbolInsightsResponse { commit, results, .. } = data;
-                                        if results.is_empty() {
+                                        let SymbolInsightsResponse { commit, matches, .. } = data;
+                                        if matches.is_empty() {
                                             view! {
                                                 <p class="text-sm text-gray-500 dark:text-gray-400">
                                                     "No indexed symbols matched this selection."
                                                 </p>
                                             }
-                                                .into_any()
+                                            .into_any()
                                         } else {
                                             view! {
-                                                <div class="space-y-4">
-                                                    {results
+                                                <div class="space-y-6">
+                                                    {matches
                                                         .into_iter()
-                                                        .map(|symbol| {
-                                                            let link = format!(
-                                                                "/repo/{}/tree/{}/{}",
-                                                                symbol.repository,
-                                                                commit,
-                                                                symbol.file_path,
-                                                            );
-                                                            let language = symbol
+                                                        .map(|symbol_match| {
+                                                            let definition = symbol_match.definition;
+                                                            let references = symbol_match.references;
+                                                            let definition_language = definition
                                                                 .language
                                                                 .clone()
                                                                 .unwrap_or_else(|| "unknown".to_string());
-                                                            let reference_summary = symbol
-                                                                .references
-                                                                .as_ref()
-                                                                .map(|refs| {
-                                                                    format!(
-                                                                        "{} reference{} indexed",
-                                                                        refs.len(),
-                                                                        if refs.len() == 1 { "" } else { "s" },
-                                                                    )
-                                                                });
+                                                            let definition_link = format!(
+                                                                "/repo/{}/tree/{}/{}",
+                                                                definition.repository,
+                                                                commit,
+                                                                definition.file_path,
+                                                            );
+                                                            let reference_count = references.len();
                                                             view! {
                                                                 <div class="rounded border border-gray-200 dark:border-gray-700 p-3">
                                                                     <div class="flex items-center justify-between gap-2">
                                                                         <span class="font-mono text-sm text-blue-600 dark:text-blue-400">
-                                                                            {symbol.symbol.clone()}
+                                                                            {definition.symbol.clone()}
                                                                         </span>
                                                                         <span class="text-xs text-gray-500 dark:text-gray-400 uppercase">
-                                                                            {language}
+                                                                            {definition_language}
                                                                         </span>
                                                                     </div>
-                                                                    {symbol
-                                                                        .namespace
-                                                                        .as_ref()
-                                                                        .map(|ns| {
-                                                                            view! {
-                                                                                <div class="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                                                                                    {ns.clone()}
-                                                                                </div>
-                                                                            }
-                                                                        })}
+                                                                    {definition.namespace.as_ref().map(|ns| {
+                                                                        view! {
+                                                                            <div class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                                                                                {ns.clone()}
+                                                                            </div>
+                                                                        }
+                                                                    })}
                                                                     <A
-                                                                        href=link
+                                                                        href=definition_link
                                                                         attr:class="block mt-2 text-sm text-blue-600 dark:text-blue-400 hover:underline truncate"
                                                                     >
-                                                                        {symbol.file_path.clone()}
+                                                                        {definition.file_path.clone()}
                                                                     </A>
-                                                                    {symbol
-                                                                        .kind
-                                                                        .as_ref()
-                                                                        .map(|kind| {
-                                                                            view! {
-                                                                                <p class="text-xs text-gray-500 dark:text-gray-400 mt-1 uppercase">
-                                                                                    {kind.clone()}
-                                                                                </p>
-                                                                            }
-                                                                        })}
-                                                                    {reference_summary
-                                                                        .map(|summary| {
-                                                                            view! {
+                                                                    {definition.kind.as_ref().map(|kind| {
+                                                                        view! {
+                                                                            <p class="text-xs text-gray-500 dark:text-gray-400 mt-1 uppercase">
+                                                                                {kind.clone()}
+                                                                            </p>
+                                                                        }
+                                                                    })}
+                                                                    <div class="mt-4">
+                                                                        <h3 class="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                                                                            {format!("References ({reference_count})")}
+                                                                        </h3>
+                                                                        {if references.is_empty() {
+                                                                            Either::Left(view! {
                                                                                 <p class="text-xs text-gray-500 dark:text-gray-400 mt-2">
-                                                                                    {summary}
+                                                                                    "No references were indexed for this symbol."
                                                                                 </p>
-                                                                            }
-                                                                        })}
+                                                                            })
+                                                                        } else {
+                                                                            Either::Right(
+                                                                                view! {
+                                                                                    <div class="mt-3 space-y-3">
+                                                                                        {references
+                                                                                            .into_iter()
+                                                                                            .map(|entry| {
+                                                                                                let reference = entry.reference;
+                                                                                                let line_number = reference.line.max(1);
+                                                                                                let reference_link = format!(
+                                                                                                    "/repo/{}/tree/{}/{}#L{}",
+                                                                                                    reference.repository,
+                                                                                                    reference.commit_sha,
+                                                                                                    reference.file_path,
+                                                                                                    line_number,
+                                                                                                );
+                                                                                                view! {
+                                                                                                    <A
+                                                                                                        href=reference_link
+                                                                                                        attr:class="block rounded border border-gray-200 dark:border-gray-700 hover:border-blue-400 dark:hover:border-blue-400/60 transition-colors overflow-x-none"
+                                                                                                    >
+                                                                                                        <div class="flex items-center justify-between gap-2 px-3 py-2">
+                                                                                                            <div class="min-w-0">
+                                                                                                                <p class="text-sm text-blue-600 dark:text-blue-400 truncate">
+                                                                                                                    {reference.file_path.clone()}
+                                                                                                                </p>
+                                                                                                                <p class="text-xs text-gray-500 dark:text-gray-400">
+                                                                                                                    {format!(
+                                                                                                                        "Line {}  •  Column {}",
+                                                                                                                        line_number,
+                                                                                                                        reference.column
+                                                                                                                    )}
+                                                                                                                </p>
+                                                                                                            </div>
+                                                                                                        </div>
+                                                                                                        {entry.snippet.map(|snippet| {
+                                                                                                            let highlight_line = snippet.highlight_line;
+                                                                                                            let start_line = snippet.start_line;
+                                                                                                            view! {
+                                                                                                                <div class="bg-gray-50 dark:bg-gray-900/50 border-t border-gray-200 dark:border-gray-700 px-3 py-2 text-xs font-mono">
+                                                                                                                    {snippet
+                                                                                                                        .lines
+                                                                                                                        .into_iter()
+                                                                                                                        .enumerate()
+                                                                                                                        .map(|(idx, text)| {
+                                                                                                                            let current_line = start_line + idx as u32;
+                                                                                                                            let is_highlight = current_line == highlight_line;
+                                                                                                                            let row_class = if is_highlight {
+                                                                                                                                "flex gap-3 bg-blue-100/80 dark:bg-blue-900/40 rounded px-2 py-1"
+                                                                                                                            } else {
+                                                                                                                                "flex gap-3 px-2 py-1"
+                                                                                                                            };
+                                                                                                                            view! {
+                                                                                                                                <div class=row_class>
+                                                                                                                                    <span class="w-12 text-right text-[10px] text-gray-500">
+                                                                                                                                        {current_line}
+                                                                                                                                    </span>
+                                                                                                                                    <span class="whitespace-pre-wrap break-words">
+                                                                                                                                        {text}
+                                                                                                                                    </span>
+                                                                                                                                </div>
+                                                                                                                            }
+                                                                                                                        })
+                                                                                                                        .collect_view()}
+                                                                                                                </div>
+                                                                                                            }
+                                                                                                        })}
+                                                                                                    </A>
+                                                                                                }
+                                                                                            })
+                                                                                            .collect_view()}
+                                                                                    </div>
+                                                                                },
+                                                                            )
+                                                                        }}
+                                                                    </div>
                                                                 </div>
                                                             }
                                                         })
                                                         .collect_view()}
                                                 </div>
                                             }
-                                                .into_any()
+                                            .into_any()
                                         }
                                     }
                                     Ok(None) => {
