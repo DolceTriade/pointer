@@ -675,7 +675,7 @@ impl Database for PostgresDb {
                         .required_terms
                         .iter()
                         .filter_map(|term| match term {
-                            ContentPredicate::Plain(ref value) => Some(value),
+                            ContentPredicate::Plain(value) => Some(value),
                             _ => None,
                         })
                         .any(|value| has_uppercase(value));

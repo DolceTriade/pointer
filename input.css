@@ -44,9 +44,39 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 .line-highlight {
-    background-color: rgba(120, 53, 15, 0.3);
+/* Set a relative position so the ::after pseudo-element can be positioned absolutely relative to it */
+  position: relative;
+
+  /* Add some padding to make room for the border/outline effect */
+  padding: 0.1em 0.3em;
+
+  /* Ensure the text is visible above the overlay */
+  z-index: 1;
 }
 
-.dark .line-highlight {
-    background-color: rgba(120, 53, 15, 0.3);
+/* The actual highlight overlay, using the ::after pseudo-element */
+.line-highlight::after {
+  content: ""; /* Required for ::after to render */
+  position: absolute;
+
+  /* Position the overlay to cover the text */
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+
+  /* The main highlight color (the overlay) */
+  background-color: rgba(255, 235, 54, 0.315);
+
+  /* Curved Edges on the OUTSIDE of the highlight */
+  border-radius: 10px 5px 10px 5px; /* Adjust these values for different curves */
+
+  /* Light Outlines on the TOP and BOTTOM */
+  /* Using box-shadow to create the "outline" effect, as it supports multiple layers and soft edges. */
+  box-shadow:
+    0 -1px 0 0 rgba(255, 255, 255, 0.8), /* Top outline: Y-offset -1px, no blur, spread 0 */
+    0 1px 0 0 rgba(255, 255, 255, 0.8);  /* Bottom outline: Y-offset 1px, no blur, spread 0 */
+
+  /* Place the overlay BENEATH the text */
+  z-index: -1;
 }

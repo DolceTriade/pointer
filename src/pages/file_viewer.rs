@@ -1,4 +1,4 @@
-use crate::db::TreeEntry;
+use crate::db::{TreeEntry, models::SymbolResult};
 use leptos::either::EitherOf4;
 use leptos::{either::Either, prelude::*};
 use leptos_router::components::A;
@@ -20,7 +20,8 @@ pub struct FileViewerParams {
 pub enum FileViewerData {
     File {
         lines: Vec<String>,
-        line_numbers: Vec<usize>,
+        line_count: usize,
+        language: Option<String>,
     },
     Binary {
         download_url: String,
@@ -29,6 +30,56 @@ pub enum FileViewerData {
         entries: Vec<TreeEntry>,
         readme: Option<String>,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SymbolSearchScope {
+    Repository,
+    Directory,
+    File,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SymbolInsightsParams {
+    pub repo: String,
+    pub branch: String,
+    pub path: Option<String>,
+    pub symbol: String,
+    pub language: Option<String>,
+    pub scope: SymbolSearchScope,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SymbolInsightsResponse {
+    pub symbol: String,
+    pub results: Vec<SymbolResult>,
+    pub commit: String,
+}
+
+impl SymbolSearchScope {
+    fn as_str(&self) -> &'static str {
+        match self {
+            SymbolSearchScope::Repository => "repository",
+            SymbolSearchScope::Directory => "directory",
+            SymbolSearchScope::File => "file",
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            SymbolSearchScope::Repository => "Current repository",
+            SymbolSearchScope::Directory => "Current directory",
+            SymbolSearchScope::File => "Current file",
+        }
+    }
+
+    fn from_str(value: &str) -> Self {
+        match value {
+            "directory" => SymbolSearchScope::Directory,
+            "file" => SymbolSearchScope::File,
+            _ => SymbolSearchScope::Repository,
+        }
+    }
 }
 
 #[cfg(feature = "ssr")]
@@ -110,7 +161,6 @@ pub async fn get_file_viewer_data(
 
         // For text files, we'll add line numbers.
         let line_count = file_content.content.lines().count();
-        let line_numbers: Vec<usize> = (1..=line_count).collect();
 
         use autumnus::{HtmlInlineBuilder, formatter::Formatter, languages::Language, themes};
         let lang = p
@@ -118,7 +168,6 @@ pub async fn get_file_viewer_data(
             .and_then(|file| file.to_str())
             .map(|file| Language::guess(file, &file_content.content))
             .unwrap_or(Language::PlainText);
-        tracing::info!("Guessed {lang:#?} for {path_str}");
         let theme = themes::get("catppuccin_mocha").ok();
 
         let formatter = HtmlInlineBuilder::new()
@@ -141,14 +190,98 @@ pub async fn get_file_viewer_data(
         let lines = html
             .lines()
             .enumerate()
-            .map(|(i, line)| format!(r#"<span id="L{}">{}</span>"#, i + 1, line))
+            .map(|(i, line)| line.replace(&format!("data-line=\"{}\"", i + 1), &format!("id=\"L{}\" data-line=\"{}\"", i + 1, i + 1)))
             .collect();
 
         Ok(FileViewerData::File {
             lines,
-            line_numbers,
+            line_count,
+            language: file_content.language.clone(),
         })
     }
+}
+
+#[server]
+pub async fn fetch_symbol_insights(
+    params: SymbolInsightsParams,
+) -> Result<SymbolInsightsResponse, ServerFnError> {
+    use crate::db::{Database, SearchRequest, postgres::PostgresDb};
+
+    if params.symbol.trim().is_empty() {
+        return Err(ServerFnError::new("symbol cannot be empty"));
+    }
+
+    let state = expect_context::<crate::server::GlobalAppState>();
+    let state = state.lock().await;
+    let db = PostgresDb::new(state.pool.clone());
+
+    let commit = db
+        .resolve_branch_head(&params.repo, &params.branch)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?
+        .unwrap_or_else(|| params.branch.clone());
+
+    let mut request = SearchRequest {
+        q: None,
+        name: Some(params.symbol.clone()),
+        name_regex: None,
+        namespace: None,
+        namespace_prefix: None,
+        kind: None,
+        language: params.language.clone().map(|lang| vec![lang]),
+        repository: Some(params.repo.clone()),
+        commit_sha: Some(commit.clone()),
+        path: None,
+        path_regex: None,
+        include_references: Some(true),
+        limit: Some(50),
+    };
+
+    if let Some(filter) = match params.scope {
+        SymbolSearchScope::Repository => None,
+        SymbolSearchScope::Directory => params.path.as_ref().and_then(|path| {
+            let trimmed = path.trim_matches('/');
+            if trimmed.is_empty() {
+                None
+            } else {
+                let dir = if path.ends_with('/') {
+                    trimmed.to_string()
+                } else {
+                    trimmed
+                        .rsplit_once('/')
+                        .map(|(dir, _)| dir.to_string())
+                        .unwrap_or_default()
+                };
+
+                if dir.is_empty() {
+                    None
+                } else {
+                    Some(format!("{dir}/"))
+                }
+            }
+        }),
+        SymbolSearchScope::File => params.path.as_ref().and_then(|path| {
+            let trimmed = path.trim_matches('/');
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }),
+    } {
+        request.path = Some(filter);
+    }
+
+    let results = db
+        .search_symbols(request)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))?;
+
+    Ok(SymbolInsightsResponse {
+        symbol: params.symbol,
+        results: results.symbols,
+        commit,
+    })
 }
 
 pub fn render_markdown(markdown: &str) -> String {
@@ -425,12 +558,6 @@ fn LineHighlighter() -> impl IntoView {
 
                 // Add new highlight
                 element.class_list().add_1("line-highlight").unwrap_throw();
-
-                // Scroll into view
-                let options = web_sys::ScrollIntoViewOptions::new();
-                options.set_behavior(web_sys::ScrollBehavior::Smooth);
-                options.set_block(web_sys::ScrollLogicalPosition::Center);
-                element.scroll_into_view_with_scroll_into_view_options(&options);
             }
         }
     });
@@ -440,12 +567,43 @@ fn LineHighlighter() -> impl IntoView {
 }
 
 #[component]
-fn FileContent(lines: Vec<String>, line_numbers: Vec<usize>) -> impl IntoView {
+fn FileContent(
+    lines: Vec<String>,
+    line_count: usize,
+    selected_symbol: RwSignal<Option<String>>,
+) -> impl IntoView {
+    let on_mouse_up = {
+        let selected_symbol = selected_symbol.clone();
+        move |_event: leptos::ev::MouseEvent| {
+            if let Some(window) = web_sys::window() {
+                match window.get_selection() {
+                    Ok(Some(selection)) => {
+                        if selection.is_collapsed() {
+                            selected_symbol.set(None);
+                            return;
+                        }
+                        let raw: String = selection.to_string().into();
+                        let trimmed = raw.trim();
+                        if trimmed.is_empty()
+                            || raw.contains('\n')
+                            || trimmed.chars().any(|c| c.is_whitespace())
+                            || trimmed.len() > 128
+                        {
+                            selected_symbol.set(None);
+                        } else {
+                            selected_symbol.set(Some(trimmed.to_string()));
+                        }
+                    }
+                    _ => selected_symbol.set(None),
+                }
+            }
+        }
+    };
+
     view! {
-        <div class="flex font-mono text-sm">
+        <div class="flex font-mono text-sm overflow-x-auto">
             <div class="text-right text-gray-500 pr-4 select-none">
-                {line_numbers
-                    .into_iter()
+                {(1..=line_count)
                     .map(|n| {
                         view! {
                             <a href=format!("#L{n}") class="block hover:text-blue-400">
@@ -455,10 +613,292 @@ fn FileContent(lines: Vec<String>, line_numbers: Vec<usize>) -> impl IntoView {
                     })
                     .collect_view()}
             </div>
-            <pre class="flex-grow overflow-auto">
+            <pre class="flex-grow" on:mouseup=on_mouse_up>
                 <code inner_html=lines.join("\n")></code>
             </pre>
         </div>
+    }
+}
+
+#[component]
+fn CodeIntelPanel(
+    repo: Signal<String>,
+    branch: Signal<String>,
+    path: Signal<Option<String>>,
+    selected_symbol: RwSignal<Option<String>>,
+    language: RwSignal<Option<String>>,
+) -> impl IntoView {
+    let scope: RwSignal<SymbolSearchScope> = RwSignal::new(SymbolSearchScope::Repository);
+    let language_filter = RwSignal::new(language.get_untracked());
+    let manual_language_override = RwSignal::new(false);
+
+    Effect::new(move |_| {
+        selected_symbol.get();
+        manual_language_override.set(false);
+        language_filter.set(language.get_untracked());
+    });
+
+    Effect::new(move |_| {
+        let lang = language.read();
+        if !manual_language_override.get() {
+            language_filter.set(lang.clone());
+        }
+    });
+
+    let insights_resource = Resource::new(
+        move || {
+            (
+                selected_symbol.get(),
+                repo.get(),
+                branch.get(),
+                path.get(),
+                scope.get(),
+                language_filter.get(),
+            )
+        },
+        |(symbol_opt, repo, branch, path, scope, language)| async move {
+            if let Some(symbol) = symbol_opt {
+                fetch_symbol_insights(SymbolInsightsParams {
+                    repo,
+                    branch,
+                    path,
+                    symbol,
+                    language,
+                    scope,
+                })
+                .await
+                .map(Some)
+            } else {
+                Ok(None)
+            }
+        },
+    );
+
+    view! {
+        <aside class="w-80 flex-shrink-0 bg-white dark:bg-gray-800 rounded-lg shadow border border-gray-200 dark:border-gray-700 p-4 sticky top-20">
+            <h2 class="text-xl font-semibold mb-4 text-gray-800 dark:text-gray-200">
+                "Code Intelligence"
+            </h2>
+            <div class="text-sm text-gray-600 dark:text-gray-400 mb-4">
+                {move || {
+                    selected_symbol
+                        .get()
+                        .map(|symbol| {
+                            Either::Left(
+                                view! {
+                                    <span class="font-mono text-blue-600 dark:text-blue-400">
+                                        {symbol}
+                                    </span>
+                                },
+                            )
+                        })
+                        .unwrap_or_else(|| {
+                            Either::Right(
+                                view! {
+                                    <span>
+                                        "Select text in the file to explore indexed symbols."
+                                    </span>
+                                },
+                            )
+                        })
+                }}
+            </div>
+            <div class="space-y-4">
+                <div class="flex flex-col gap-1">
+                    <label class="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                        "Scope"
+                    </label>
+                    <select
+                        class="select select-sm select-bordered bg-white dark:bg-gray-800"
+                        on:change=move |ev| {
+                            let value = event_target_value(&ev);
+                            scope.set(SymbolSearchScope::from_str(&value));
+                        }
+                        prop:value=move || scope.get().as_str().to_string()
+                    >
+                        <option value="repository">{SymbolSearchScope::Repository.label()}</option>
+                        <option value="directory">{SymbolSearchScope::Directory.label()}</option>
+                        <option value="file">{SymbolSearchScope::File.label()}</option>
+                    </select>
+                </div>
+                <div class="flex flex-col gap-1">
+                    <label class="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                        "Language"
+                    </label>
+                    <select
+                        class="select select-sm select-bordered bg-white dark:bg-gray-800"
+                        on:change=move |ev| {
+                            let value = event_target_value(&ev);
+                            manual_language_override.set(true);
+                            if value.is_empty() {
+                                language_filter.set(None);
+                            } else {
+                                language_filter.set(Some(value));
+                            }
+                        }
+                        prop:value=move || language_filter.get().unwrap_or_default()
+                    >
+                        <option value="">"All languages"</option>
+                        {move || {
+                            language
+                                .get()
+                                .map(|lang| {
+                                    let display = format!("File language: {}", lang);
+                                    view! { <option value=lang.clone()>{display}</option> }
+                                })
+                        }}
+                    </select>
+                    {move || {
+                        manual_language_override
+                            .get()
+                            .then(|| {
+                                view! {
+                                    <button
+                                        class="text-xs text-blue-600 dark:text-blue-400 hover:underline text-left"
+                                        on:click=move |_| {
+                                            manual_language_override.set(false);
+                                            language_filter.set(language.get());
+                                        }
+                                    >
+                                        "Reset to file language"
+                                    </button>
+                                }
+                            })
+                    }}
+                </div>
+            </div>
+            <div class="mt-6">
+                <Show
+                    when=move || selected_symbol.get().is_some()
+                    fallback=move || {
+                        view! {
+                            <p class="text-sm text-gray-500 dark:text-gray-400">
+                                "Highlight a symbol in the editor to see definitions and references."
+                            </p>
+                        }
+                    }
+                >
+                    <Suspense fallback=move || {
+                        view! {
+                            <p class="text-sm text-gray-500 dark:text-gray-400">
+                                "Gathering symbol data..."
+                            </p>
+                        }
+                    }>
+                        {move || {
+                            insights_resource
+                                .get()
+                                .map(|result| match result {
+                                    Ok(Some(data)) => {
+                                        let SymbolInsightsResponse { commit, results, .. } = data;
+                                        if results.is_empty() {
+                                            view! {
+                                                <p class="text-sm text-gray-500 dark:text-gray-400">
+                                                    "No indexed symbols matched this selection."
+                                                </p>
+                                            }
+                                                .into_any()
+                                        } else {
+                                            view! {
+                                                <div class="space-y-4">
+                                                    {results
+                                                        .into_iter()
+                                                        .map(|symbol| {
+                                                            let link = format!(
+                                                                "/repo/{}/tree/{}/{}",
+                                                                symbol.repository,
+                                                                commit,
+                                                                symbol.file_path,
+                                                            );
+                                                            let language = symbol
+                                                                .language
+                                                                .clone()
+                                                                .unwrap_or_else(|| "unknown".to_string());
+                                                            let reference_summary = symbol
+                                                                .references
+                                                                .as_ref()
+                                                                .map(|refs| {
+                                                                    format!(
+                                                                        "{} reference{} indexed",
+                                                                        refs.len(),
+                                                                        if refs.len() == 1 { "" } else { "s" },
+                                                                    )
+                                                                });
+                                                            view! {
+                                                                <div class="rounded border border-gray-200 dark:border-gray-700 p-3">
+                                                                    <div class="flex items-center justify-between gap-2">
+                                                                        <span class="font-mono text-sm text-blue-600 dark:text-blue-400">
+                                                                            {symbol.symbol.clone()}
+                                                                        </span>
+                                                                        <span class="text-xs text-gray-500 dark:text-gray-400 uppercase">
+                                                                            {language}
+                                                                        </span>
+                                                                    </div>
+                                                                    {symbol
+                                                                        .namespace
+                                                                        .as_ref()
+                                                                        .map(|ns| {
+                                                                            view! {
+                                                                                <div class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                                                                                    {ns.clone()}
+                                                                                </div>
+                                                                            }
+                                                                        })}
+                                                                    <A
+                                                                        href=link
+                                                                        attr:class="block mt-2 text-sm text-blue-600 dark:text-blue-400 hover:underline truncate"
+                                                                    >
+                                                                        {symbol.file_path.clone()}
+                                                                    </A>
+                                                                    {symbol
+                                                                        .kind
+                                                                        .as_ref()
+                                                                        .map(|kind| {
+                                                                            view! {
+                                                                                <p class="text-xs text-gray-500 dark:text-gray-400 mt-1 uppercase">
+                                                                                    {kind.clone()}
+                                                                                </p>
+                                                                            }
+                                                                        })}
+                                                                    {reference_summary
+                                                                        .map(|summary| {
+                                                                            view! {
+                                                                                <p class="text-xs text-gray-500 dark:text-gray-400 mt-2">
+                                                                                    {summary}
+                                                                                </p>
+                                                                            }
+                                                                        })}
+                                                                </div>
+                                                            }
+                                                        })
+                                                        .collect_view()}
+                                                </div>
+                                            }
+                                                .into_any()
+                                        }
+                                    }
+                                    Ok(None) => {
+                                        view! {
+                                            <p class="text-sm text-gray-500 dark:text-gray-400">
+                                                "Select a symbol to see indexed results."
+                                            </p>
+                                        }
+                                            .into_any()
+                                    }
+                                    Err(err) => {
+                                        view! {
+                                            <p class="text-sm text-red-500">
+                                                "Error loading symbol insights: " {err.to_string()}
+                                            </p>
+                                        }
+                                            .into_any()
+                                    }
+                                })
+                        }}
+                    </Suspense>
+                </Show>
+            </div>
+        </aside>
     }
 }
 
@@ -491,30 +931,52 @@ pub fn FileViewer() -> impl IntoView {
     });
 
     // Resource for the main content panel (right side)
+    let repo_for_data = repo.clone();
+    let branch_for_data = branch.clone();
+    let path_for_data = path.clone();
     let data_resource = Resource::new(
-        move || (repo(), branch(), path()),
+        move || (repo_for_data(), branch_for_data(), path_for_data()),
         |(repo, branch, path)| get_file_viewer_data(repo, branch, path),
     );
 
     // Resource for the file tree (left side), always fetching the root
+    let repo_for_tree = repo.clone();
+    let branch_for_tree = branch.clone();
     let tree_resource = Resource::new(
-        move || (repo(), branch()),
+        move || (repo_for_tree(), branch_for_tree()),
         |(repo, branch)| get_file_viewer_data(repo, branch, Some("".to_string())),
     );
 
     let expanded_dirs = RwSignal::new(HashSet::<String>::new());
+    let selected_symbol = RwSignal::new(None::<String>);
+    let file_language = RwSignal::new(None::<String>);
+
+    Effect::new(move |_| {
+        if let Some(Ok(fv)) = data_resource.read().as_ref() {
+            match fv {
+                FileViewerData::File { language, .. } => {
+                    file_language.set(language.clone());
+                    selected_symbol.set(None);
+                }
+                _ => {
+                    file_language.set(None);
+                    selected_symbol.set(None);
+                }
+            }
+        }
+    });
 
     view! {
-        <main class="flex-grow flex flex-col items-center justify-start pt-8 p-4">
-            <div class="max-w-7xl w-full">
+        <main class="flex-grow flex flex-col justify-start pt-8 p-4">
+            <div class="max-w-full w-full">
                 <Breadcrumbs
                     repo=repo.into()
                     branch=branch.into()
                     path=Signal::derive(move || path().unwrap_or_default())
                 />
-                <div class="flex gap-6">
+                <div class="flex gap-6 items-start">
                     // Left Panel: File Tree
-                    <div class="w-1/4 bg-white dark:bg-gray-800 rounded-lg shadow p-4 border border-gray-200 dark:border-gray-700 self-start">
+                    <div class="w-64 flex-shrink-0 bg-white dark:bg-gray-800 rounded-lg shadow p-4 border border-gray-200 dark:border-gray-700 self-start">
                         <h2 class="text-xl font-semibold mb-4 text-gray-800 dark:text-gray-200">
                             "Files"
                         </h2>
@@ -556,112 +1018,124 @@ pub fn FileViewer() -> impl IntoView {
                         </Suspense>
                     </div>
 
-                    // Right Panel: Content Viewer
-                    <div class="w-3/4">
-                        <Suspense fallback=move || {
-                            view! { <p>"Loading content..."</p> }
-                        }>
-                            {move || {
-                                data_resource
-                                    .get()
-                                    .map(|result| match result {
-                                        Ok(data) => {
-                                            match data {
-                                                FileViewerData::File { lines, line_numbers } => {
-                                                    EitherOf4::A(
-                                                        view! {
-                                                            <LineHighlighter />
-                                                            <div class="bg-white dark:bg-gray-800 rounded-lg shadow border border-gray-200 dark:border-gray-700 p-4 overflow-auto">
-                                                                <FileContent lines=lines line_numbers=line_numbers />
-                                                            </div>
-                                                        },
-                                                    )
-                                                }
-                                                FileViewerData::Binary { download_url } => {
-                                                    EitherOf4::B(
-                                                        view! {
-                                                            <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-8 border border-gray-200 dark:border-gray-700 text-center">
-                                                                <p class="mb-4">
-                                                                    "This is a binary file and cannot be displayed."
-                                                                </p>
-                                                                <a
-                                                                    href=download_url
-                                                                    class="bg-blue-500 text-white font-bold py-2 px-4 rounded hover:bg-blue-700"
-                                                                >
-                                                                    "Download"
-                                                                </a>
-                                                            </div>
-                                                        },
-                                                    )
-                                                }
-                                                FileViewerData::Directory { entries, readme } => {
-                                                    EitherOf4::C(
-                                                        view! {
-                                                            // Top half: File list
-                                                            <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4 border border-gray-200 dark:border-gray-700 mb-6">
-                                                                <div class="grid grid-cols-2 md:grid-cols-3 gap-4">
-                                                                    {entries
-                                                                        .into_iter()
-                                                                        .map(move |entry| {
-                                                                            let mut link = format!(
-                                                                                "/repo/{}/tree/{}/{}",
-                                                                                repo(),
-                                                                                branch(),
-                                                                                entry.path,
-                                                                            );
-                                                                            if entry.kind == "dir" {
-                                                                                link.push('/');
-                                                                            }
-                                                                            let icon = if entry.kind == "dir" {
-                                                                                Either::Left(view! { <DirectoryIcon /> })
-                                                                            } else {
-                                                                                Either::Right(view! { <FileIcon /> })
-                                                                            };
-                                                                            let name = entry.name.clone();
-                                                                            view! {
-                                                                                <A
-                                                                                    href=link
-                                                                                    attr:class="text-blue-600 hover:underline p-2 rounded hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-2 overflow-hidden"
-                                                                                    attr:title=name.clone()
-                                                                                >
-                                                                                    {icon}
-                                                                                    <span class="truncate">{entry.name}</span>
-                                                                                </A>
-                                                                            }
-                                                                        })
-                                                                        .collect_view()}
+                    <div class="flex-1 min-w-0 flex gap-6 items-start">
+                        <div class="flex-1 min-w-0">
+                            <Suspense fallback=move || {
+                                view! { <p>"Loading content..."</p> }
+                            }>
+                                {move || {
+                                    data_resource
+                                        .get()
+                                        .map(|result| match result {
+                                            Ok(data) => {
+                                                match data {
+                                                    FileViewerData::File { lines, line_count, .. } => {
+                                                        EitherOf4::A(
+                                                            view! {
+                                                                <LineHighlighter />
+                                                                <div class="bg-white dark:bg-gray-800 rounded-lg shadow border border-gray-200 dark:border-gray-700 p-4">
+                                                                    <FileContent
+                                                                        lines=lines
+                                                                        line_count=line_count
+                                                                        selected_symbol=selected_symbol
+                                                                    />
                                                                 </div>
-                                                            </div>
-                                                            // Bottom half: README
-                                                            {readme
-                                                                .map(|readme_content| {
-                                                                    view! {
-                                                                        <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-8 border border-gray-200 dark:border-gray-700">
-                                                                            <h2 class="text-2xl font-semibold mb-4 text-gray-800 dark:text-gray-200">
-                                                                                "README.md"
-                                                                            </h2>
-                                                                            <div
-                                                                                class="prose dark:prose-invert max-w-none"
-                                                                                inner_html=render_markdown(&readme_content)
-                                                                            ></div>
-                                                                        </div>
-                                                                    }
-                                                                })}
-                                                        },
-                                                    )
+                                                            },
+                                                        )
+                                                    }
+                                                    FileViewerData::Binary { download_url } => {
+                                                        EitherOf4::B(
+                                                            view! {
+                                                                <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-8 border border-gray-200 dark:border-gray-700 text-center">
+                                                                    <p class="mb-4">
+                                                                        "This is a binary file and cannot be displayed."
+                                                                    </p>
+                                                                    <a
+                                                                        href=download_url
+                                                                        class="bg-blue-500 text-white font-bold py-2 px-4 rounded hover:bg-blue-700"
+                                                                    >
+                                                                        "Download"
+                                                                    </a>
+                                                                </div>
+                                                            },
+                                                        )
+                                                    }
+                                                    FileViewerData::Directory { entries, readme } => {
+                                                        EitherOf4::C(
+                                                            view! {
+                                                                // Top half: File list
+                                                                <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4 border border-gray-200 dark:border-gray-700 mb-6">
+                                                                    <div class="grid grid-cols-2 md:grid-cols-3 gap-4">
+                                                                        {entries
+                                                                            .into_iter()
+                                                                            .map(move |entry| {
+                                                                                let mut link = format!(
+                                                                                    "/repo/{}/tree/{}/{}",
+                                                                                    repo(),
+                                                                                    branch(),
+                                                                                    entry.path,
+                                                                                );
+                                                                                if entry.kind == "dir" {
+                                                                                    link.push('/');
+                                                                                }
+                                                                                let icon = if entry.kind == "dir" {
+                                                                                    Either::Left(view! { <DirectoryIcon /> })
+                                                                                } else {
+                                                                                    Either::Right(view! { <FileIcon /> })
+                                                                                };
+                                                                                let name = entry.name.clone();
+                                                                                view! {
+                                                                                    <A
+                                                                                        href=link
+                                                                                        attr:class="text-blue-600 hover:underline p-2 rounded hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-2 overflow-hidden"
+                                                                                        attr:title=name.clone()
+                                                                                    >
+                                                                                        {icon}
+                                                                                        <span class="truncate">{entry.name}</span>
+                                                                                    </A>
+                                                                                }
+                                                                            })
+                                                                            .collect_view()}
+                                                                    </div>
+                                                                </div>
+                                                                // Bottom half: README
+                                                                {readme
+                                                                    .map(|readme_content| {
+                                                                        view! {
+                                                                            <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-8 border border-gray-200 dark:border-gray-700">
+                                                                                <h2 class="text-2xl font-semibold mb-4 text-gray-800 dark:text-gray-200">
+                                                                                    "README.md"
+                                                                                </h2>
+                                                                                <div
+                                                                                    class="prose dark:prose-invert max-w-none"
+                                                                                    inner_html=render_markdown(&readme_content)
+                                                                                ></div>
+                                                                            </div>
+                                                                        }
+                                                                    })}
+                                                            },
+                                                        )
+                                                    }
                                                 }
                                             }
-                                        }
-                                        Err(e) => {
-                                            EitherOf4::D(
-                                                view! {
-                                                    <p class="text-red-500">"Error: " {e.to_string()}</p>
-                                                },
-                                            )
-                                        }
-                                    })
-                            }}
-                        </Suspense>
+                                            Err(e) => {
+                                                EitherOf4::D(
+                                                    view! {
+                                                        <p class="text-red-500">"Error: " {e.to_string()}</p>
+                                                    },
+                                                )
+                                            }
+                                        })
+                                }}
+                            </Suspense>
+                        </div>
+                        <CodeIntelPanel
+                            repo=repo.into()
+                            branch=branch.into()
+                            path=path.into()
+                            selected_symbol=selected_symbol
+                            language=file_language.into()
+                        />
                     </div>
                 </div>
             </div>

@@ -5,7 +5,7 @@ resolver = "2"
 [package]
 name = "pointer"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -57,6 +57,7 @@ web-sys = { version = "=0.3.81", features = [
     "ScrollBehavior",
     "ScrollIntoViewOptions",
     "ScrollLogicalPosition",
+    "Selection",
     "Storage",
     "Url",
     "Window",
