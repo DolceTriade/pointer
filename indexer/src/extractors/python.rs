@@ -5,7 +5,7 @@ use super::ExtractedSymbol;
 pub fn extract(source: &str) -> Vec<ExtractedSymbol> {
     let mut parser = Parser::new();
     parser
-        .set_language(&tree_sitter_python::language())
+        .set_language(&tree_sitter_python::LANGUAGE.into())
         .expect("failed to load tree-sitter Python grammar");
 
     let tree = match parser.parse(source, None) {

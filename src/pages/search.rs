@@ -210,12 +210,12 @@ fn SearchResultCard(result: SearchResult) -> impl IntoView {
         repository, commit_sha, file_path, primary_snippet.match_line,
     );
 
-    let extra_section = (extra_count > 0).then(||{
+    let extra_section = (extra_count > 0).then(|| {
         let repo = repository.clone();
         let commit = commit_sha.clone();
         let path = file_path.clone();
         let snippets = extra_snippets.clone();
-        Some(view! {
+        view! {
             <div class="mt-3 space-y-3">
                 <button
                     class="text-sm text-blue-600 dark:text-blue-400 hover:underline"
@@ -287,7 +287,7 @@ fn SearchResultCard(result: SearchResult) -> impl IntoView {
                     }
                 </Show>
             </div>
-        })
+        }
     });
 
     view! {

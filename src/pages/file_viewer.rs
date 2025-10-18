@@ -11,8 +11,10 @@ use leptos_router::hooks::{use_location, use_params};
 use leptos_router::params::Params;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use web_sys::wasm_bindgen::JsCast;
 use web_sys::wasm_bindgen::UnwrapThrowExt;
+use web_sys::{
+    wasm_bindgen::{JsCast},
+};
 
 #[derive(Params, PartialEq, Clone, Debug)]
 pub struct FileViewerParams {
@@ -24,7 +26,7 @@ pub struct FileViewerParams {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum FileViewerData {
     File {
-        lines: Vec<String>,
+        html: String,
         line_count: usize,
         language: Option<String>,
     },
@@ -204,19 +206,8 @@ pub async fn get_file_viewer_data(
         let html = String::from_utf8(output)
             .map_err(|e| ServerFnError::new(format!("Failed to convert to utf8: {e:#?}")))?;
 
-        let lines = html
-            .lines()
-            .enumerate()
-            .map(|(i, line)| {
-                line.replace(
-                    &format!("data-line=\"{}\"", i + 1),
-                    &format!("id=\"L{}\" data-line=\"{}\"", i + 1, i + 1),
-                )
-            })
-            .collect();
-
         Ok(FileViewerData::File {
-            lines,
+            html,
             line_count,
             language: file_content.language.clone(),
         })
@@ -517,15 +508,21 @@ fn FileTreeNode(
             let entry = child_entry.clone();
             async move {
                 if is_dir && is_expanded {
-                    if let Ok(FileViewerData::Directory { entries, .. }) =
-                        get_file_viewer_data(repo, branch, Some(entry.path.clone() + "/")).await
-                    {
-                        children.set(Some(entries));
-                    }
+                    return get_file_viewer_data(repo, branch, Some(entry.path.clone() + "/"))
+                        .await
+                        .ok();
                 }
+                None
             }
         },
     );
+
+    Effect::new(move |_| {
+        let childs = child_resource.read();
+        if let Some(FileViewerData::Directory { entries, .. }) = childs.as_ref().flatten() {
+            children.set(Some(entries.clone()));
+        }
+    });
 
     let on_click = move |_| {
         if is_dir {
@@ -611,45 +608,55 @@ fn FileTreeNode(
 #[component]
 fn LineHighlighter() -> impl IntoView {
     let location = use_location();
-
+    let refresh = RwSignal::new(());
     Effect::new(move |_| {
-        tracing::info!("LINE HIGHLIGHTER");
         let hash = location.hash.get();
+        // Mega-Hack: The inner_html code view doesn't render by the time this effect runs. So,
+        // keep retrying until it appears.
+        refresh.get();
+        if document().get_element_by_id("code-content").is_none() {
+            set_timeout(move||{
+                refresh.set(());
+            }, std::time::Duration::from_millis(100));
+        }
         if hash.starts_with("#L") {
-            let line_id = &hash[1..];
-            if let Some(element) = document().get_element_by_id(line_id) {
-                // Remove existing highlights
-                let highlighted = document()
-                    .query_selector_all(".line-highlight")
-                    .unwrap_throw();
-                for i in 0..highlighted.length() {
-                    if let Some(el) = highlighted
-                        .item(i)
-                        .and_then(|n| n.dyn_into::<web_sys::Element>().ok())
-                    {
-                        el.class_list().remove_1("line-highlight").unwrap_throw();
+            let line_id = &hash[2..];
+            match document().query_selector(&format!("[data-line='{line_id}']")) {
+                Ok(Some(element)) => {
+                    let highlighted = document()
+                        .query_selector_all(".line-highlight")
+                        .unwrap_throw();
+                    for i in 0..highlighted.length() {
+                        if let Some(el) = highlighted
+                            .item(i)
+                            .and_then(|n| n.dyn_into::<web_sys::Element>().ok())
+                        {
+                            el.class_list().remove_1("line-highlight").unwrap_throw();
+                        }
                     }
+                    element.class_list().add_1("line-highlight").unwrap_throw();
+                    let options = web_sys::ScrollIntoViewOptions::new();
+                    options.set_behavior(web_sys::ScrollBehavior::Auto);
+                    options.set_block(web_sys::ScrollLogicalPosition::Start);
+                    element.scroll_into_view_with_scroll_into_view_options(&options);
                 }
-
-                // Add new highlight
-                element.class_list().add_1("line-highlight").unwrap_throw();
-
-                // Scroll into view
-                let options = web_sys::ScrollIntoViewOptions::new();
-                options.set_behavior(web_sys::ScrollBehavior::Auto);
-                options.set_block(web_sys::ScrollLogicalPosition::Start);
-                element.scroll_into_view_with_scroll_into_view_options(&options);
+                Err(e) => {
+                    tracing::warn!("Element not found: {e:#?}");
+                }
+                _ => {
+                    tracing::warn!("Element not found: {hash}");
+                }
             }
         }
     });
 
     // This component doesn't render anything itself
-    view! { <div class="hidden"></div> }
+    view! { <div id="mehigh" class="hidden"></div> }
 }
 
 #[component]
 fn FileContent(
-    lines: Vec<String>,
+    html: String,
     line_count: usize,
     selected_symbol: RwSignal<Option<String>>,
 ) -> impl IntoView {
@@ -695,8 +702,9 @@ fn FileContent(
                     .collect_view()}
             </div>
             <pre class="flex-grow" on:mouseup=on_mouse_up>
-                <code inner_html=lines.join("\n")></code>
+                <code id="code-content" inner_html=html />
             </pre>
+            <LineHighlighter/>
         </div>
     }
 }
@@ -1175,16 +1183,15 @@ pub fn FileViewer() -> impl IntoView {
                                         .map(|result| match result {
                                             Ok(data) => {
                                                 match data {
-                                                    FileViewerData::File { lines, line_count, .. } => {
+                                                    FileViewerData::File { html, line_count, .. } => {
                                                         EitherOf4::A(
                                                             view! {
-                                                                <LineHighlighter />
                                                                 <div class="bg-white dark:bg-gray-800 rounded-lg shadow border border-gray-200 dark:border-gray-700 p-4">
-                                                                    <FileContent
-                                                                        lines=lines
-                                                                        line_count=line_count
-                                                                        selected_symbol=selected_symbol
-                                                                    />
+                                                                <FileContent
+                                                                    html=html
+                                                                    line_count=line_count
+                                                                    selected_symbol=selected_symbol
+                                                                />
                                                                 </div>
                                                             },
                                                         )

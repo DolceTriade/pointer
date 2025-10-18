@@ -736,14 +736,20 @@ impl Database for PostgresDb {
                         cbc.chunk_index,
                         cbc.chunk_line_count,
                         c.text_content,
-                        COALESCE(
-                            SUM(cbc.chunk_line_count) OVER (
+                        1 + COALESCE(
+                            SUM(
+                                cbc.chunk_line_count
+                                - CASE
+                                    WHEN RIGHT(c.text_content, 1) = E'\n' OR c.text_content = '' THEN 0
+                                    ELSE 1
+                                  END
+                            ) OVER (
                                 PARTITION BY cbc.content_hash
                                 ORDER BY cbc.chunk_index
                                 ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
                             ),
                             0
-                        ) + 1 AS start_line
+                        ) AS start_line
                     FROM
                         chunks c
                     JOIN

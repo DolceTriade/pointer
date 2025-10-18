@@ -5,7 +5,7 @@ use super::ExtractedSymbol;
 pub fn extract(source: &str) -> Vec<ExtractedSymbol> {
     let mut parser = Parser::new();
     parser
-        .set_language(&tree_sitter_typescript::language_typescript())
+        .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
         .expect("failed to load tree-sitter JavaScript grammar");
 
     let tree = match parser.parse(source, None) {
