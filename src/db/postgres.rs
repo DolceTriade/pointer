@@ -461,10 +461,19 @@ impl Database for PostgresDb {
     async fn search_symbols(&self, request: SearchRequest) -> Result<SearchResponse, DbError> {
         let mut qb = QueryBuilder::new(
             "SELECT s.symbol, s.namespace, s.kind, s.fully_qualified, cb.language, \
-                    f.repository, f.commit_sha, f.file_path \
+                    f.repository, f.commit_sha, f.file_path, def.line_number AS line, def.column_number AS column \
              FROM symbols s \
              JOIN content_blobs cb ON cb.hash = s.content_hash \
-             JOIN files f ON f.content_hash = s.content_hash",
+             JOIN files f ON f.content_hash = s.content_hash \
+             LEFT JOIN LATERAL ( \
+                 SELECT line_number, column_number \
+                 FROM symbol_references sr \
+                 WHERE sr.content_hash = s.content_hash \
+                   AND sr.name = s.symbol \
+                   AND sr.namespace IS NOT DISTINCT FROM s.namespace \
+                 ORDER BY line_number ASC, column_number ASC \
+                 LIMIT 1 \
+             ) def ON TRUE",
         );
 
         if let Some(q) = &request.q {
@@ -612,6 +621,15 @@ impl Database for PostgresDb {
                 None
             };
 
+            let line = row
+                .line
+                .and_then(|line| line.try_into().ok())
+                .and_then(|line: i32| (line > 0).then(|| line as usize));
+            let column = row
+                .column
+                .and_then(|column| column.try_into().ok())
+                .and_then(|column: i32| (column > 0).then(|| column as usize));
+
             results.push(SymbolResult {
                 symbol: row.symbol,
                 namespace: row.namespace,
@@ -621,6 +639,8 @@ impl Database for PostgresDb {
                 commit_sha: row.commit_sha,
                 file_path: row.file_path,
                 language: row.language,
+                line,
+                column,
                 references,
             });
         }
@@ -1427,6 +1447,8 @@ struct SymbolRow {
     repository: String,
     commit_sha: String,
     file_path: String,
+    line: Option<i32>,
+    column: Option<i32>,
 }
 
 #[derive(sqlx::FromRow)]

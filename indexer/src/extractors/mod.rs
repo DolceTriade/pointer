@@ -110,7 +110,9 @@ fn parser_for_language(language: &str) -> Option<Parser> {
         "c" => parser.set_language(&tree_sitter_c::LANGUAGE.into()),
         "c++" | "cpp" => parser.set_language(&tree_sitter_cpp::LANGUAGE.into()),
         "go" => parser.set_language(&tree_sitter_go::LANGUAGE.into()),
-        "js" | "javascript" => parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
+        "js" | "javascript" => {
+            parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
+        }
         "java" | "jvm" => parser.set_language(&tree_sitter_java::LANGUAGE.into()),
         "nix" => parser.set_language(&tree_sitter_nix::LANGUAGE.into()),
         "objc" | "objective-c" | "objectivec" => {
@@ -120,7 +122,9 @@ fn parser_for_language(language: &str) -> Option<Parser> {
         "py" | "python" => parser.set_language(&tree_sitter_python::LANGUAGE.into()),
         "rust" => parser.set_language(&tree_sitter_rust::LANGUAGE.into()),
         "swift" => parser.set_language(&tree_sitter_swift::LANGUAGE.into()),
-        "ts" | "typescript" => parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()),
+        "ts" | "typescript" => {
+            parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
+        }
         _ => return None,
     };
 

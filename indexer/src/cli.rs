@@ -154,6 +154,8 @@ struct SymbolResult {
     commit_sha: String,
     file_path: String,
     language: Option<String>,
+    line: Option<usize>,
+    column: Option<usize>,
     references: Option<Vec<ReferenceResult>>,
 }
 

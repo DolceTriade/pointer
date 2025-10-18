@@ -11,10 +11,8 @@ use leptos_router::hooks::{use_location, use_params};
 use leptos_router::params::Params;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use web_sys::wasm_bindgen::JsCast;
 use web_sys::wasm_bindgen::UnwrapThrowExt;
-use web_sys::{
-    wasm_bindgen::{JsCast},
-};
 
 #[derive(Params, PartialEq, Clone, Debug)]
 pub struct FileViewerParams {
@@ -615,9 +613,12 @@ fn LineHighlighter() -> impl IntoView {
         // keep retrying until it appears.
         refresh.get();
         if document().get_element_by_id("code-content").is_none() {
-            set_timeout(move||{
-                refresh.set(());
-            }, std::time::Duration::from_millis(100));
+            set_timeout(
+                move || {
+                    refresh.set(());
+                },
+                std::time::Duration::from_millis(100),
+            );
         }
         if hash.starts_with("#L") {
             let line_id = &hash[2..];
@@ -899,12 +900,24 @@ fn CodeIntelPanel(
                                                                 .language
                                                                 .clone()
                                                                 .unwrap_or_else(|| "unknown".to_string());
-                                                            let definition_link = format!(
-                                                                "/repo/{}/tree/{}/{}",
-                                                                definition.repository,
-                                                                commit,
-                                                                definition.file_path,
-                                                            );
+                                                            let (definition_line, definition_link) = if let Some(line) = definition.line {
+                                                                let link = format!(
+                                                                    "/repo/{}/tree/{}/{}#L{}",
+                                                                    definition.repository,
+                                                                    commit,
+                                                                    definition.file_path,
+                                                                    line,
+                                                                );
+                                                                (Some(line), link)
+                                                            } else {
+                                                                let link = format!(
+                                                                    "/repo/{}/tree/{}/{}",
+                                                                    definition.repository,
+                                                                    commit,
+                                                                    definition.file_path,
+                                                                );
+                                                                (None, link)
+                                                            };
                                                             let reference_count = references.len();
                                                             view! {
                                                                 <div class="rounded border border-gray-200 dark:border-gray-700 p-3">
@@ -927,8 +940,17 @@ fn CodeIntelPanel(
                                                                         href=definition_link
                                                                         attr:class="block mt-2 text-sm text-blue-600 dark:text-blue-400 hover:underline truncate"
                                                                     >
-                                                                        {definition.file_path.clone()}
+                                                                        {definition_line
+                                                                            .map(|line| format!("{}:{}", definition.file_path, line))
+                                                                            .unwrap_or_else(|| definition.file_path.clone())}
                                                                     </A>
+                                                                    {definition_line.map(|line| {
+                                                                        view! {
+                                                                            <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                                                                                {format!("Line {}", line)}
+                                                                            </p>
+                                                                        }
+                                                                    })}
                                                                     {definition.kind.as_ref().map(|kind| {
                                                                         view! {
                                                                             <p class="text-xs text-gray-500 dark:text-gray-400 mt-1 uppercase">

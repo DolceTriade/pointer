@@ -46,6 +46,8 @@ pub struct SymbolResult {
     pub commit_sha: String,
     pub file_path: String,
     pub language: Option<String>,
+    pub line: Option<usize>,
+    pub column: Option<usize>,
     pub references: Option<Vec<ReferenceResult>>,
 }
 

@@ -276,7 +276,7 @@ fn SearchResultCard(result: SearchResult) -> impl IntoView {
                                                     </a>
                                                 </p>
                                                 <pre class="bg-gray-100 dark:bg-gray-900 p-2 rounded-md mt-2 text-sm overflow-x-auto max-w-full">
-                                                    <code inner_html=snippet.content_text></code>
+                                                    <code>{snippet.content_text}</code>
                                                 </pre>
                                             </div>
                                         }
@@ -306,7 +306,7 @@ fn SearchResultCard(result: SearchResult) -> impl IntoView {
                 {historical_badge}
             </div>
             <pre class="bg-gray-100 dark:bg-gray-900 p-2 rounded-md mt-2 text-sm overflow-x-auto max-w-full">
-                <code inner_html=primary_snippet.content_text></code>
+                <code>{primary_snippet.content_text}</code>
             </pre>
             {extra_section}
         </div>
