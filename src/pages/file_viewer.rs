@@ -6,13 +6,14 @@ use crate::db::{
 };
 use leptos::either::EitherOf4;
 use leptos::{either::Either, prelude::*};
+use leptos::html::Div;
 use leptos_router::components::A;
 use leptos_router::hooks::{use_location, use_params};
 use leptos_router::params::Params;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use web_sys::wasm_bindgen::JsCast;
 use web_sys::wasm_bindgen::UnwrapThrowExt;
+use web_sys::wasm_bindgen::JsCast;
 
 #[derive(Params, PartialEq, Clone, Debug)]
 pub struct FileViewerParams {
@@ -764,8 +765,20 @@ fn CodeIntelPanel(
         },
     );
 
+    let insights_scroll_container = NodeRef::<Div>::new();
+    Effect::new({
+        let container = insights_scroll_container.clone();
+        move |_| {
+            // track updates to the resource so we reset scroll when content changes
+            let _ = insights_resource.get();
+            if let Some(node) = container.get_untracked() {
+                node.set_scroll_top(0);
+            }
+        }
+    });
+
     view! {
-        <aside class="w-80 flex-shrink-0 bg-white dark:bg-gray-800 rounded-lg shadow border border-gray-200 dark:border-gray-700 p-4 sticky top-20">
+        <aside class="w-80 flex-shrink-0 bg-white dark:bg-gray-800 rounded-lg shadow border border-gray-200 dark:border-gray-700 p-4 sticky top-20 max-h-[calc(100vh-6rem)] overflow-hidden">
             <h2 class="text-xl font-semibold mb-4 text-gray-800 dark:text-gray-200">
                 "Code Intelligence"
             </h2>
@@ -793,71 +806,76 @@ fn CodeIntelPanel(
                         })
                 }}
             </div>
-            <div class="space-y-4">
-                <div class="flex flex-col gap-1">
-                    <label class="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">
-                        "Scope"
-                    </label>
-                    <select
-                        class="select select-sm select-bordered bg-white dark:bg-gray-800"
-                        on:change=move |ev| {
-                            let value = event_target_value(&ev);
-                            scope.set(SymbolSearchScope::from_str(&value));
-                        }
-                        prop:value=move || scope.get().as_str().to_string()
-                    >
-                        <option value="repository">{SymbolSearchScope::Repository.label()}</option>
-                        <option value="directory">{SymbolSearchScope::Directory.label()}</option>
-                        <option value="file">{SymbolSearchScope::File.label()}</option>
-                    </select>
-                </div>
-                <div class="flex flex-col gap-1">
-                    <label class="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">
-                        "Language"
-                    </label>
-                    <select
-                        class="select select-sm select-bordered bg-white dark:bg-gray-800"
-                        on:change=move |ev| {
-                            let value = event_target_value(&ev);
-                            manual_language_override.set(true);
-                            if value.is_empty() {
-                                language_filter.set(None);
-                            } else {
-                                language_filter.set(Some(value));
+            <div
+                class="overflow-y-auto pr-1"
+                node_ref=insights_scroll_container
+                style="max-height: calc(100vh - 12rem);"
+            >
+                <div class="space-y-4">
+                    <div class="flex flex-col gap-1">
+                        <label class="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                            "Scope"
+                        </label>
+                        <select
+                            class="select select-sm select-bordered bg-white dark:bg-gray-800"
+                            on:change=move |ev| {
+                                let value = event_target_value(&ev);
+                                scope.set(SymbolSearchScope::from_str(&value));
                             }
-                        }
-                        prop:value=move || language_filter.get().unwrap_or_default()
-                    >
-                        <option value="">"All languages"</option>
+                            prop:value=move || scope.get().as_str().to_string()
+                        >
+                            <option value="repository">{SymbolSearchScope::Repository.label()}</option>
+                            <option value="directory">{SymbolSearchScope::Directory.label()}</option>
+                            <option value="file">{SymbolSearchScope::File.label()}</option>
+                        </select>
+                    </div>
+                    <div class="flex flex-col gap-1">
+                        <label class="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                            "Language"
+                        </label>
+                        <select
+                            class="select select-sm select-bordered bg-white dark:bg-gray-800"
+                            on:change=move |ev| {
+                                let value = event_target_value(&ev);
+                                manual_language_override.set(true);
+                                if value.is_empty() {
+                                    language_filter.set(None);
+                                } else {
+                                    language_filter.set(Some(value));
+                                }
+                            }
+                            prop:value=move || language_filter.get().unwrap_or_default()
+                        >
+                            <option value="">"All languages"</option>
+                            {move || {
+                                language
+                                    .get()
+                                    .map(|lang| {
+                                        let display = format!("File language: {}", lang);
+                                        view! { <option value=lang.clone()>{display}</option> }
+                                    })
+                            }}
+                        </select>
                         {move || {
-                            language
+                            manual_language_override
                                 .get()
-                                .map(|lang| {
-                                    let display = format!("File language: {}", lang);
-                                    view! { <option value=lang.clone()>{display}</option> }
+                                .then(|| {
+                                    view! {
+                                        <button
+                                            class="text-xs text-blue-600 dark:text-blue-400 hover:underline text-left"
+                                            on:click=move |_| {
+                                                manual_language_override.set(false);
+                                                language_filter.set(language.get());
+                                            }
+                                        >
+                                            "Reset to file language"
+                                        </button>
+                                    }
                                 })
                         }}
-                    </select>
-                    {move || {
-                        manual_language_override
-                            .get()
-                            .then(|| {
-                                view! {
-                                    <button
-                                        class="text-xs text-blue-600 dark:text-blue-400 hover:underline text-left"
-                                        on:click=move |_| {
-                                            manual_language_override.set(false);
-                                            language_filter.set(language.get());
-                                        }
-                                    >
-                                        "Reset to file language"
-                                    </button>
-                                }
-                            })
-                    }}
+                    </div>
                 </div>
-            </div>
-            <div class="mt-6">
+                <div class="mt-6">
                 <Show
                     when=move || selected_symbol.get().is_some()
                     fallback=move || {
@@ -1073,6 +1091,7 @@ fn CodeIntelPanel(
                         }}
                     </Suspense>
                 </Show>
+            </div>
             </div>
         </aside>
     }
