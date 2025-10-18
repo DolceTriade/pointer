@@ -108,12 +108,19 @@ fn classify_reference_kind(language: &str, node: &Node) -> &'static str {
     let mut current = node.parent();
     let mut depth = 0;
     let definitions = definition_parent_kinds(language);
-    let def_fields = definition_name_fields(language);
+    let restrict_to_name_fields = matches!(
+        language,
+        "js" | "javascript" | "ts" | "typescript" | "swift" | "objc" | "objective-c" | "objectivec"
+    );
 
     while let Some(parent) = current {
         if definitions.iter().any(|kind| *kind == parent.kind()) {
+            if !restrict_to_name_fields {
+                return "definition";
+            }
+
             if let Some(field) = field_name_for_child(&parent, node) {
-                if def_fields.iter().any(|f| *f == field) {
+                if matches!(field.as_str(), "name" | "property") {
                     return "definition";
                 }
             }
@@ -181,11 +188,7 @@ fn definition_parent_kinds(language: &str) -> &'static [&'static str] {
             "lexical_declaration",
             "variable_declaration",
         ],
-        "python" | "py" => &[
-            "function_definition",
-            "class_definition",
-            "assignment",
-        ],
+        "python" | "py" => &["function_definition", "class_definition", "assignment"],
         "java" | "jvm" => &[
             "class_declaration",
             "interface_declaration",
@@ -203,6 +206,7 @@ fn definition_parent_kinds(language: &str) -> &'static [&'static str] {
             "union_specifier",
             "enum_specifier",
             "declaration",
+            "preproc_def",
         ],
         "c++" | "cpp" => &[
             "function_definition",
@@ -212,6 +216,8 @@ fn definition_parent_kinds(language: &str) -> &'static [&'static str] {
             "namespace_definition",
             "field_declaration",
             "simple_declaration",
+            "preproc_def",
+            "enum_specifier",
         ],
         "objc" | "objective-c" | "objectivec" => &[
             "class_interface",
@@ -236,40 +242,17 @@ fn definition_parent_kinds(language: &str) -> &'static [&'static str] {
             "variable_declaration",
             "property_declaration",
         ],
-        "proto" | "protobuf" => &[
-            "message",
-            "enum",
-            "service",
-            "rpc",
-            "extend",
-            "field",
-        ],
+        "proto" | "protobuf" => &["message", "enum", "service", "rpc", "extend", "field"],
         "nix" => &["binding"],
         _ => &[],
     }
 }
 
-fn definition_name_fields(language: &str) -> &'static [&'static str] {
-    match language {
-        "js" | "javascript" | "ts" | "typescript" => &["name", "property"],
-        "swift" => &["name", "identifier"],
-        "c" | "c++" | "cpp" => &["name", "identifier"],
-        "rust" => &["name"],
-        "go" => &["name"],
-        "java" | "jvm" => &["name"],
-        "objc" | "objective-c" | "objectivec" => &["name"],
-        "proto" | "protobuf" => &["name"],
-        "python" | "py" => &["name"],
-        "nix" => &["name"],
-        _ => &["name"],
-    }
-}
-
-fn field_name_for_child(parent: &Node, child: &Node) -> Option<&'static str> {
+fn field_name_for_child(parent: &Node, child: &Node) -> Option<String> {
     for i in 0..parent.child_count() {
         if let Some(candidate) = parent.child(i) {
             if candidate == *child {
-                return parent.field_name_for_child(i as u32);
+                return parent.field_name_for_child(i as u32).map(|s| s.to_string());
             }
         }
     }
