@@ -276,7 +276,7 @@ fn SearchResultCard(result: SearchResult) -> impl IntoView {
                                                     </a>
                                                 </p>
                                                 <pre class="bg-gray-100 dark:bg-gray-900 p-2 rounded-md mt-2 text-sm overflow-x-auto max-w-full">
-                                                    <code>{render_highlighted_snippet(&snippet.content_text)}</code>
+                                                    <code>{render_highlighted_snippet(snippet.content_text.clone())}</code>
                                                 </pre>
                                             </div>
                                         }
@@ -306,15 +306,15 @@ fn SearchResultCard(result: SearchResult) -> impl IntoView {
                 {historical_badge}
             </div>
             <pre class="bg-gray-100 dark:bg-gray-900 p-2 rounded-md mt-2 text-sm overflow-x-auto max-w-full">
-                <code>{render_highlighted_snippet(&primary_snippet.content_text)}</code>
+                <code>{render_highlighted_snippet(primary_snippet.content_text.clone())}</code>
             </pre>
             {extra_section}
         </div>
     }
 }
 
-fn render_highlighted_snippet(text: &str) -> impl IntoView {
-    parse_highlight_segments(text)
+fn render_highlighted_snippet(text: String) -> impl IntoView {
+    parse_highlight_segments(&text)
         .into_iter()
         .map(|(segment, highlighted)| {
             if highlighted {

@@ -427,12 +427,15 @@ impl Database for PostgresDb {
         request: SymbolReferenceRequest,
     ) -> Result<SymbolReferenceResponse, DbError> {
         let rows: Vec<DbFileReference> = sqlx::query_as(
-            "SELECT f.repository, f.commit_sha, f.file_path, r.namespace, r.name, r.kind,
-                    r.line_number AS line, r.column_number AS column
-             FROM symbol_references r
-             JOIN files f ON f.content_hash = r.content_hash
-             WHERE f.repository = $1 AND f.commit_sha = $2 AND r.fully_qualified = $3
-             ORDER BY f.file_path, r.line_number, r.column_number",
+            "SELECT f.repository, f.commit_sha, f.file_path, s.namespace, s.symbol AS name, sr.kind,
+                    sr.line_number AS line, sr.column_number AS column
+             FROM symbol_references sr
+             JOIN symbols s ON s.id = sr.symbol_id
+             JOIN files f ON f.content_hash = s.content_hash
+             WHERE f.repository = $1
+               AND f.commit_sha = $2
+               AND (CASE WHEN s.namespace IS NULL THEN s.symbol ELSE s.namespace || '::' || s.symbol END) = $3
+             ORDER BY f.file_path, sr.line_number, sr.column_number",
         )
         .bind(&request.repository)
         .bind(&request.commit_sha)
@@ -460,18 +463,19 @@ impl Database for PostgresDb {
 
     async fn search_symbols(&self, request: SearchRequest) -> Result<SearchResponse, DbError> {
         let mut qb = QueryBuilder::new(
-            "SELECT s.symbol, s.namespace, s.kind, s.fully_qualified, cb.language, \
-                    f.repository, f.commit_sha, f.file_path, def.line_number AS line, def.column_number AS column \
+            "SELECT s.id, s.symbol, s.namespace, COALESCE(def.kind, s.kind) AS kind, \
+                    CASE WHEN s.namespace IS NULL THEN s.symbol ELSE s.namespace || '::' || s.symbol END AS fully_qualified, \
+                    cb.language, f.repository, f.commit_sha, f.file_path, def.line, def.column \
              FROM symbols s \
              JOIN content_blobs cb ON cb.hash = s.content_hash \
              JOIN files f ON f.content_hash = s.content_hash \
              LEFT JOIN LATERAL ( \
-                 SELECT line_number, column_number \
+                 SELECT line_number AS line, column_number AS column, kind \
                  FROM symbol_references sr \
-                 WHERE sr.content_hash = s.content_hash \
-                   AND sr.name = s.symbol \
-                   AND sr.namespace IS NOT DISTINCT FROM s.namespace \
-                 ORDER BY line_number ASC, column_number ASC \
+                 WHERE sr.symbol_id = s.id \
+                 ORDER BY \
+                     CASE WHEN sr.kind IN ('definition', 'declaration') THEN 0 ELSE 1 END, \
+                     line_number, column_number \
                  LIMIT 1 \
              ) def ON TRUE",
         );
@@ -521,7 +525,7 @@ impl Database for PostgresDb {
 
         if let Some(kinds) = &request.kind {
             if !kinds.is_empty() {
-                qb.push(" AND s.kind = ANY(").push_bind(kinds).push(")");
+                qb.push(" AND def.kind = ANY(").push_bind(kinds).push(")");
             }
         }
 
@@ -560,19 +564,19 @@ impl Database for PostgresDb {
             .map_err(|e| DbError::Database(e.to_string()))?;
 
         let include_refs = request.include_references.unwrap_or(false);
-        let mut reference_map: HashMap<String, Vec<ReferenceRow>> = HashMap::new();
+        let mut reference_map: HashMap<i32, Vec<ReferenceRow>> = HashMap::new();
 
         if include_refs {
-            let fully_qualified: HashSet<String> =
-                rows.iter().map(|row| row.fully_qualified.clone()).collect();
+            let symbol_ids: HashSet<i32> = rows.iter().map(|row| row.id).collect();
 
-            if !fully_qualified.is_empty() {
-                let lookup: Vec<String> = fully_qualified.into_iter().collect();
+            if !symbol_ids.is_empty() {
+                let lookup: Vec<i32> = symbol_ids.into_iter().collect();
                 let ref_rows: Vec<ReferenceRow> = sqlx::query_as(
-                    "SELECT fully_qualified, name, namespace, kind, \
-                            line_number AS line, column_number AS column \
-                     FROM symbol_references \
-                     WHERE fully_qualified = ANY($1)",
+                    "SELECT sr.symbol_id, s.namespace, s.symbol, sr.kind, \
+                            sr.line_number AS line, sr.column_number AS column \
+                     FROM symbol_references sr \
+                     JOIN symbols s ON s.id = sr.symbol_id \
+                     WHERE sr.symbol_id = ANY($1)",
                 )
                 .bind(&lookup)
                 .fetch_all(&self.pool)
@@ -581,7 +585,7 @@ impl Database for PostgresDb {
 
                 for reference in ref_rows {
                     reference_map
-                        .entry(reference.fully_qualified.clone())
+                        .entry(reference.symbol_id)
                         .or_default()
                         .push(reference);
                 }
@@ -605,13 +609,13 @@ impl Database for PostgresDb {
         let mut results = Vec::with_capacity(scored_rows.len());
         for (_, row) in scored_rows {
             let references = if include_refs {
-                reference_map.get(row.fully_qualified.as_str()).map(|refs| {
+                reference_map.get(&row.id).map(|refs| {
                     refs.iter()
                         .map(|r| ReferenceResult {
-                            name: r.name.clone(),
+                            name: r.symbol.clone(),
                             namespace: r.namespace.clone(),
                             kind: r.kind.clone(),
-                            fully_qualified: r.fully_qualified.clone(),
+                            fully_qualified: row.fully_qualified.clone(),
                             line: r.line.max(0) as usize,
                             column: r.column.max(0) as usize,
                         })
@@ -1299,23 +1303,21 @@ impl PostgresDb {
                 symbol.content_hash.clone(),
                 symbol.namespace.clone(),
                 symbol.symbol.clone(),
-                symbol.kind.clone(),
             )
         });
 
         for chunk in deduped.chunks(INSERT_BATCH_SIZE) {
-            let mut qb = QueryBuilder::new(
-                "INSERT INTO symbols (content_hash, namespace, symbol, fully_qualified, kind) ",
-            );
+            let mut qb =
+                QueryBuilder::new("INSERT INTO symbols (content_hash, namespace, symbol, kind) ");
             qb.push_values(chunk.iter().copied(), |mut b, symbol| {
                 b.push_bind(&symbol.content_hash)
                     .push_bind(&symbol.namespace)
                     .push_bind(&symbol.symbol)
-                    .push_bind(&symbol.fully_qualified)
                     .push_bind(&symbol.kind);
             });
             qb.push(
-                " ON CONFLICT (content_hash, namespace, symbol, kind) DO UPDATE SET fully_qualified = EXCLUDED.fully_qualified",
+                " ON CONFLICT (content_hash, namespace, symbol) \
+                  DO UPDATE SET kind = EXCLUDED.kind",
             );
 
             qb.build()
@@ -1349,7 +1351,7 @@ impl PostgresDb {
 
         for chunk in deduped.chunks(INSERT_BATCH_SIZE) {
             let mut qb = QueryBuilder::new(
-                "INSERT INTO symbol_references (content_hash, namespace, name, fully_qualified, kind, line_number, column_number) ",
+                "WITH data (content_hash, namespace, symbol, kind, line_number, column_number) AS (",
             );
             qb.push_values(chunk.iter().copied(), |mut b, reference| {
                 let line: i32 = reference.line.try_into().unwrap_or(i32::MAX);
@@ -1357,13 +1359,19 @@ impl PostgresDb {
                 b.push_bind(&reference.content_hash)
                     .push_bind(&reference.namespace)
                     .push_bind(&reference.name)
-                    .push_bind(&reference.fully_qualified)
                     .push_bind(&reference.kind)
                     .push_bind(line)
                     .push_bind(column);
             });
             qb.push(
-                " ON CONFLICT (content_hash, namespace, name, line_number, column_number, kind) DO NOTHING",
+                ") INSERT INTO symbol_references (symbol_id, kind, line_number, column_number) \
+                 SELECT s.id, data.kind, data.line_number, data.column_number \
+                 FROM data \
+                 JOIN symbols s \
+                   ON s.content_hash = data.content_hash \
+                  AND s.symbol = data.symbol \
+                  AND (s.namespace IS NOT DISTINCT FROM data.namespace) \
+                 ON CONFLICT (symbol_id, line_number, column_number, kind) DO NOTHING",
             );
 
             qb.build()
@@ -1439,6 +1447,7 @@ struct SearchResultRow {
 
 #[derive(sqlx::FromRow)]
 struct SymbolRow {
+    id: i32,
     symbol: String,
     namespace: Option<String>,
     kind: Option<String>,
@@ -1453,9 +1462,9 @@ struct SymbolRow {
 
 #[derive(sqlx::FromRow)]
 struct ReferenceRow {
-    fully_qualified: String,
-    name: String,
+    symbol_id: i32,
     namespace: Option<String>,
+    symbol: String,
     kind: Option<String>,
     line: i32,
     column: i32,
@@ -1629,14 +1638,23 @@ async fn load_symbol_metadata(
 
     if !symbol_terms.is_empty() {
         let symbol_rows: Vec<(String, Option<String>, String, String)> = sqlx::query_as(
-            "SELECT content_hash, kind, symbol, fully_qualified
-             FROM symbols
-             WHERE content_hash = ANY($1)
-               AND (
-                    symbol = ANY($2)
-                    OR fully_qualified = ANY($2)
-                    OR LOWER(symbol) = ANY($3)
-                    OR LOWER(fully_qualified) = ANY($3)
+            "SELECT s.content_hash, COALESCE(def.kind, s.kind) AS kind, s.symbol, \
+                    COALESCE(s.namespace || '::' || s.symbol, s.symbol) AS fully_qualified \
+             FROM symbols s \
+             LEFT JOIN LATERAL ( \
+                 SELECT kind \
+                 FROM symbol_references sr \
+                 WHERE sr.symbol_id = s.id \
+                   AND sr.kind IN ('definition', 'declaration') \
+                 ORDER BY CASE WHEN sr.kind = 'definition' THEN 0 ELSE 1 END \
+                 LIMIT 1 \
+             ) def ON TRUE \
+             WHERE s.content_hash = ANY($1) \
+               AND ( \
+                    s.symbol = ANY($2) \
+                    OR COALESCE(s.namespace || '::' || s.symbol, s.symbol) = ANY($2) \
+                    OR LOWER(s.symbol) = ANY($3) \
+                    OR LOWER(COALESCE(s.namespace || '::' || s.symbol, s.symbol)) = ANY($3) \
                )",
         )
         .bind(content_hashes)
@@ -1677,14 +1695,16 @@ async fn load_symbol_metadata(
 
     if !symbol_terms.is_empty() {
         let reference_rows: Vec<(String, Option<String>, String, String)> = sqlx::query_as(
-            "SELECT content_hash, kind, name, fully_qualified
-             FROM symbol_references
-             WHERE content_hash = ANY($1)
-               AND (
-                    name = ANY($2)
-                    OR fully_qualified = ANY($2)
-                    OR LOWER(name) = ANY($3)
-                    OR LOWER(fully_qualified) = ANY($3)
+            "SELECT s.content_hash, sr.kind, s.symbol, \
+                    COALESCE(s.namespace || '::' || s.symbol, s.symbol) AS fully_qualified \
+             FROM symbol_references sr \
+             JOIN symbols s ON s.id = sr.symbol_id \
+             WHERE s.content_hash = ANY($1) \
+               AND ( \
+                    s.symbol = ANY($2) \
+                    OR COALESCE(s.namespace || '::' || s.symbol, s.symbol) = ANY($2) \
+                    OR LOWER(s.symbol) = ANY($3) \
+                    OR LOWER(COALESCE(s.namespace || '::' || s.symbol, s.symbol)) = ANY($3) \
                )",
         )
         .bind(content_hashes)
@@ -1694,16 +1714,16 @@ async fn load_symbol_metadata(
         .await
         .map_err(|e| DbError::Database(e.to_string()))?;
 
-        for (content_hash, kind, name, fully_qualified) in reference_rows {
+        for (content_hash, kind, symbol, fully_qualified) in reference_rows {
             let entry = meta_map.entry(content_hash.clone()).or_default();
             if kind.as_deref() == Some("reference") {
                 entry.has_reference = true;
             } else {
                 entry.has_reference = true;
             }
-            if symbol_terms.contains(&name)
+            if symbol_terms.contains(&symbol)
                 || symbol_terms.contains(&fully_qualified)
-                || symbol_terms_lower.contains(&name.to_lowercase())
+                || symbol_terms_lower.contains(&symbol.to_lowercase())
                 || symbol_terms_lower.contains(&fully_qualified.to_lowercase())
             {
                 entry.exact_symbol_match = true;

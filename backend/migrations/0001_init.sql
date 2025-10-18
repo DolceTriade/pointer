@@ -57,35 +57,30 @@ CREATE TABLE symbols (
     content_hash TEXT NOT NULL REFERENCES content_blobs(hash) ON DELETE CASCADE,
     namespace TEXT,
     symbol TEXT NOT NULL,
-    fully_qualified TEXT NOT NULL,
     kind TEXT,
-    UNIQUE (content_hash, namespace, symbol, kind)
+    UNIQUE (content_hash, namespace, symbol)
 );
 
 -- Indexes for symbols
 CREATE INDEX idx_symbols_symbol ON symbols (symbol);
-CREATE INDEX idx_symbols_fully_qualified ON symbols (fully_qualified);
 CREATE INDEX idx_symbols_namespace ON symbols (namespace);
-CREATE INDEX idx_symbols_kind ON symbols (kind);
 CREATE INDEX idx_symbols_content_hash ON symbols (content_hash);
+CREATE INDEX idx_symbols_kind ON symbols (kind);
 
 -- Table for symbol references
 CREATE TABLE symbol_references (
     id SERIAL PRIMARY KEY,
-    content_hash TEXT NOT NULL REFERENCES content_blobs(hash) ON DELETE CASCADE,
-    namespace TEXT,
-    name TEXT NOT NULL,
-    fully_qualified TEXT NOT NULL,
+    symbol_id INTEGER NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
     kind TEXT,
     line_number INTEGER NOT NULL,
     column_number INTEGER NOT NULL,
-    UNIQUE (content_hash, namespace, name, line_number, column_number, kind)
+    UNIQUE (symbol_id, line_number, column_number, kind)
 );
 
 -- Indexes for symbol references
-CREATE INDEX idx_symbol_references_name ON symbol_references (name);
-CREATE INDEX idx_symbol_references_namespace ON symbol_references (namespace);
-CREATE INDEX idx_symbol_references_content_hash ON symbol_references (content_hash);
+CREATE INDEX idx_symbol_references_symbol_id ON symbol_references (symbol_id);
+CREATE INDEX idx_symbol_references_kind ON symbol_references (kind);
+CREATE INDEX idx_symbol_references_line_number ON symbol_references (line_number);
 
 -- Table for upload chunks (temporary storage for manifest upload)
 CREATE TABLE upload_chunks (
