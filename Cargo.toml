@@ -73,7 +73,8 @@ anyhow = "1.0.100"
 server_fn_macro_default = { version = "0.8.5", optional = true }
 pulldown-cmark = { version = "0.11.0", optional = true, default-features = false }
 lazy_static = { version = "1.5.0", optional = true }
-autumnus = { version = "0.7.5", optional = true, features = ["all-languages"] }
+#autumnus = { version = "0.7.5", optional = true, features = ["all-languages"] }
+autumnus = { path = "/mnt/media2/code/autumnus", optional = true, features = ["all-languages"] }
 thiserror = { version = "1.0.63", optional = true }
 
 

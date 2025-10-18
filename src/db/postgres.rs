@@ -1,4 +1,4 @@
-use crate::db::models::{FileReference as DbFileReference, SearchResultsPage};
+use crate::db::models::{FileReference as DbFileReference, SearchResultsPage, SearchSnippet};
 use crate::db::{
     Database, DbError, DbUniqueChunk, FileReference, RawFileContent, ReferenceResult, RepoSummary,
     RepoTreeQuery, SearchRequest, SearchResponse, SearchResult, SnippetRequest, SnippetResponse,
@@ -7,7 +7,10 @@ use crate::db::{
 use crate::dsl::{CaseSensitivity, ContentPredicate, TextSearchPlan, TextSearchRequest};
 use async_trait::async_trait;
 use sqlx::{PgPool, Postgres, QueryBuilder, Transaction};
-use std::io::Read;
+use std::{
+    collections::{HashMap, HashSet},
+    io::Read,
+};
 
 #[derive(Clone)]
 pub struct PostgresDb {
@@ -548,11 +551,10 @@ impl Database for PostgresDb {
             .map_err(|e| DbError::Database(e.to_string()))?;
 
         let include_refs = request.include_references.unwrap_or(false);
-        let mut reference_map: std::collections::HashMap<String, Vec<ReferenceRow>> =
-            std::collections::HashMap::new();
+        let mut reference_map: HashMap<String, Vec<ReferenceRow>> = HashMap::new();
 
         if include_refs {
-            let fully_qualified: std::collections::HashSet<String> =
+            let fully_qualified: HashSet<String> =
                 rows.iter().map(|row| row.fully_qualified.clone()).collect();
 
             if !fully_qualified.is_empty() {
@@ -577,8 +579,22 @@ impl Database for PostgresDb {
             }
         }
 
-        let mut results = Vec::with_capacity(rows.len());
-        for row in rows {
+        let needle_lower = request.name.as_ref().map(|s| s.to_lowercase());
+        let needle_lower_ref = needle_lower.as_deref();
+
+        let mut scored_rows: Vec<(f32, SymbolRow)> = rows
+            .into_iter()
+            .map(|row| (score_symbol_row(&row, needle_lower_ref), row))
+            .collect();
+
+        scored_rows.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.1.symbol.cmp(&b.1.symbol))
+        });
+
+        let mut results = Vec::with_capacity(scored_rows.len());
+        for (_, row) in scored_rows {
             let references = if include_refs {
                 reference_map.get(row.fully_qualified.as_str()).map(|refs| {
                     refs.iter()
@@ -613,19 +629,6 @@ impl Database for PostgresDb {
     }
 
     async fn text_search(&self, request: &TextSearchRequest) -> Result<SearchResultsPage, DbError> {
-        #[derive(sqlx::FromRow, Debug)]
-        struct SearchResultRow {
-            repository: String,
-            commit_sha: String,
-            file_path: String,
-            start_line: i64,
-            line_count: i32,
-            content_text: String,
-            match_line_number: i32,
-            branches: Vec<String>,
-            is_historical: bool,
-        }
-
         fn push_content_condition(
             qb: &mut QueryBuilder<'_, Postgres>,
             predicate: &ContentPredicate,
@@ -714,6 +717,7 @@ impl Database for PostgresDb {
                     cm.repository,
                     cm.commit_sha,
                     cm.file_path,
+                    cm.content_hash,
                     cm.start_line,
                     cm.chunk_line_count AS line_count,
                     ctx.context_snippet AS content_text,
@@ -823,12 +827,24 @@ impl Database for PostgresDb {
             qb.push(") ctx)");
         }
 
+        let page_index = u64::from(request.page);
+        let page_size = u64::from(request.page_size.max(1));
+        let sample_factor = u64::from(FILE_SAMPLE_FACTOR.max(1));
+        let base_limit = page_index
+            .saturating_add(1)
+            .saturating_mul(page_size)
+            .saturating_mul(sample_factor);
+        let minimum = page_size.saturating_mul(sample_factor);
+        let fetch_limit_u64 = base_limit.max(minimum).saturating_add(1);
+        let fetch_limit = fetch_limit_u64.min(i64::MAX as u64) as i64;
+
         qb.push(
             ")
             SELECT DISTINCT ON (pr.repository, pr.commit_sha, pr.file_path, pr.start_line, pr.match_line_number)
                 pr.repository,
                 pr.commit_sha,
                 pr.file_path,
+                pr.content_hash,
                 pr.start_line,
                 pr.line_count,
                 pr.content_text,
@@ -863,42 +879,213 @@ impl Database for PostgresDb {
                 pr.match_line_number
             LIMIT ",
         );
-        qb.push_bind(request.limit_plus_one());
-        qb.push(" OFFSET ");
-        qb.push_bind(request.offset());
+        qb.push_bind(fetch_limit);
 
         let query = qb.build_query_as::<SearchResultRow>();
-        let mut rows = query
+        let rows = query
             .fetch_all(&self.pool)
             .await
             .map_err(|e| DbError::Database(e.to_string()))?;
 
-        let mut has_more = false;
-        if rows.len() > request.page_size as usize {
-            has_more = true;
-            rows.truncate(request.page_size as usize);
+        let row_limit_hit = (rows.len() as i64) >= fetch_limit;
+
+        if rows.is_empty() {
+            return Ok(SearchResultsPage::empty(
+                request.original_query.clone(),
+                request.page,
+                request.page_size,
+            ));
         }
 
-        let results = rows
-            .into_iter()
-            .map(|row| {
-                let start_line: i32 = row.start_line.try_into().unwrap_or(i32::MAX);
-                let actual_match_line = start_line.saturating_add(row.match_line_number - 1);
-                let end_line = start_line.saturating_add(row.line_count.saturating_sub(1));
-
-                SearchResult {
-                    repository: row.repository,
-                    commit_sha: row.commit_sha,
-                    file_path: row.file_path,
-                    start_line,
-                    end_line,
-                    match_line: actual_match_line,
-                    content_text: row.content_text,
-                    branches: row.branches,
-                    is_historical: row.is_historical,
-                }
-            })
+        let plain_terms = collect_plain_terms(request);
+        let symbol_terms: HashSet<String> = plain_terms
+            .iter()
+            .filter(|term| looks_like_symbol(term))
+            .cloned()
             .collect();
+        let symbol_terms_lower: HashSet<String> = symbol_terms
+            .iter()
+            .map(|term| term.to_lowercase())
+            .collect();
+
+        let mut grouped: HashMap<FileGroupKey, Vec<(SearchResultRow, SnippetAnalysis)>> =
+            HashMap::new();
+        for row in rows.into_iter() {
+            let analysis = analyze_snippet(&row.content_text, &symbol_terms, &symbol_terms_lower);
+            let key = FileGroupKey {
+                repository: row.repository.clone(),
+                commit_sha: row.commit_sha.clone(),
+                file_path: row.file_path.clone(),
+                content_hash: row.content_hash.clone(),
+            };
+            grouped.entry(key).or_default().push((row, analysis));
+        }
+
+        let content_hashes: Vec<String> = grouped
+            .keys()
+            .map(|key| key.content_hash.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let symbol_terms_vec: Vec<String> = symbol_terms.iter().cloned().collect();
+        let symbol_terms_lower_vec: Vec<String> = symbol_terms_lower.iter().cloned().collect();
+
+        let symbol_meta = load_symbol_metadata(
+            &self.pool,
+            &content_hashes,
+            &symbol_terms_vec,
+            &symbol_terms_lower_vec,
+        )
+        .await?;
+
+        let mut aggregates = Vec::with_capacity(grouped.len());
+        for (key, entries) in grouped {
+            let meta = symbol_meta
+                .get(&key.content_hash)
+                .cloned()
+                .unwrap_or_default();
+            let classification = determine_match_class(&meta);
+            let base_score = classification.base_score();
+
+            let mut scored_entries: Vec<(SearchResultRow, f32)> = Vec::with_capacity(entries.len());
+            let mut best_index: Option<usize> = None;
+            let mut best_score = f32::NEG_INFINITY;
+
+            for (row, analysis) in entries {
+                let mut score = base_score;
+                if meta.exact_symbol_match {
+                    score += 30.0;
+                } else if analysis.matches_symbol_candidate {
+                    score += 15.0;
+                }
+                if analysis.has_full_match {
+                    score += 8.0;
+                }
+                if analysis.has_partial_match && !analysis.has_full_match {
+                    score -= 8.0;
+                }
+                let match_line = row.match_line_number.max(1) as f32;
+                score += 5.0_f32 / match_line;
+
+                let idx = scored_entries.len();
+                scored_entries.push((row, score));
+
+                if score > best_score {
+                    best_score = score;
+                    best_index = Some(idx);
+                } else if (score - best_score).abs() < f32::EPSILON {
+                    if let Some(current_idx) = best_index {
+                        let current_row = &scored_entries[current_idx].0;
+                        let candidate_row = &scored_entries[idx].0;
+                        if candidate_row.match_line_number < current_row.match_line_number
+                            || (candidate_row.match_line_number == current_row.match_line_number
+                                && candidate_row.file_path < current_row.file_path)
+                        {
+                            best_index = Some(idx);
+                        }
+                    }
+                }
+            }
+
+            if let Some(best_idx) = best_index {
+                let (best_row, best_score) = scored_entries.swap_remove(best_idx);
+                let mut ordered_rows: Vec<SearchResultRow> =
+                    Vec::with_capacity(scored_entries.len() + 1);
+                ordered_rows.push(best_row);
+                scored_entries.sort_by(|a, b| {
+                    a.0.match_line_number
+                        .cmp(&b.0.match_line_number)
+                        .then_with(|| a.0.file_path.cmp(&b.0.file_path))
+                });
+                ordered_rows.extend(scored_entries.into_iter().map(|(row, _)| row));
+
+                aggregates.push(FileAggregate {
+                    entries: ordered_rows,
+                    classification,
+                    score: best_score,
+                });
+            }
+        }
+
+        aggregates.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.classification.cmp(&b.classification))
+                .then_with(|| {
+                    let a_best = &a.entries[0];
+                    let b_best = &b.entries[0];
+                    a_best
+                        .match_line_number
+                        .cmp(&b_best.match_line_number)
+                        .then_with(|| a_best.file_path.cmp(&b_best.file_path))
+                })
+        });
+
+        let total = aggregates.len();
+        let page_index = request.page.saturating_sub(1) as usize;
+        let page_size = request.page_size as usize;
+        let start = page_index.saturating_mul(page_size);
+        let mut has_more = total > start + page_size;
+        if !has_more && total > 0 && row_limit_hit {
+            has_more = true;
+        }
+
+        let results = if start >= total {
+            Vec::new()
+        } else {
+            aggregates
+                .into_iter()
+                .skip(start)
+                .take(page_size)
+                .map(|agg| {
+                    let mut entries_iter = agg.entries.into_iter();
+                    let best_row = entries_iter
+                        .next()
+                        .expect("aggregated results should contain at least one snippet");
+
+                    let best_start_line: i32 = best_row.start_line.try_into().unwrap_or(i32::MAX);
+                    let best_match_line =
+                        best_start_line.saturating_add(best_row.match_line_number - 1);
+                    let best_end_line =
+                        best_start_line.saturating_add(best_row.line_count.saturating_sub(1));
+
+                    let mut snippets = Vec::new();
+                    snippets.push(SearchSnippet {
+                        start_line: best_start_line,
+                        end_line: best_end_line,
+                        match_line: best_match_line,
+                        content_text: best_row.content_text.clone(),
+                    });
+
+                    for row in entries_iter {
+                        let snippet_start: i32 = row.start_line.try_into().unwrap_or(i32::MAX);
+                        let snippet_match = snippet_start.saturating_add(row.match_line_number - 1);
+                        let snippet_end =
+                            snippet_start.saturating_add(row.line_count.saturating_sub(1));
+                        snippets.push(SearchSnippet {
+                            start_line: snippet_start,
+                            end_line: snippet_end,
+                            match_line: snippet_match,
+                            content_text: row.content_text,
+                        });
+                    }
+
+                    SearchResult {
+                        repository: best_row.repository,
+                        commit_sha: best_row.commit_sha,
+                        file_path: best_row.file_path,
+                        start_line: best_start_line,
+                        end_line: best_end_line,
+                        match_line: best_match_line,
+                        content_text: best_row.content_text,
+                        snippets,
+                        branches: best_row.branches,
+                        is_historical: best_row.is_historical,
+                    }
+                })
+                .collect()
+        };
 
         Ok(SearchResultsPage {
             results,
@@ -1195,6 +1382,7 @@ impl PostgresDb {
     }
 }
 
+const FILE_SAMPLE_FACTOR: u32 = 6;
 const INSERT_BATCH_SIZE: usize = 1000;
 
 #[derive(sqlx::FromRow)]
@@ -1207,6 +1395,20 @@ struct UploadChunkRow {
 struct FileData {
     bytes: Vec<u8>,
     language: Option<String>,
+}
+
+#[derive(sqlx::FromRow, Debug, Clone)]
+struct SearchResultRow {
+    repository: String,
+    commit_sha: String,
+    file_path: String,
+    content_hash: String,
+    start_line: i64,
+    line_count: i32,
+    content_text: String,
+    match_line_number: i32,
+    branches: Vec<String>,
+    is_historical: bool,
 }
 
 #[derive(sqlx::FromRow)]
@@ -1231,6 +1433,13 @@ struct ReferenceRow {
     column: i32,
 }
 
+#[derive(Clone, Debug)]
+struct FileAggregate {
+    entries: Vec<SearchResultRow>,
+    classification: MatchClass,
+    score: f32,
+}
+
 fn dedup_by_key<'a, T, K, F>(items: &'a [T], mut key: F) -> Vec<&'a T>
 where
     K: Eq + std::hash::Hash,
@@ -1246,4 +1455,259 @@ where
     }
 
     deduped
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum MatchClass {
+    Definition,
+    Declaration,
+    Reference,
+    Other,
+}
+
+impl MatchClass {
+    fn base_score(self) -> f32 {
+        match self {
+            MatchClass::Definition => 100.0,
+            MatchClass::Declaration => 80.0,
+            MatchClass::Reference => 55.0,
+            MatchClass::Other => 25.0,
+        }
+    }
+}
+
+#[derive(Hash, Eq, PartialEq, Clone, Debug)]
+struct FileGroupKey {
+    repository: String,
+    commit_sha: String,
+    file_path: String,
+    content_hash: String,
+}
+
+#[derive(Clone, Debug, Default)]
+struct SnippetAnalysis {
+    has_full_match: bool,
+    has_partial_match: bool,
+    matches_symbol_candidate: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+struct FileSymbolMeta {
+    best_role: Option<MatchClass>,
+    has_reference: bool,
+    exact_symbol_match: bool,
+}
+
+fn determine_match_class(meta: &FileSymbolMeta) -> MatchClass {
+    if let Some(role) = meta.best_role {
+        role
+    } else if meta.has_reference {
+        MatchClass::Reference
+    } else {
+        MatchClass::Other
+    }
+}
+
+fn collect_plain_terms(request: &TextSearchRequest) -> HashSet<String> {
+    let mut terms = HashSet::new();
+    for plan in &request.plans {
+        for predicate in &plan.required_terms {
+            if let ContentPredicate::Plain(value) = predicate {
+                if !value.is_empty() {
+                    terms.insert(value.clone());
+                }
+            }
+        }
+    }
+    terms
+}
+
+fn looks_like_symbol(term: &str) -> bool {
+    if term.is_empty() || term.len() > 128 {
+        return false;
+    }
+    let mut has_alpha = false;
+    for ch in term.chars() {
+        if !is_symbol_char(ch) {
+            return false;
+        }
+        if ch.is_ascii_alphabetic() || ch == '_' {
+            has_alpha = true;
+        }
+    }
+    has_alpha
+}
+
+fn is_symbol_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '_' | ':' | '.' | '$' | '#')
+}
+
+fn analyze_snippet(
+    snippet: &str,
+    symbol_terms: &HashSet<String>,
+    symbol_terms_lower: &HashSet<String>,
+) -> SnippetAnalysis {
+    let mut analysis = SnippetAnalysis::default();
+    let mut cursor = 0usize;
+
+    while let Some(start) = snippet[cursor..].find("<mark>") {
+        let mark_open = cursor + start;
+        let mark_start = mark_open + "<mark>".len();
+        if let Some(end_rel) = snippet[mark_start..].find("</mark>") {
+            let mark_end = mark_start + end_rel;
+            let matched = &snippet[mark_start..mark_end];
+            let matched_trimmed = matched.trim();
+            if !matched_trimmed.is_empty() {
+                let matched_lower = matched_trimmed.to_lowercase();
+                if symbol_terms.contains(matched_trimmed)
+                    || symbol_terms_lower.contains(&matched_lower)
+                {
+                    analysis.matches_symbol_candidate = true;
+                }
+
+                let before_char = snippet[..mark_open].chars().rev().find(|c| !c.is_control());
+                let after_index = mark_end + "</mark>".len();
+                let after_char = snippet[after_index..].chars().find(|c| !c.is_control());
+
+                let before_is_symbol = before_char.map_or(false, is_symbol_char);
+                let after_is_symbol = after_char.map_or(false, is_symbol_char);
+
+                if !before_is_symbol && !after_is_symbol {
+                    analysis.has_full_match = true;
+                } else {
+                    analysis.has_partial_match = true;
+                }
+            }
+            cursor = mark_end + "</mark>".len();
+        } else {
+            break;
+        }
+    }
+
+    analysis
+}
+
+async fn load_symbol_metadata(
+    pool: &PgPool,
+    content_hashes: &[String],
+    symbol_terms: &[String],
+    symbol_terms_lower: &[String],
+) -> Result<HashMap<String, FileSymbolMeta>, DbError> {
+    let mut meta_map: HashMap<String, FileSymbolMeta> = HashMap::new();
+
+    if content_hashes.is_empty() {
+        return Ok(meta_map);
+    }
+
+    if !symbol_terms.is_empty() {
+        let symbol_rows: Vec<(String, Option<String>, String, String)> = sqlx::query_as(
+            "SELECT content_hash, kind, symbol, fully_qualified
+             FROM symbols
+             WHERE content_hash = ANY($1)
+               AND (
+                    symbol = ANY($2)
+                    OR fully_qualified = ANY($2)
+                    OR LOWER(symbol) = ANY($3)
+                    OR LOWER(fully_qualified) = ANY($3)
+               )",
+        )
+        .bind(content_hashes)
+        .bind(symbol_terms)
+        .bind(symbol_terms_lower)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| DbError::Database(e.to_string()))?;
+
+        for (content_hash, kind, symbol, fully_qualified) in symbol_rows {
+            let entry = meta_map.entry(content_hash.clone()).or_default();
+            if let Some(kind) = kind.as_deref() {
+                let role = match kind {
+                    "definition" => Some(MatchClass::Definition),
+                    "declaration" => Some(MatchClass::Declaration),
+                    _ => None,
+                };
+                if let Some(role) = role {
+                    if entry
+                        .best_role
+                        .map(|current| role < current)
+                        .unwrap_or(true)
+                    {
+                        entry.best_role = Some(role);
+                    }
+                }
+            }
+
+            if symbol_terms.contains(&symbol)
+                || symbol_terms.contains(&fully_qualified)
+                || symbol_terms_lower.contains(&symbol.to_lowercase())
+                || symbol_terms_lower.contains(&fully_qualified.to_lowercase())
+            {
+                entry.exact_symbol_match = true;
+            }
+        }
+    }
+
+    if !symbol_terms.is_empty() {
+        let reference_rows: Vec<(String, Option<String>, String, String)> = sqlx::query_as(
+            "SELECT content_hash, kind, name, fully_qualified
+             FROM symbol_references
+             WHERE content_hash = ANY($1)
+               AND (
+                    name = ANY($2)
+                    OR fully_qualified = ANY($2)
+                    OR LOWER(name) = ANY($3)
+                    OR LOWER(fully_qualified) = ANY($3)
+               )",
+        )
+        .bind(content_hashes)
+        .bind(symbol_terms)
+        .bind(symbol_terms_lower)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| DbError::Database(e.to_string()))?;
+
+        for (content_hash, kind, name, fully_qualified) in reference_rows {
+            let entry = meta_map.entry(content_hash.clone()).or_default();
+            if kind.as_deref() == Some("reference") {
+                entry.has_reference = true;
+            } else {
+                entry.has_reference = true;
+            }
+            if symbol_terms.contains(&name)
+                || symbol_terms.contains(&fully_qualified)
+                || symbol_terms_lower.contains(&name.to_lowercase())
+                || symbol_terms_lower.contains(&fully_qualified.to_lowercase())
+            {
+                entry.exact_symbol_match = true;
+            }
+        }
+    }
+
+    Ok(meta_map)
+}
+
+fn score_symbol_row(row: &SymbolRow, needle_lower: Option<&str>) -> f32 {
+    let mut score = match row.kind.as_deref() {
+        Some("definition") => 120.0,
+        Some("declaration") => 90.0,
+        _ => 50.0,
+    };
+
+    if let Some(needle) = needle_lower {
+        let symbol_lower = row.symbol.to_lowercase();
+        if symbol_lower == needle {
+            score += 40.0;
+        } else if symbol_lower.contains(needle) {
+            score += 15.0;
+        }
+
+        let fq_lower = row.fully_qualified.to_lowercase();
+        if fq_lower == needle {
+            score += 35.0;
+        } else if fq_lower.contains(needle) {
+            score += 12.0;
+        }
+    }
+
+    score
 }

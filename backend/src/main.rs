@@ -958,9 +958,23 @@ async fn search_symbols(
         }
     }
 
-    let mut results = Vec::new();
+    let needle_lower = request.name.as_ref().map(|s| s.to_lowercase());
+    let needle_lower_ref = needle_lower.as_deref();
 
-    for row in rows {
+    let mut scored_rows: Vec<(f32, SymbolRow)> = rows
+        .into_iter()
+        .map(|row| (score_symbol_row(&row, needle_lower_ref), row))
+        .collect();
+
+    scored_rows.sort_by(|a, b| {
+        b.0.partial_cmp(&a.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.1.symbol.cmp(&b.1.symbol))
+    });
+
+    let mut results = Vec::with_capacity(scored_rows.len());
+
+    for (_, row) in scored_rows {
         let references = if include_refs {
             reference_map.get(row.fully_qualified.as_str()).map(|refs| {
                 refs.iter()
@@ -992,6 +1006,32 @@ async fn search_symbols(
     }
 
     Ok(Json(SearchResponse { symbols: results }))
+}
+
+fn score_symbol_row(row: &SymbolRow, needle_lower: Option<&str>) -> f32 {
+    let mut score = match row.kind.as_deref() {
+        Some("definition") => 120.0,
+        Some("declaration") => 90.0,
+        _ => 50.0,
+    };
+
+    if let Some(needle) = needle_lower {
+        let symbol_lower = row.symbol.to_lowercase();
+        if symbol_lower == needle {
+            score += 40.0;
+        } else if symbol_lower.contains(needle) {
+            score += 15.0;
+        }
+
+        let fq_lower = row.fully_qualified.to_lowercase();
+        if fq_lower == needle {
+            score += 35.0;
+        } else if fq_lower.contains(needle) {
+            score += 12.0;
+        }
+    }
+
+    score
 }
 
 async fn health_check() -> &'static str {

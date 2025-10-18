@@ -85,7 +85,7 @@ fn collect_references(language: &str, source: &str) -> Vec<ExtractedReference> {
                     let pos = node.start_position();
                     refs.push(ExtractedReference {
                         name: name.to_string(),
-                        kind: None,
+                        kind: Some("reference".to_string()),
                         namespace: None,
                         line: pos.row.saturating_add(1) as usize,
                         column: pos.column.saturating_add(1) as usize,

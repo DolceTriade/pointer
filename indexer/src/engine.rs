@@ -203,13 +203,14 @@ impl Indexer {
                         Some(ns) => format!("{}::{}", ns, name),
                         None => name.clone(),
                     };
+                    let role = classify_symbol_kind(&kind);
 
                     report.symbol_records.push(SymbolRecord {
                         content_hash: content_hash.clone(),
                         namespace,
                         symbol: name,
                         fully_qualified,
-                        kind: Some(kind),
+                        kind: Some(role.to_string()),
                     });
                 }
 
@@ -261,6 +262,13 @@ fn should_skip(path: &Path) -> bool {
             .map(|s| matches!(s, "target" | "node_modules" | ".git"))
             .unwrap_or(false)
     })
+}
+
+fn classify_symbol_kind(original_kind: &str) -> &'static str {
+    match original_kind {
+        "var" | "field" | "property" | "const" | "let" | "lexical" | "attr" => "declaration",
+        _ => "definition",
+    }
 }
 
 fn compute_chunk_ranges(bytes: &[u8], full_text: &str) -> (Vec<(usize, usize)>, bool) {

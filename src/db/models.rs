@@ -59,6 +59,14 @@ pub struct ReferenceResult {
     pub column: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchSnippet {
+    pub start_line: i32,
+    pub end_line: i32,
+    pub match_line: i32,
+    pub content_text: String,
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct SearchResult {
     pub repository: String,
@@ -68,6 +76,7 @@ pub struct SearchResult {
     pub end_line: i32,
     pub match_line: i32, // The actual line where the match occurs
     pub content_text: String,
+    pub snippets: Vec<SearchSnippet>,
     pub branches: Vec<String>,
     pub is_historical: bool,
 }

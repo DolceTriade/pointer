@@ -215,7 +215,6 @@ pub async fn get_file_viewer_data(
             })
             .collect();
 
-
         Ok(FileViewerData::File {
             lines,
             line_count,
@@ -614,6 +613,7 @@ fn LineHighlighter() -> impl IntoView {
     let location = use_location();
 
     Effect::new(move |_| {
+        tracing::info!("LINE HIGHLIGHTER");
         let hash = location.hash.get();
         if hash.starts_with("#L") {
             let line_id = &hash[1..];
