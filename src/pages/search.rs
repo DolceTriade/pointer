@@ -2,7 +2,7 @@ use crate::db::models::{SearchResult, SearchResultsPage, SearchSnippet};
 use crate::dsl::DEFAULT_PAGE_SIZE;
 use crate::services::search_service::search;
 use leptos::Params;
-use leptos::either::EitherOf3;
+use leptos::either::{Either, EitherOf3};
 use leptos::prelude::*;
 use leptos_router::hooks::use_navigate;
 use leptos_router::hooks::use_query;
@@ -276,7 +276,7 @@ fn SearchResultCard(result: SearchResult) -> impl IntoView {
                                                     </a>
                                                 </p>
                                                 <pre class="bg-gray-100 dark:bg-gray-900 p-2 rounded-md mt-2 text-sm overflow-x-auto max-w-full">
-                                                    <code>{snippet.content_text}</code>
+                                                    <code>{render_highlighted_snippet(&snippet.content_text)}</code>
                                                 </pre>
                                             </div>
                                         }
@@ -306,9 +306,54 @@ fn SearchResultCard(result: SearchResult) -> impl IntoView {
                 {historical_badge}
             </div>
             <pre class="bg-gray-100 dark:bg-gray-900 p-2 rounded-md mt-2 text-sm overflow-x-auto max-w-full">
-                <code>{primary_snippet.content_text}</code>
+                <code>{render_highlighted_snippet(&primary_snippet.content_text)}</code>
             </pre>
             {extra_section}
         </div>
     }
+}
+
+fn render_highlighted_snippet(text: &str) -> impl IntoView {
+    parse_highlight_segments(text)
+        .into_iter()
+        .map(|(segment, highlighted)| {
+            if highlighted {
+                Either::Left(view! { <span><mark>{segment}</mark></span> })
+            } else {
+                Either::Right(view! { <span>{segment}</span> })
+            }
+        })
+        .collect_view()
+}
+
+fn parse_highlight_segments(input: &str) -> Vec<(String, bool)> {
+    const OPEN: &str = "<mark>";
+    const CLOSE: &str = "</mark>";
+
+    let mut segments = Vec::new();
+    let mut cursor = 0;
+    while let Some(start_rel) = input[cursor..].find(OPEN) {
+        let start_idx = cursor + start_rel;
+        if start_idx > cursor {
+            segments.push((input[cursor..start_idx].to_string(), false));
+        }
+
+        let highlight_start = start_idx + OPEN.len();
+        if let Some(end_rel) = input[highlight_start..].find(CLOSE) {
+            let highlight_end = highlight_start + end_rel;
+            segments.push((input[highlight_start..highlight_end].to_string(), true));
+            cursor = highlight_end + CLOSE.len();
+        } else {
+            segments.push((input[start_idx..].to_string(), false));
+            cursor = input.len();
+            break;
+        }
+    }
+
+    if cursor < input.len() {
+        segments.push((input[cursor..].to_string(), false));
+    }
+
+    segments.retain(|(segment, _)| !segment.is_empty());
+    segments
 }
