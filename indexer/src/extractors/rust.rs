@@ -20,6 +20,9 @@ pub fn extract(source: &str) -> Vec<ExtractedSymbol> {
 
     while let Some(node) = stack.pop() {
         let mut extracted = collect_symbols(&node, source_bytes);
+        if !extracted.is_empty() {
+            tracing::debug!("Extracted symbol {extracted:#?}");
+        }
         symbols.append(&mut extracted);
 
         let mut cursor = node.walk();

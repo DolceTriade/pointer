@@ -463,7 +463,7 @@ impl Database for PostgresDb {
 
     async fn search_symbols(&self, request: SearchRequest) -> Result<SearchResponse, DbError> {
         let mut qb = QueryBuilder::new(
-            "SELECT s.id, s.symbol, s.namespace, COALESCE(def.kind, s.kind) AS kind, \
+            "SELECT s.id, s.symbol, s.namespace, COALESCE(def.kind, 'definition') AS kind, \
                     CASE WHEN s.namespace IS NULL THEN s.symbol ELSE s.namespace || '::' || s.symbol END AS fully_qualified, \
                     cb.language, f.repository, f.commit_sha, f.file_path, def.line, def.column \
              FROM symbols s \
@@ -634,10 +634,12 @@ impl Database for PostgresDb {
                 .and_then(|column| column.try_into().ok())
                 .and_then(|column: i32| (column > 0).then(|| column as usize));
 
+            let kind = row.kind.clone().unwrap_or_else(|| "definition".to_string());
+
             results.push(SymbolResult {
                 symbol: row.symbol,
                 namespace: row.namespace,
-                kind: row.kind,
+                kind: Some(kind),
                 fully_qualified: row.fully_qualified,
                 repository: row.repository,
                 commit_sha: row.commit_sha,
@@ -1308,17 +1310,13 @@ impl PostgresDb {
 
         for chunk in deduped.chunks(INSERT_BATCH_SIZE) {
             let mut qb =
-                QueryBuilder::new("INSERT INTO symbols (content_hash, namespace, symbol, kind) ");
+                QueryBuilder::new("INSERT INTO symbols (content_hash, namespace, symbol) ");
             qb.push_values(chunk.iter().copied(), |mut b, symbol| {
                 b.push_bind(&symbol.content_hash)
                     .push_bind(&symbol.namespace)
-                    .push_bind(&symbol.symbol)
-                    .push_bind(&symbol.kind);
+                    .push_bind(&symbol.symbol);
             });
-            qb.push(
-                " ON CONFLICT (content_hash, namespace, symbol) \
-                  DO UPDATE SET kind = EXCLUDED.kind",
-            );
+            qb.push(" ON CONFLICT (content_hash, namespace, symbol) DO NOTHING");
 
             qb.build()
                 .execute(tx.as_mut())
@@ -1638,7 +1636,7 @@ async fn load_symbol_metadata(
 
     if !symbol_terms.is_empty() {
         let symbol_rows: Vec<(String, Option<String>, String, String)> = sqlx::query_as(
-            "SELECT s.content_hash, COALESCE(def.kind, s.kind) AS kind, s.symbol, \
+            "SELECT s.content_hash, COALESCE(def.kind, 'definition') AS kind, s.symbol, \
                     COALESCE(s.namespace || '::' || s.symbol, s.symbol) AS fully_qualified \
              FROM symbols s \
              LEFT JOIN LATERAL ( \
@@ -1735,9 +1733,10 @@ async fn load_symbol_metadata(
 }
 
 fn score_symbol_row(row: &SymbolRow, needle_lower: Option<&str>) -> f32 {
-    let mut score = match row.kind.as_deref() {
-        Some("definition") => 120.0,
-        Some("declaration") => 90.0,
+    let role = row.kind.as_deref().unwrap_or("definition");
+    let mut score = match role {
+        "definition" => 120.0,
+        "declaration" => 90.0,
         _ => 50.0,
     };
 

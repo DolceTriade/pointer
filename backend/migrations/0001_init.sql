@@ -57,7 +57,6 @@ CREATE TABLE symbols (
     content_hash TEXT NOT NULL REFERENCES content_blobs(hash) ON DELETE CASCADE,
     namespace TEXT,
     symbol TEXT NOT NULL,
-    kind TEXT,
     UNIQUE (content_hash, namespace, symbol)
 );
 
@@ -65,7 +64,6 @@ CREATE TABLE symbols (
 CREATE INDEX idx_symbols_symbol ON symbols (symbol);
 CREATE INDEX idx_symbols_namespace ON symbols (namespace);
 CREATE INDEX idx_symbols_content_hash ON symbols (content_hash);
-CREATE INDEX idx_symbols_kind ON symbols (kind);
 
 -- Table for symbol references
 CREATE TABLE symbol_references (

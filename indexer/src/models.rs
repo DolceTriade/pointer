@@ -15,7 +15,6 @@ pub struct SymbolRecord {
     pub namespace: Option<String>,
     pub symbol: String,
     pub fully_qualified: String,
-    pub kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
