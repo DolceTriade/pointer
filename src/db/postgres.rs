@@ -427,35 +427,83 @@ impl Database for PostgresDb {
         request: SymbolReferenceRequest,
     ) -> Result<SymbolReferenceResponse, DbError> {
         let (namespace_opt, name) = split_fully_qualified(&request.fully_qualified);
-        let namespace_key = namespace_opt.as_deref().unwrap_or("").to_string();
+        let mut namespace_filter = namespace_opt
+            .filter(|ns| !ns.is_empty())
+            .map(|ns| ns.to_string());
+        let mut symbol_ids: Vec<i32> = Vec::new();
 
-        let rows: Vec<DbFileReference> = sqlx::query_as(
-            "SELECT f.repository, f.commit_sha, f.file_path, NULLIF(sn.namespace, '') AS namespace, s.name AS name, sr.kind,
-                    sr.line_number AS line, sr.column_number AS column
-             FROM symbol_references sr
-             JOIN symbols s ON s.id = sr.symbol_id
-             JOIN symbol_namespaces sn ON sn.id = sr.namespace_id
-             JOIN files f ON f.content_hash = s.content_hash
-             WHERE f.repository = $1
-               AND f.commit_sha = $2
-               AND s.name = $3
-               AND EXISTS (
-                   SELECT 1
-                     FROM symbol_references sr_def
-                     JOIN symbol_namespaces sn_def ON sn_def.id = sr_def.namespace_id
-                    WHERE sr_def.symbol_id = s.id
-                      AND sr_def.kind = 'definition'
-                      AND sn_def.namespace = $4
-               )
-             ORDER BY f.file_path, sr.line_number, sr.column_number",
-        )
-        .bind(&request.repository)
-        .bind(&request.commit_sha)
-        .bind(&name)
-        .bind(&namespace_key)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| DbError::Database(e.to_string()))?;
+        if let (Some(path), Some(line)) = (&request.file_path, request.line) {
+            let line_i32 = i32::try_from(line).unwrap_or(i32::MAX);
+            let mut qb = QueryBuilder::new(
+                "SELECT s.id, NULLIF(sn.namespace, '') AS namespace \
+                 FROM symbol_references sr \
+                 JOIN symbols s ON s.id = sr.symbol_id \
+                 JOIN symbol_namespaces sn ON sn.id = sr.namespace_id \
+                 JOIN files f ON f.content_hash = s.content_hash \
+                 WHERE f.repository = ",
+            );
+            qb.push_bind(&request.repository)
+                .push(" AND f.commit_sha = ")
+                .push_bind(&request.commit_sha)
+                .push(" AND f.file_path = ")
+                .push_bind(path)
+                .push(" AND sr.kind = 'definition' AND sr.line_number = ")
+                .push_bind(line_i32);
+
+            if let Some(column) = request.column {
+                let column_i32 = i32::try_from(column).unwrap_or(i32::MAX);
+                qb.push(" AND sr.column_number = ").push_bind(column_i32);
+            }
+
+            qb.push(" ORDER BY sr.line_number, sr.column_number LIMIT 8");
+
+            let def_rows: Vec<(i32, Option<String>)> = qb
+                .build_query_as()
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| DbError::Database(e.to_string()))?;
+
+            for (symbol_id, ns) in def_rows {
+                symbol_ids.push(symbol_id);
+                if namespace_filter.is_none() {
+                    if let Some(ns_val) = ns.filter(|ns| !ns.is_empty()) {
+                        namespace_filter = Some(ns_val);
+                    }
+                }
+            }
+        }
+
+        let mut qb = QueryBuilder::new(
+            "SELECT f.repository, f.commit_sha, f.file_path, NULLIF(sn.namespace, '') AS namespace, s.name AS name, sr.kind, \
+                    sr.line_number AS line, sr.column_number AS column \
+             FROM symbol_references sr \
+             JOIN symbols s ON s.id = sr.symbol_id \
+             JOIN symbol_namespaces sn ON sn.id = sr.namespace_id \
+             JOIN files f ON f.content_hash = s.content_hash \
+             WHERE f.repository = ",
+        );
+        qb.push_bind(&request.repository)
+            .push(" AND f.commit_sha = ")
+            .push_bind(&request.commit_sha);
+
+        if !symbol_ids.is_empty() {
+            qb.push(" AND sr.symbol_id = ANY(")
+                .push_bind(&symbol_ids)
+                .push(")");
+        } else {
+            qb.push(" AND s.name = ").push_bind(&name);
+            if let Some(ns) = namespace_filter {
+                qb.push(" AND COALESCE(sn.namespace, '') = ").push_bind(ns);
+            }
+        }
+
+        qb.push(" ORDER BY f.file_path, sr.line_number, sr.column_number");
+
+        let rows: Vec<DbFileReference> = qb
+            .build_query_as()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| DbError::Database(e.to_string()))?;
 
         Ok(SymbolReferenceResponse {
             references: rows
@@ -475,39 +523,14 @@ impl Database for PostgresDb {
     }
 
     async fn search_symbols(&self, request: SearchRequest) -> Result<SearchResponse, DbError> {
-        let mut qb = QueryBuilder::new(
-            "SELECT s.id, \
-                    s.name AS symbol, \
-                    NULLIF(def.namespace, '') AS namespace, \
-                    COALESCE(def.kind, 'definition') AS kind, \
-                    CASE \
-                        WHEN def.namespace IS NULL OR def.namespace = '' THEN s.name \
-                        ELSE def.namespace || '::' || s.name \
-                    END AS fully_qualified, \
-                    cb.language, \
-                    f.repository, \
-                    f.commit_sha, \
-                    f.file_path, \
-                    def.line, \
-                    def.column \
-             FROM symbols s \
-             JOIN files f ON f.content_hash = s.content_hash \
-             LEFT JOIN content_blobs cb ON cb.hash = s.content_hash \
-             LEFT JOIN LATERAL ( \
-                 SELECT sr.kind, \
-                        sr.line_number AS line, \
-                        sr.column_number AS column, \
-                        sn.namespace \
-                   FROM symbol_references sr \
-                   JOIN symbol_namespaces sn ON sn.id = sr.namespace_id \
-                  WHERE sr.symbol_id = s.id \
-                  ORDER BY (sr.kind = 'definition') DESC, sr.line_number, sr.column_number \
-                  LIMIT 1 \
-             ) def ON TRUE",
-        );
+        let needle_lower = request.name.as_ref().map(|s| s.to_lowercase());
+        let namespace_hint = request
+            .namespace
+            .clone()
+            .or_else(|| request.namespace_prefix.clone());
 
-        if let Some(q) = &request.q {
-            let matching_hashes: Vec<String> = sqlx::query_scalar(
+        let matching_hashes = if let Some(q) = &request.q {
+            let hashes: Vec<String> = sqlx::query_scalar(
                 "SELECT DISTINCT cbc.content_hash \
                  FROM chunks c \
                  JOIN content_blob_chunks cbc ON c.chunk_hash = cbc.chunk_hash \
@@ -518,17 +541,73 @@ impl Database for PostgresDb {
             .await
             .map_err(|e| DbError::Database(e.to_string()))?;
 
-            if matching_hashes.is_empty() {
+            if hashes.is_empty() {
                 return Ok(SearchResponse {
                     symbols: Vec::new(),
                 });
             }
 
-            qb.push(" WHERE s.content_hash = ANY(")
-                .push_bind(matching_hashes)
-                .push(")");
+            Some(hashes)
         } else {
-            qb.push(" WHERE 1=1");
+            None
+        };
+
+        let mut qb = QueryBuilder::new(
+            "WITH ranked AS ( \
+                 SELECT DISTINCT ON (s.id) \
+                     s.id, \
+                     s.name AS symbol, \
+                     NULLIF(sn.namespace, '') AS namespace, \
+                     COALESCE(sr.kind, 'definition') AS kind, \
+                     CASE \
+                         WHEN sn.namespace IS NULL OR sn.namespace = '' THEN s.name \
+                         ELSE sn.namespace || '::' || s.name \
+                     END AS fully_qualified, \
+                     cb.language, \
+                     f.repository, \
+                     f.commit_sha, \
+                    f.file_path, \
+                    sr.line_number AS line_number, \
+                    sr.column_number AS column_number, \
+                    symbol_weight( \
+                        s.name, \
+                        CASE \
+                            WHEN sn.namespace IS NULL OR sn.namespace = '' THEN s.name \
+                            ELSE sn.namespace || '::' || s.name \
+                        END, \
+                        NULLIF(sn.namespace, ''), \
+                        COALESCE(sr.kind, 'definition'), \
+                        ",
+        );
+        qb.push_bind(needle_lower.as_deref());
+        qb.push(
+            ", \
+                        ",
+        );
+        qb.push_bind(namespace_hint.as_deref());
+        qb.push(
+            ", \
+                        f.file_path, \
+                        ",
+        );
+
+        let path_hint = request.path.clone();
+        qb.push_bind(path_hint.as_deref());
+
+        qb.push(
+            ") AS score \
+                 FROM symbols s \
+                 JOIN symbol_references sr ON sr.symbol_id = s.id \
+                 JOIN symbol_namespaces sn ON sn.id = sr.namespace_id \
+                 JOIN files f ON f.content_hash = s.content_hash \
+                 LEFT JOIN content_blobs cb ON cb.hash = s.content_hash \
+                 WHERE 1=1",
+        );
+
+        if let Some(hashes) = matching_hashes {
+            qb.push(" AND s.content_hash = ANY(")
+                .push_bind(hashes)
+                .push(")");
         }
 
         if let Some(name) = &request.name {
@@ -541,17 +620,19 @@ impl Database for PostgresDb {
         }
 
         if let Some(namespace) = &request.namespace {
-            qb.push(" AND def.namespace = ").push_bind(namespace);
+            qb.push(" AND sn.namespace = ").push_bind(namespace);
         }
 
         if let Some(prefix) = &request.namespace_prefix {
-            qb.push(" AND def.namespace LIKE ")
+            qb.push(" AND sn.namespace LIKE ")
                 .push_bind(format!("{}%", prefix));
         }
 
         if let Some(kinds) = &request.kind {
             if !kinds.is_empty() {
-                qb.push(" AND def.kind = ANY(").push_bind(kinds).push(")");
+                qb.push(" AND COALESCE(sr.kind, 'definition') = ANY(")
+                    .push_bind(kinds)
+                    .push(")");
             }
         }
 
@@ -580,8 +661,20 @@ impl Database for PostgresDb {
             qb.push(" AND f.file_path ~* ").push_bind(regex);
         }
 
+        qb.push(
+            " ORDER BY \
+                 s.id, \
+                 score DESC, \
+                 (sr.kind = 'definition') DESC, \
+                 sr.line_number, \
+                 sr.column_number \
+             ) \
+             SELECT id, symbol, namespace, kind, fully_qualified, language, repository, commit_sha, file_path, line_number, column_number, score \
+             FROM ranked \
+             ORDER BY score DESC, symbol ASC LIMIT ",
+        );
         let limit = request.limit.unwrap_or(100).clamp(1, 1000);
-        qb.push(" ORDER BY s.name ASC LIMIT ").push_bind(limit);
+        qb.push_bind(limit);
 
         let rows: Vec<SymbolRow> = qb
             .build_query_as()
@@ -619,30 +712,8 @@ impl Database for PostgresDb {
             }
         }
 
-        let needle_lower = request.name.as_ref().map(|s| s.to_lowercase());
-        let needle_lower_ref = needle_lower.as_deref();
-        let namespace_hint = request
-            .namespace
-            .clone()
-            .or_else(|| request.namespace_prefix.clone());
-        let namespace_hint_ref = namespace_hint.as_deref();
-
-        let mut scored_rows: Vec<(f32, SymbolRow)> = rows
-            .into_iter()
-            .map(|row| {
-                let score = score_symbol_row(&row, needle_lower_ref, namespace_hint_ref);
-                (score, row)
-            })
-            .collect();
-
-        scored_rows.sort_by(|a, b| {
-            b.0.partial_cmp(&a.0)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.1.symbol.cmp(&b.1.symbol))
-        });
-
-        let mut results = Vec::with_capacity(scored_rows.len());
-        for (_, row) in scored_rows {
+        let mut results = Vec::with_capacity(rows.len());
+        for row in rows {
             let references = if include_refs {
                 reference_map.get(&row.id).map(|refs| {
                     refs.iter()
@@ -1517,8 +1588,12 @@ struct SymbolRow {
     repository: String,
     commit_sha: String,
     file_path: String,
+    #[sqlx(rename = "line_number")]
     line: Option<i32>,
+    #[sqlx(rename = "column_number")]
     column: Option<i32>,
+    #[sqlx(rename = "score")]
+    _score: f64,
 }
 
 #[derive(sqlx::FromRow)]
@@ -1828,59 +1903,6 @@ async fn load_symbol_metadata(
     Ok(meta_map)
 }
 
-fn score_symbol_row(
-    row: &SymbolRow,
-    needle_lower: Option<&str>,
-    namespace_hint: Option<&str>,
-) -> f32 {
-    let role = row.kind.as_deref().unwrap_or("definition");
-    let mut score = match role {
-        "definition" => 120.0,
-        "declaration" => 90.0,
-        _ => 50.0,
-    };
-
-    if let Some(needle) = needle_lower {
-        let symbol_lower = row.symbol.to_lowercase();
-        if symbol_lower == needle {
-            score += 40.0;
-        } else if symbol_lower.contains(needle) {
-            score += 15.0;
-        }
-
-        let fq_lower = row.fully_qualified.to_lowercase();
-        if fq_lower == needle {
-            score += 35.0;
-        } else if fq_lower.contains(needle) {
-            score += 12.0;
-        }
-    }
-
-    if let Some(namespace_filter) = namespace_hint {
-        if namespace_filter.is_empty() {
-            if row.namespace.is_none() {
-                score += 70.0;
-            } else {
-                score -= 15.0;
-            }
-        } else if let Some(ns) = row.namespace.as_deref() {
-            let similarity = namespace_similarity(ns, namespace_filter);
-            if similarity > 0.0 {
-                score += 95.0 * similarity;
-            } else {
-                score -= 20.0;
-            }
-        } else {
-            score -= 25.0;
-        }
-    } else if row.namespace.is_some() {
-        // Small bump for symbols that carry namespace context even without explicit filter.
-        score += 5.0;
-    }
-
-    score
-}
-
 fn split_fully_qualified(value: &str) -> (Option<String>, String) {
     if let Some(idx) = value.rfind("::") {
         let (ns, name) = value.split_at(idx);
@@ -1893,49 +1915,5 @@ fn split_fully_qualified(value: &str) -> (Option<String>, String) {
         (namespace, name)
     } else {
         (None, value.to_string())
-    }
-}
-
-fn namespace_similarity(a: &str, b: &str) -> f32 {
-    if a == b {
-        return 1.0;
-    }
-
-    let parts_a: Vec<&str> = a
-        .split("::")
-        .filter(|segment| !segment.is_empty())
-        .collect();
-    let parts_b: Vec<&str> = b
-        .split("::")
-        .filter(|segment| !segment.is_empty())
-        .collect();
-
-    if parts_a.is_empty() || parts_b.is_empty() {
-        return 0.0;
-    }
-
-    let shared_prefix = parts_a
-        .iter()
-        .zip(parts_b.iter())
-        .take_while(|(lhs, rhs)| *lhs == *rhs)
-        .count();
-    if shared_prefix > 0 {
-        let max_len = parts_a.len().max(parts_b.len()) as f32;
-        return (shared_prefix as f32) / max_len;
-    }
-
-    if parts_a.last() == parts_b.last() {
-        return 0.4;
-    }
-
-    let set_a: std::collections::HashSet<&str> = parts_a.iter().copied().collect();
-    let set_b: std::collections::HashSet<&str> = parts_b.iter().copied().collect();
-    let intersection = set_a.intersection(&set_b).count() as f32;
-    let union = set_a.union(&set_b).count() as f32;
-
-    if union > 0.0 {
-        (intersection / union).min(0.6)
-    } else {
-        0.0
     }
 }

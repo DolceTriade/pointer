@@ -35,6 +35,9 @@ pub struct SymbolReferenceRequest {
     pub repository: String,
     pub commit_sha: String,
     pub fully_qualified: String,
+    pub file_path: Option<String>,
+    pub line: Option<usize>,
+    pub column: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

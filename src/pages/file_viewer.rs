@@ -14,7 +14,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use web_sys::wasm_bindgen::{JsCast, UnwrapThrowExt};
 
-
 #[derive(Params, PartialEq, Clone, Debug)]
 pub struct FileViewerParams {
     pub repo: String,
@@ -297,6 +296,9 @@ pub async fn fetch_symbol_insights(
                 repository: definition.repository.clone(),
                 commit_sha: definition.commit_sha.clone(),
                 fully_qualified: definition.fully_qualified.clone(),
+                file_path: Some(definition.file_path.clone()),
+                line: definition.line,
+                column: definition.column,
             })
             .await
             .map_err(|e| ServerFnError::new(e.to_string()))?;
@@ -666,8 +668,8 @@ fn FileContent(
 
     let code_ref = code_ref.clone();
     Effect::new(move |_| {
-        use web_sys::{HtmlElement, Node};
         use leptos::leptos_dom::helpers::window_event_listener;
+        use web_sys::{HtmlElement, Node};
         let code_ref = code_ref.clone();
         let handle =
             window_event_listener(leptos::ev::keydown, move |ev: web_sys::KeyboardEvent| {

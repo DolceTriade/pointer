@@ -87,6 +87,61 @@ CREATE INDEX idx_symbol_references_namespace_id ON symbol_references (namespace_
 CREATE INDEX idx_symbol_references_kind ON symbol_references (kind);
 CREATE INDEX idx_symbol_references_line_number ON symbol_references (line_number);
 
+-- Function for symbol ranking weight calculations
+CREATE OR REPLACE FUNCTION symbol_weight(
+    symbol_name TEXT,
+    fully_qualified TEXT,
+    namespace TEXT,
+    symbol_kind TEXT,
+    needle TEXT,
+    namespace_filter TEXT,
+    file_path TEXT,
+    path_hint TEXT
+) RETURNS DOUBLE PRECISION AS $$
+    SELECT
+        0::DOUBLE PRECISION
+        + CASE
+            WHEN symbol_kind = 'definition' THEN 120
+            WHEN symbol_kind = 'declaration' THEN 90
+            ELSE 50
+          END
+        + CASE
+            WHEN needle IS NULL OR needle = '' THEN 0
+            WHEN LOWER(symbol_name) = LOWER(needle) THEN 40
+            WHEN POSITION(LOWER(needle) IN LOWER(symbol_name)) > 0 THEN 15
+            ELSE 0
+          END
+        + CASE
+            WHEN needle IS NULL OR needle = '' THEN 0
+            WHEN LOWER(fully_qualified) = LOWER(needle) THEN 35
+            WHEN POSITION(LOWER(needle) IN LOWER(fully_qualified)) > 0 THEN 12
+            ELSE 0
+          END
+        + CASE
+            WHEN namespace_filter IS NULL OR namespace_filter = '' THEN
+                CASE
+                    WHEN namespace IS NULL OR namespace = '' THEN 70
+                    ELSE -15
+                END
+            WHEN namespace IS NULL OR namespace = '' THEN -25
+            ELSE (
+                CASE
+                    WHEN namespace = namespace_filter THEN 95
+                    WHEN namespace LIKE namespace_filter || '::%' THEN 75
+                    WHEN namespace_filter LIKE namespace || '::%' THEN 55
+                    ELSE GREATEST(similarity(LOWER(namespace), LOWER(namespace_filter)) * 85 - 20, -20)
+                END
+            )
+          END
+        + CASE
+            WHEN path_hint IS NULL OR path_hint = '' THEN 0
+            WHEN file_path = path_hint THEN 65
+            WHEN file_path LIKE path_hint || '%' THEN 45
+            WHEN path_hint LIKE file_path || '%' THEN 35
+            ELSE GREATEST(similarity(file_path, path_hint) * 60 - 15, -15)
+          END
+$$ LANGUAGE SQL IMMUTABLE;
+
 -- Table for upload chunks (temporary storage for manifest upload)
 CREATE TABLE upload_chunks (
     upload_id TEXT NOT NULL,

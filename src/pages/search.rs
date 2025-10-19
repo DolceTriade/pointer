@@ -195,10 +195,10 @@ fn SearchResultCard(result: SearchResult) -> impl IntoView {
     });
 
     let historical_badge = is_historical.then(|| view! {
-            <span class="inline-flex items-center rounded-full bg-amber-200 text-amber-900 dark:bg-amber-900/60 dark:text-amber-100 px-2 py-0.5">
-                "Historical"
-            </span>
-        });
+        <span class="inline-flex items-center rounded-full bg-amber-200 text-amber-900 dark:bg-amber-900/60 dark:text-amber-100 px-2 py-0.5">
+            "Historical"
+        </span>
+    });
 
     let short_commit: String = commit_sha.chars().take(7).collect();
     let primary_label = format!(
@@ -237,10 +237,7 @@ fn SearchResultCard(result: SearchResult) -> impl IntoView {
                         }
                     }}
                 </button>
-                <Show
-                    when=move || expanded.get()
-                    fallback=move || view! { <></> }
-                >
+                <Show when=move || expanded.get() fallback=move || view! { <></> }>
                     {
                         let repo = repo.clone();
                         let commit = commit.clone();
@@ -276,7 +273,9 @@ fn SearchResultCard(result: SearchResult) -> impl IntoView {
                                                     </a>
                                                 </p>
                                                 <pre class="bg-gray-100 dark:bg-gray-900 p-2 rounded-md mt-2 text-sm overflow-x-auto max-w-full">
-                                                    <code>{render_highlighted_snippet(snippet.content_text.clone())}</code>
+                                                    <code>
+                                                        {render_highlighted_snippet(snippet.content_text.clone())}
+                                                    </code>
                                                 </pre>
                                             </div>
                                         }
@@ -318,7 +317,11 @@ fn render_highlighted_snippet(text: String) -> impl IntoView {
         .into_iter()
         .map(|(segment, highlighted)| {
             if highlighted {
-                Either::Left(view! { <span><mark>{segment}</mark></span> })
+                Either::Left(view! {
+                    <span>
+                        <mark>{segment}</mark>
+                    </span>
+                })
             } else {
                 Either::Right(view! { <span>{segment}</span> })
             }

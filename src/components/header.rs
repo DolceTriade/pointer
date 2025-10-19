@@ -23,9 +23,7 @@ pub fn Header() -> impl IntoView {
             <div class="flex-none items-center justify-between mx-auto p-2">
                 <a href="/" class="flex items-center gap-2">
                     <img class="hover:animate-spin w-14" src="/asterisk.svg" alt="Logo" />
-                    <span class="text-xl font-semibold whitespace-nowrap">
-                        Pointer
-                    </span>
+                    <span class="text-xl font-semibold whitespace-nowrap">Pointer</span>
                 </a>
             </div>
             <div class="flex-1 flex justify-center">
