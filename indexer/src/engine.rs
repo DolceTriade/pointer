@@ -207,7 +207,7 @@ impl Indexer {
                     report.symbol_records.push(SymbolRecord {
                         content_hash: content_hash.clone(),
                         namespace,
-                        symbol: name,
+                        name,
                         fully_qualified,
                     });
                 }

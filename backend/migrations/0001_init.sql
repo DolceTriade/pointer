@@ -51,32 +51,39 @@ CREATE INDEX idx_files_content_hash ON files (content_hash);
 CREATE INDEX idx_files_repository_commit ON files (repository, commit_sha);
 CREATE INDEX idx_files_path ON files (file_path);
 
--- Table for symbols
 CREATE TABLE symbols (
     id SERIAL PRIMARY KEY,
     content_hash TEXT NOT NULL REFERENCES content_blobs(hash) ON DELETE CASCADE,
-    namespace TEXT,
-    symbol TEXT NOT NULL,
-    UNIQUE (content_hash, namespace, symbol)
+    name TEXT NOT NULL,
+    UNIQUE (content_hash, name)
 );
 
 -- Indexes for symbols
-CREATE INDEX idx_symbols_symbol ON symbols (symbol);
-CREATE INDEX idx_symbols_namespace ON symbols (namespace);
+CREATE INDEX idx_symbols_name ON symbols (name);
 CREATE INDEX idx_symbols_content_hash ON symbols (content_hash);
+
+-- Table for symbol namespaces
+CREATE TABLE symbol_namespaces (
+    id SERIAL PRIMARY KEY,
+    namespace TEXT NOT NULL UNIQUE
+);
+
+CREATE INDEX idx_symbol_namespaces_namespace ON symbol_namespaces (namespace);
 
 -- Table for symbol references
 CREATE TABLE symbol_references (
     id SERIAL PRIMARY KEY,
     symbol_id INTEGER NOT NULL REFERENCES symbols(id) ON DELETE CASCADE,
+    namespace_id INTEGER NOT NULL REFERENCES symbol_namespaces(id) ON DELETE CASCADE,
     kind TEXT,
     line_number INTEGER NOT NULL,
     column_number INTEGER NOT NULL,
-    UNIQUE (symbol_id, line_number, column_number, kind)
+    UNIQUE (symbol_id, namespace_id, line_number, column_number, kind)
 );
 
 -- Indexes for symbol references
 CREATE INDEX idx_symbol_references_symbol_id ON symbol_references (symbol_id);
+CREATE INDEX idx_symbol_references_namespace_id ON symbol_references (namespace_id);
 CREATE INDEX idx_symbol_references_kind ON symbol_references (kind);
 CREATE INDEX idx_symbol_references_line_number ON symbol_references (line_number);
 

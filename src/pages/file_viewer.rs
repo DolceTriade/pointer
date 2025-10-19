@@ -5,15 +5,15 @@ use crate::db::{
     models::{FileReference, SymbolResult},
 };
 use leptos::either::EitherOf4;
-use leptos::{either::Either, prelude::*};
 use leptos::html::Div;
+use leptos::{either::Either, prelude::*};
 use leptos_router::components::A;
 use leptos_router::hooks::{use_location, use_params};
 use leptos_router::params::Params;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use web_sys::wasm_bindgen::UnwrapThrowExt;
 use web_sys::wasm_bindgen::JsCast;
+use web_sys::wasm_bindgen::UnwrapThrowExt;
 
 #[derive(Params, PartialEq, Clone, Debug)]
 pub struct FileViewerParams {

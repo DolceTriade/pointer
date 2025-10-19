@@ -426,20 +426,33 @@ impl Database for PostgresDb {
         &self,
         request: SymbolReferenceRequest,
     ) -> Result<SymbolReferenceResponse, DbError> {
+        let (namespace_opt, name) = split_fully_qualified(&request.fully_qualified);
+        let namespace_key = namespace_opt.as_deref().unwrap_or("").to_string();
+
         let rows: Vec<DbFileReference> = sqlx::query_as(
-            "SELECT f.repository, f.commit_sha, f.file_path, s.namespace, s.symbol AS name, sr.kind,
+            "SELECT f.repository, f.commit_sha, f.file_path, NULLIF(sn.namespace, '') AS namespace, s.name AS name, sr.kind,
                     sr.line_number AS line, sr.column_number AS column
              FROM symbol_references sr
              JOIN symbols s ON s.id = sr.symbol_id
+             JOIN symbol_namespaces sn ON sn.id = sr.namespace_id
              JOIN files f ON f.content_hash = s.content_hash
              WHERE f.repository = $1
                AND f.commit_sha = $2
-               AND (CASE WHEN s.namespace IS NULL THEN s.symbol ELSE s.namespace || '::' || s.symbol END) = $3
+               AND s.name = $3
+               AND EXISTS (
+                   SELECT 1
+                     FROM symbol_references sr_def
+                     JOIN symbol_namespaces sn_def ON sn_def.id = sr_def.namespace_id
+                    WHERE sr_def.symbol_id = s.id
+                      AND sr_def.kind = 'definition'
+                      AND sn_def.namespace = $4
+               )
              ORDER BY f.file_path, sr.line_number, sr.column_number",
         )
         .bind(&request.repository)
         .bind(&request.commit_sha)
-        .bind(&request.fully_qualified)
+        .bind(&name)
+        .bind(&namespace_key)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| DbError::Database(e.to_string()))?;
@@ -463,20 +476,33 @@ impl Database for PostgresDb {
 
     async fn search_symbols(&self, request: SearchRequest) -> Result<SearchResponse, DbError> {
         let mut qb = QueryBuilder::new(
-            "SELECT s.id, s.symbol, s.namespace, COALESCE(def.kind, 'definition') AS kind, \
-                    CASE WHEN s.namespace IS NULL THEN s.symbol ELSE s.namespace || '::' || s.symbol END AS fully_qualified, \
-                    cb.language, f.repository, f.commit_sha, f.file_path, def.line, def.column \
+            "SELECT s.id, \
+                    s.name AS symbol, \
+                    NULLIF(def.namespace, '') AS namespace, \
+                    COALESCE(def.kind, 'definition') AS kind, \
+                    CASE \
+                        WHEN def.namespace IS NULL OR def.namespace = '' THEN s.name \
+                        ELSE def.namespace || '::' || s.name \
+                    END AS fully_qualified, \
+                    cb.language, \
+                    f.repository, \
+                    f.commit_sha, \
+                    f.file_path, \
+                    def.line, \
+                    def.column \
              FROM symbols s \
-             JOIN content_blobs cb ON cb.hash = s.content_hash \
              JOIN files f ON f.content_hash = s.content_hash \
+             LEFT JOIN content_blobs cb ON cb.hash = s.content_hash \
              LEFT JOIN LATERAL ( \
-                 SELECT line_number AS line, column_number AS column, kind \
-                 FROM symbol_references sr \
-                 WHERE sr.symbol_id = s.id \
-                 ORDER BY \
-                     CASE WHEN sr.kind IN ('definition', 'declaration') THEN 0 ELSE 1 END, \
-                     line_number, column_number \
-                 LIMIT 1 \
+                 SELECT sr.kind, \
+                        sr.line_number AS line, \
+                        sr.column_number AS column, \
+                        sn.namespace \
+                   FROM symbol_references sr \
+                   JOIN symbol_namespaces sn ON sn.id = sr.namespace_id \
+                  WHERE sr.symbol_id = s.id \
+                  ORDER BY (sr.kind = 'definition') DESC, sr.line_number, sr.column_number \
+                  LIMIT 1 \
              ) def ON TRUE",
         );
 
@@ -506,20 +532,20 @@ impl Database for PostgresDb {
         }
 
         if let Some(name) = &request.name {
-            qb.push(" AND s.symbol ILIKE ")
+            qb.push(" AND s.name ILIKE ")
                 .push_bind(format!("%{}%", name));
         }
 
         if let Some(regex) = &request.name_regex {
-            qb.push(" AND s.symbol ~* ").push_bind(regex);
+            qb.push(" AND s.name ~* ").push_bind(regex);
         }
 
         if let Some(namespace) = &request.namespace {
-            qb.push(" AND s.namespace = ").push_bind(namespace);
+            qb.push(" AND def.namespace = ").push_bind(namespace);
         }
 
         if let Some(prefix) = &request.namespace_prefix {
-            qb.push(" AND s.namespace LIKE ")
+            qb.push(" AND def.namespace LIKE ")
                 .push_bind(format!("{}%", prefix));
         }
 
@@ -555,7 +581,7 @@ impl Database for PostgresDb {
         }
 
         let limit = request.limit.unwrap_or(100).clamp(1, 1000);
-        qb.push(" ORDER BY s.symbol ASC LIMIT ").push_bind(limit);
+        qb.push(" ORDER BY s.name ASC LIMIT ").push_bind(limit);
 
         let rows: Vec<SymbolRow> = qb
             .build_query_as()
@@ -572,10 +598,11 @@ impl Database for PostgresDb {
             if !symbol_ids.is_empty() {
                 let lookup: Vec<i32> = symbol_ids.into_iter().collect();
                 let ref_rows: Vec<ReferenceRow> = sqlx::query_as(
-                    "SELECT sr.symbol_id, s.namespace, s.symbol, sr.kind, \
+                    "SELECT sr.symbol_id, NULLIF(sn.namespace, '') AS namespace, s.name AS symbol, sr.kind, \
                             sr.line_number AS line, sr.column_number AS column \
                      FROM symbol_references sr \
                      JOIN symbols s ON s.id = sr.symbol_id \
+                     JOIN symbol_namespaces sn ON sn.id = sr.namespace_id \
                      WHERE sr.symbol_id = ANY($1)",
                 )
                 .bind(&lookup)
@@ -594,10 +621,18 @@ impl Database for PostgresDb {
 
         let needle_lower = request.name.as_ref().map(|s| s.to_lowercase());
         let needle_lower_ref = needle_lower.as_deref();
+        let namespace_hint = request
+            .namespace
+            .clone()
+            .or_else(|| request.namespace_prefix.clone());
+        let namespace_hint_ref = namespace_hint.as_deref();
 
         let mut scored_rows: Vec<(f32, SymbolRow)> = rows
             .into_iter()
-            .map(|row| (score_symbol_row(&row, needle_lower_ref), row))
+            .map(|row| {
+                let score = score_symbol_row(&row, needle_lower_ref, namespace_hint_ref);
+                (score, row)
+            })
             .collect();
 
         scored_rows.sort_by(|a, b| {
@@ -615,7 +650,11 @@ impl Database for PostgresDb {
                             name: r.symbol.clone(),
                             namespace: r.namespace.clone(),
                             kind: r.kind.clone(),
-                            fully_qualified: row.fully_qualified.clone(),
+                            fully_qualified: r
+                                .namespace
+                                .as_ref()
+                                .map(|ns| format!("{}::{}", ns, r.symbol))
+                                .unwrap_or_else(|| r.symbol.clone()),
                             line: r.line.max(0) as usize,
                             column: r.column.max(0) as usize,
                         })
@@ -1301,22 +1340,15 @@ impl PostgresDb {
         }
 
         let deduped = dedup_by_key(symbols, |symbol| {
-            (
-                symbol.content_hash.clone(),
-                symbol.namespace.clone(),
-                symbol.symbol.clone(),
-            )
+            (symbol.content_hash.clone(), symbol.name.clone())
         });
 
         for chunk in deduped.chunks(INSERT_BATCH_SIZE) {
-            let mut qb =
-                QueryBuilder::new("INSERT INTO symbols (content_hash, namespace, symbol) ");
+            let mut qb = QueryBuilder::new("INSERT INTO symbols (content_hash, name) ");
             qb.push_values(chunk.iter().copied(), |mut b, symbol| {
-                b.push_bind(&symbol.content_hash)
-                    .push_bind(&symbol.namespace)
-                    .push_bind(&symbol.symbol);
+                b.push_bind(&symbol.content_hash).push_bind(&symbol.name);
             });
-            qb.push(" ON CONFLICT (content_hash, namespace, symbol) DO NOTHING");
+            qb.push(" ON CONFLICT (content_hash, name) DO NOTHING");
 
             qb.build()
                 .execute(tx.as_mut())
@@ -1348,28 +1380,59 @@ impl PostgresDb {
         });
 
         for chunk in deduped.chunks(INSERT_BATCH_SIZE) {
+            let mut namespaces: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            for reference in chunk.iter().copied() {
+                let namespace = reference
+                    .namespace
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("");
+                namespaces.insert(namespace.to_string());
+            }
+
+            if !namespaces.is_empty() {
+                let mut ns_qb = QueryBuilder::new("INSERT INTO symbol_namespaces (namespace) ");
+                ns_qb.push_values(namespaces.iter(), |mut b, namespace| {
+                    b.push_bind(namespace);
+                });
+                ns_qb.push(" ON CONFLICT (namespace) DO NOTHING");
+
+                ns_qb
+                    .build()
+                    .execute(tx.as_mut())
+                    .await
+                    .map_err(|e| DbError::Database(e.to_string()))?;
+            }
+
             let mut qb = QueryBuilder::new(
-                "WITH data (content_hash, namespace, symbol, kind, line_number, column_number) AS (",
+                "WITH data (content_hash, namespace, name, kind, line_number, column_number) AS (",
             );
             qb.push_values(chunk.iter().copied(), |mut b, reference| {
                 let line: i32 = reference.line.try_into().unwrap_or(i32::MAX);
                 let column: i32 = reference.column.try_into().unwrap_or(i32::MAX);
+                let namespace = reference
+                    .namespace
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("");
                 b.push_bind(&reference.content_hash)
-                    .push_bind(&reference.namespace)
+                    .push_bind(namespace)
                     .push_bind(&reference.name)
                     .push_bind(&reference.kind)
                     .push_bind(line)
                     .push_bind(column);
             });
             qb.push(
-                ") INSERT INTO symbol_references (symbol_id, kind, line_number, column_number) \
-                 SELECT s.id, data.kind, data.line_number, data.column_number \
+                ") INSERT INTO symbol_references (symbol_id, namespace_id, kind, line_number, column_number) \
+                 SELECT s.id, sn.id, data.kind, data.line_number, data.column_number \
                  FROM data \
                  JOIN symbols s \
                    ON s.content_hash = data.content_hash \
-                  AND s.symbol = data.symbol \
-                  AND (s.namespace IS NOT DISTINCT FROM data.namespace) \
-                 ON CONFLICT (symbol_id, line_number, column_number, kind) DO NOTHING",
+                  AND s.name = data.name \
+                 JOIN symbol_namespaces sn \
+                   ON sn.namespace = data.namespace \
+                 ON CONFLICT (symbol_id, namespace_id, line_number, column_number, kind) DO NOTHING",
             );
 
             qb.build()
@@ -1636,23 +1699,40 @@ async fn load_symbol_metadata(
 
     if !symbol_terms.is_empty() {
         let symbol_rows: Vec<(String, Option<String>, String, String)> = sqlx::query_as(
-            "SELECT s.content_hash, COALESCE(def.kind, 'definition') AS kind, s.symbol, \
-                    COALESCE(s.namespace || '::' || s.symbol, s.symbol) AS fully_qualified \
-             FROM symbols s \
-             LEFT JOIN LATERAL ( \
-                 SELECT kind \
-                 FROM symbol_references sr \
-                 WHERE sr.symbol_id = s.id \
-                   AND sr.kind IN ('definition', 'declaration') \
-                 ORDER BY CASE WHEN sr.kind = 'definition' THEN 0 ELSE 1 END \
-                 LIMIT 1 \
-             ) def ON TRUE \
-             WHERE s.content_hash = ANY($1) \
-               AND ( \
-                    s.symbol = ANY($2) \
-                    OR COALESCE(s.namespace || '::' || s.symbol, s.symbol) = ANY($2) \
-                    OR LOWER(s.symbol) = ANY($3) \
-                    OR LOWER(COALESCE(s.namespace || '::' || s.symbol, s.symbol)) = ANY($3) \
+            "SELECT s.content_hash,
+                    def.kind,
+                    s.name,
+                    CASE
+                        WHEN def.namespace IS NULL OR def.namespace = '' THEN s.name
+                        ELSE def.namespace || '::' || s.name
+                    END AS fully_qualified
+             FROM symbols s
+             LEFT JOIN LATERAL (
+                 SELECT sr.kind,
+                        sn.namespace
+                   FROM symbol_references sr
+                   JOIN symbol_namespaces sn ON sn.id = sr.namespace_id
+                  WHERE sr.symbol_id = s.id
+                    AND sr.kind IN ('definition', 'declaration')
+                  ORDER BY CASE WHEN sr.kind = 'definition' THEN 0 ELSE 1 END
+                  LIMIT 1
+             ) def ON TRUE
+             WHERE s.content_hash = ANY($1)
+               AND (
+                    s.name = ANY($2)
+                    OR (
+                        CASE
+                            WHEN def.namespace IS NULL OR def.namespace = '' THEN s.name
+                            ELSE def.namespace || '::' || s.name
+                        END
+                    ) = ANY($2)
+                    OR LOWER(s.name) = ANY($3)
+                    OR LOWER(
+                        CASE
+                            WHEN def.namespace IS NULL OR def.namespace = '' THEN s.name
+                            ELSE def.namespace || '::' || s.name
+                        END
+                    ) = ANY($3)
                )",
         )
         .bind(content_hashes)
@@ -1693,16 +1773,32 @@ async fn load_symbol_metadata(
 
     if !symbol_terms.is_empty() {
         let reference_rows: Vec<(String, Option<String>, String, String)> = sqlx::query_as(
-            "SELECT s.content_hash, sr.kind, s.symbol, \
-                    COALESCE(s.namespace || '::' || s.symbol, s.symbol) AS fully_qualified \
-             FROM symbol_references sr \
-             JOIN symbols s ON s.id = sr.symbol_id \
-             WHERE s.content_hash = ANY($1) \
-               AND ( \
-                    s.symbol = ANY($2) \
-                    OR COALESCE(s.namespace || '::' || s.symbol, s.symbol) = ANY($2) \
-                    OR LOWER(s.symbol) = ANY($3) \
-                    OR LOWER(COALESCE(s.namespace || '::' || s.symbol, s.symbol)) = ANY($3) \
+            "SELECT s.content_hash,
+                    sr.kind,
+                    s.name,
+                    CASE
+                        WHEN sn.namespace IS NULL OR sn.namespace = '' THEN s.name
+                        ELSE sn.namespace || '::' || s.name
+                    END AS fully_qualified
+             FROM symbol_references sr
+             JOIN symbols s ON s.id = sr.symbol_id
+             JOIN symbol_namespaces sn ON sn.id = sr.namespace_id
+             WHERE s.content_hash = ANY($1)
+               AND (
+                    s.name = ANY($2)
+                    OR (
+                        CASE
+                            WHEN sn.namespace IS NULL OR sn.namespace = '' THEN s.name
+                            ELSE sn.namespace || '::' || s.name
+                        END
+                    ) = ANY($2)
+                    OR LOWER(s.name) = ANY($3)
+                    OR LOWER(
+                        CASE
+                            WHEN sn.namespace IS NULL OR sn.namespace = '' THEN s.name
+                            ELSE sn.namespace || '::' || s.name
+                        END
+                    ) = ANY($3)
                )",
         )
         .bind(content_hashes)
@@ -1732,7 +1828,11 @@ async fn load_symbol_metadata(
     Ok(meta_map)
 }
 
-fn score_symbol_row(row: &SymbolRow, needle_lower: Option<&str>) -> f32 {
+fn score_symbol_row(
+    row: &SymbolRow,
+    needle_lower: Option<&str>,
+    namespace_hint: Option<&str>,
+) -> f32 {
     let role = row.kind.as_deref().unwrap_or("definition");
     let mut score = match role {
         "definition" => 120.0,
@@ -1756,5 +1856,86 @@ fn score_symbol_row(row: &SymbolRow, needle_lower: Option<&str>) -> f32 {
         }
     }
 
+    if let Some(namespace_filter) = namespace_hint {
+        if namespace_filter.is_empty() {
+            if row.namespace.is_none() {
+                score += 70.0;
+            } else {
+                score -= 15.0;
+            }
+        } else if let Some(ns) = row.namespace.as_deref() {
+            let similarity = namespace_similarity(ns, namespace_filter);
+            if similarity > 0.0 {
+                score += 95.0 * similarity;
+            } else {
+                score -= 20.0;
+            }
+        } else {
+            score -= 25.0;
+        }
+    } else if row.namespace.is_some() {
+        // Small bump for symbols that carry namespace context even without explicit filter.
+        score += 5.0;
+    }
+
     score
+}
+
+fn split_fully_qualified(value: &str) -> (Option<String>, String) {
+    if let Some(idx) = value.rfind("::") {
+        let (ns, name) = value.split_at(idx);
+        let name = name.trim_start_matches("::").to_string();
+        let namespace = if ns.is_empty() {
+            None
+        } else {
+            Some(ns.to_string())
+        };
+        (namespace, name)
+    } else {
+        (None, value.to_string())
+    }
+}
+
+fn namespace_similarity(a: &str, b: &str) -> f32 {
+    if a == b {
+        return 1.0;
+    }
+
+    let parts_a: Vec<&str> = a
+        .split("::")
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    let parts_b: Vec<&str> = b
+        .split("::")
+        .filter(|segment| !segment.is_empty())
+        .collect();
+
+    if parts_a.is_empty() || parts_b.is_empty() {
+        return 0.0;
+    }
+
+    let shared_prefix = parts_a
+        .iter()
+        .zip(parts_b.iter())
+        .take_while(|(lhs, rhs)| *lhs == *rhs)
+        .count();
+    if shared_prefix > 0 {
+        let max_len = parts_a.len().max(parts_b.len()) as f32;
+        return (shared_prefix as f32) / max_len;
+    }
+
+    if parts_a.last() == parts_b.last() {
+        return 0.4;
+    }
+
+    let set_a: std::collections::HashSet<&str> = parts_a.iter().copied().collect();
+    let set_b: std::collections::HashSet<&str> = parts_b.iter().copied().collect();
+    let intersection = set_a.intersection(&set_b).count() as f32;
+    let union = set_a.union(&set_b).count() as f32;
+
+    if union > 0.0 {
+        (intersection / union).min(0.6)
+    } else {
+        0.0
+    }
 }

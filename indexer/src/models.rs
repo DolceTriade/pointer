@@ -13,7 +13,7 @@ pub struct ContentBlob {
 pub struct SymbolRecord {
     pub content_hash: String,
     pub namespace: Option<String>,
-    pub symbol: String,
+    pub name: String,
     pub fully_qualified: String,
 }
 
