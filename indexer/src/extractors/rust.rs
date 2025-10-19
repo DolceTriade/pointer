@@ -1,8 +1,8 @@
 use tree_sitter::{Node, Parser};
 
-use super::ExtractedSymbol;
+use super::{ExtractedReference, ExtractedSymbol, Extraction};
 
-pub fn extract(source: &str) -> Vec<ExtractedSymbol> {
+pub fn extract(source: &str) -> Extraction {
     let mut parser = Parser::new();
     parser
         .set_language(&tree_sitter_rust::LANGUAGE.into())
@@ -10,12 +10,13 @@ pub fn extract(source: &str) -> Vec<ExtractedSymbol> {
 
     let tree = match parser.parse(source, None) {
         Some(tree) => tree,
-        None => return Vec::new(),
+        None => return Extraction::default(),
     };
 
     let root = tree.root_node();
     let mut stack = vec![root];
     let mut symbols = Vec::new();
+    let mut references = Vec::new();
     let source_bytes = source.as_bytes();
 
     while let Some(node) = stack.pop() {
@@ -31,7 +32,43 @@ pub fn extract(source: &str) -> Vec<ExtractedSymbol> {
         }
     }
 
-    symbols
+    // Collect references (identifiers that are not symbols)
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "identifier"
+            || node.kind() == "type_identifier"
+            || node.kind() == "field_identifier"
+        {
+            if let Ok(text) = node.utf8_text(source_bytes) {
+                let name = text.trim();
+                if !name.is_empty()
+                    && !name.starts_with("self")
+                    && name != "Self"
+                    && name != "super"
+                    && name != "crate"
+                {
+                    let pos = node.start_position();
+                    references.push(ExtractedReference {
+                        name: name.to_string(),
+                        kind: Some("reference".to_string()),
+                        namespace: None,
+                        line: pos.row.saturating_add(1) as usize,
+                        column: pos.column.saturating_add(1) as usize,
+                    });
+                }
+            }
+        }
+
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+
+    Extraction {
+        symbols,
+        references,
+    }
 }
 
 fn collect_symbols(node: &Node, source: &[u8]) -> Vec<ExtractedSymbol> {
@@ -249,7 +286,8 @@ mod tests {
             }
         "#;
 
-        let mut symbols = extract(source);
+        let extraction = extract(source);
+        let mut symbols = extraction.symbols;
         symbols.sort_by(|a, b| a.name.cmp(&b.name));
 
         assert!(symbols.iter().any(|s| s.name == "foo" && s.kind == "mod"));

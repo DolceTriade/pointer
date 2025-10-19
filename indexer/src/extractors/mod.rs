@@ -16,14 +16,14 @@ mod typescript;
 #[derive(Debug, Clone)]
 pub struct ExtractedSymbol {
     pub name: String,
-    pub kind: String,
+    pub kind: String, // e.g., "fn_def", "var_decl", "struct", etc.
     pub namespace: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ExtractedReference {
     pub name: String,
-    pub kind: Option<String>,
+    pub kind: Option<String>, // e.g., "definition", "reference", "declaration"
     pub namespace: Option<String>,
     pub line: usize,
     pub column: usize,
@@ -35,290 +35,112 @@ pub struct Extraction {
     pub references: Vec<ExtractedReference>,
 }
 
+// Define the trait for language-specific indexing
+pub trait LanguageIndexer {
+    fn index(&self, source: &str) -> Extraction;
+}
+
+// Implement the trait for each language
+pub struct CIndexer;
+pub struct CppIndexer;
+pub struct GoIndexer;
+pub struct JavaIndexer;
+pub struct JavaScriptIndexer;
+pub struct NixIndexer;
+pub struct ObjectiveCIndexer;
+pub struct ProtobufIndexer;
+pub struct PythonIndexer;
+pub struct RustIndexer;
+pub struct SwiftIndexer;
+pub struct TypeScriptIndexer;
+
+impl LanguageIndexer for CIndexer {
+    fn index(&self, source: &str) -> Extraction {
+        c::extract(source)
+    }
+}
+
+impl LanguageIndexer for CppIndexer {
+    fn index(&self, source: &str) -> Extraction {
+        cpp::extract(source)
+    }
+}
+
+impl LanguageIndexer for GoIndexer {
+    fn index(&self, source: &str) -> Extraction {
+        go::extract(source)
+    }
+}
+
+impl LanguageIndexer for JavaIndexer {
+    fn index(&self, source: &str) -> Extraction {
+        java::extract(source)
+    }
+}
+
+impl LanguageIndexer for JavaScriptIndexer {
+    fn index(&self, source: &str) -> Extraction {
+        javascript::extract(source)
+    }
+}
+
+impl LanguageIndexer for NixIndexer {
+    fn index(&self, source: &str) -> Extraction {
+        nix::extract(source)
+    }
+}
+
+impl LanguageIndexer for ObjectiveCIndexer {
+    fn index(&self, source: &str) -> Extraction {
+        objective_c::extract(source)
+    }
+}
+
+impl LanguageIndexer for ProtobufIndexer {
+    fn index(&self, source: &str) -> Extraction {
+        protobuf::extract(source)
+    }
+}
+
+impl LanguageIndexer for PythonIndexer {
+    fn index(&self, source: &str) -> Extraction {
+        python::extract(source)
+    }
+}
+
+impl LanguageIndexer for RustIndexer {
+    fn index(&self, source: &str) -> Extraction {
+        rust::extract(source)
+    }
+}
+
+impl LanguageIndexer for SwiftIndexer {
+    fn index(&self, source: &str) -> Extraction {
+        swift::extract(source)
+    }
+}
+
+impl LanguageIndexer for TypeScriptIndexer {
+    fn index(&self, source: &str) -> Extraction {
+        typescript::extract(source)
+    }
+}
+
+// Main extraction function using the new architecture
 pub fn extract(language: &str, source: &str) -> Extraction {
-    let symbols = match language {
-        "c" => c::extract(source),
-        "c++" | "cpp" => cpp::extract(source),
-        "go" => go::extract(source),
-        "js" | "javascript" => javascript::extract(source),
-        "java" | "jvm" => java::extract(source),
-        "nix" => nix::extract(source),
-        "objc" | "objective-c" | "objectivec" => objective_c::extract(source),
-        "proto" | "protobuf" => protobuf::extract(source),
-        "py" | "python" => python::extract(source),
-        "rust" => rust::extract(source),
-        "swift" => swift::extract(source),
-        "ts" | "typescript" => typescript::extract(source),
-        _ => Vec::new(),
-    };
-
-    let references = collect_references(language, source);
-
-    Extraction {
-        symbols,
-        references,
-    }
-}
-
-fn collect_references(language: &str, source: &str) -> Vec<ExtractedReference> {
-    let mut parser = match parser_for_language(language) {
-        Some(parser) => parser,
-        None => return Vec::new(),
-    };
-
-    let tree = match parser.parse(source, None) {
-        Some(tree) => tree,
-        None => return Vec::new(),
-    };
-
-    let root = tree.root_node();
-    let mut refs = Vec::new();
-    let mut stack = vec![root];
-    let source_bytes = source.as_bytes();
-    let identifier_kinds = identifier_kinds(language);
-
-    while let Some(node) = stack.pop() {
-        if identifier_kinds.iter().any(|&kind| kind == node.kind()) {
-            if let Ok(text) = node.utf8_text(source_bytes) {
-                let name = text.trim();
-                if !name.is_empty() {
-                    let pos = node.start_position();
-                    let reference_kind = classify_reference_kind(language, &node);
-                    refs.push(ExtractedReference {
-                        name: name.to_string(),
-                        kind: Some(reference_kind.to_string()),
-                        namespace: None,
-                        line: pos.row.saturating_add(1) as usize,
-                        column: pos.column.saturating_add(1) as usize,
-                    });
-                }
-            }
-        }
-
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            stack.push(child);
-        }
-    }
-
-    refs
-}
-
-fn classify_reference_kind(language: &str, node: &Node) -> &'static str {
-    let mut current = node.parent();
-    let mut depth = 0;
-    let definitions = definition_parent_kinds(language);
-    let restrict_to_name_fields = matches!(
-        language,
-        "js" | "javascript" | "ts" | "typescript" | "swift" | "objc" | "objective-c" | "objectivec"
-    );
-
-    while let Some(parent) = current {
-        if definitions.iter().any(|kind| *kind == parent.kind()) {
-            if !restrict_to_name_fields {
-                return "definition";
-            }
-
-            if let Some(field) = field_name_for_child(&parent, node) {
-                if matches!(field.as_str(), "name" | "property") {
-                    return "definition";
-                }
-            }
-        }
-
-        depth += 1;
-        if depth >= 6 {
-            break;
-        }
-        current = parent.parent();
-    }
-
-    "reference"
-}
-
-fn definition_parent_kinds(language: &str) -> &'static [&'static str] {
     match language {
-        "rust" => &[
-            "function_item",
-            "method_item",
-            "struct_item",
-            "enum_item",
-            "trait_item",
-            "mod_item",
-            "const_item",
-            "static_item",
-            "type_item",
-            "field_declaration",
-            "tuple_field_declaration",
-            "let_declaration",
-            "impl_item",
-        ],
-        "go" => &[
-            "function_declaration",
-            "method_declaration",
-            "type_spec",
-            "short_var_declaration",
-            "var_spec",
-            "const_spec",
-        ],
-        "js" | "javascript" => &[
-            "function_declaration",
-            "generator_function_declaration",
-            "class_declaration",
-            "method_definition",
-            "public_field_definition",
-            "property_definition",
-            "lexical_declaration",
-            "variable_declaration",
-            "assignment_pattern",
-        ],
-        "ts" | "typescript" => &[
-            "function_declaration",
-            "generator_function_declaration",
-            "class_declaration",
-            "interface_declaration",
-            "type_alias_declaration",
-            "enum_declaration",
-            "namespace_declaration",
-            "internal_module",
-            "method_signature",
-            "method_definition",
-            "property_signature",
-            "property_declaration",
-            "lexical_declaration",
-            "variable_declaration",
-        ],
-        "python" | "py" => &["function_definition", "class_definition", "assignment"],
-        "java" | "jvm" => &[
-            "class_declaration",
-            "interface_declaration",
-            "enum_declaration",
-            "record_declaration",
-            "annotation_type_declaration",
-            "method_declaration",
-            "constructor_declaration",
-            "field_declaration",
-            "local_variable_declaration",
-        ],
-        "c" => &[
-            "function_definition",
-            "struct_specifier",
-            "union_specifier",
-            "enum_specifier",
-            "declaration",
-            "preproc_def",
-        ],
-        "c++" | "cpp" => &[
-            "function_definition",
-            "struct_specifier",
-            "union_specifier",
-            "class_specifier",
-            "namespace_definition",
-            "field_declaration",
-            "simple_declaration",
-            "preproc_def",
-            "enum_specifier",
-        ],
-        "objc" | "objective-c" | "objectivec" => &[
-            "class_interface",
-            "class_implementation",
-            "category_interface",
-            "category_implementation",
-            "protocol_declaration",
-            "function_definition",
-            "method_definition",
-            "property_declaration",
-            "declaration",
-        ],
-        "swift" => &[
-            "class_declaration",
-            "struct_declaration",
-            "enum_declaration",
-            "protocol_declaration",
-            "extension_declaration",
-            "function_declaration",
-            "initializer_declaration",
-            "deinitializer_declaration",
-            "variable_declaration",
-            "property_declaration",
-        ],
-        "proto" | "protobuf" => &["message", "enum", "service", "rpc", "extend", "field"],
-        "nix" => &["binding"],
-        _ => &[],
-    }
-}
-
-fn field_name_for_child(parent: &Node, child: &Node) -> Option<String> {
-    for i in 0..parent.child_count() {
-        if let Some(candidate) = parent.child(i) {
-            if candidate == *child {
-                return parent.field_name_for_child(i as u32).map(|s| s.to_string());
-            }
-        }
-    }
-    None
-}
-
-fn parser_for_language(language: &str) -> Option<Parser> {
-    let mut parser = Parser::new();
-
-    let language_result = match language {
-        "c" => parser.set_language(&tree_sitter_c::LANGUAGE.into()),
-        "c++" | "cpp" => parser.set_language(&tree_sitter_cpp::LANGUAGE.into()),
-        "go" => parser.set_language(&tree_sitter_go::LANGUAGE.into()),
-        "js" | "javascript" => {
-            parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
-        }
-        "java" | "jvm" => parser.set_language(&tree_sitter_java::LANGUAGE.into()),
-        "nix" => parser.set_language(&tree_sitter_nix::LANGUAGE.into()),
-        "objc" | "objective-c" | "objectivec" => {
-            parser.set_language(&tree_sitter_objc::LANGUAGE.into())
-        }
-        "proto" | "protobuf" => parser.set_language(&tree_sitter_proto::LANGUAGE.into()),
-        "py" | "python" => parser.set_language(&tree_sitter_python::LANGUAGE.into()),
-        "rust" => parser.set_language(&tree_sitter_rust::LANGUAGE.into()),
-        "swift" => parser.set_language(&tree_sitter_swift::LANGUAGE.into()),
-        "ts" | "typescript" => {
-            parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
-        }
-        _ => return None,
-    };
-
-    language_result.ok()?;
-    Some(parser)
-}
-
-fn identifier_kinds(language: &str) -> &'static [&'static str] {
-    match language {
-        "c" | "proto" | "protobuf" => &["identifier", "field_identifier"],
-        "c++" | "cpp" => &[
-            "identifier",
-            "field_identifier",
-            "scoped_identifier",
-            "type_identifier",
-        ],
-        "go" => &["identifier"],
-        "js" | "javascript" => &[
-            "identifier",
-            "property_identifier",
-            "shorthand_property_identifier",
-        ],
-        "java" | "jvm" => &["identifier"],
-        "nix" => &["identifier"],
-        "objc" | "objective-c" | "objectivec" => &["identifier", "field_identifier"],
-        "py" | "python" => &["identifier"],
-        "rust" => &["identifier", "type_identifier", "field_identifier"],
-        "swift" => &[
-            "identifier",
-            "simple_identifier",
-            "bound_identifier",
-            "identifier_pattern",
-        ],
-        "ts" | "typescript" => &[
-            "identifier",
-            "property_identifier",
-            "shorthand_property_identifier",
-        ],
-        _ => &["identifier"],
+        "c" => CIndexer.index(source),
+        "c++" | "cpp" => CppIndexer.index(source),
+        "go" => GoIndexer.index(source),
+        "js" | "javascript" => JavaScriptIndexer.index(source),
+        "java" | "jvm" => JavaIndexer.index(source),
+        "nix" => NixIndexer.index(source),
+        "objc" | "objective-c" | "objectivec" => ObjectiveCIndexer.index(source),
+        "proto" | "protobuf" => ProtobufIndexer.index(source),
+        "py" | "python" => PythonIndexer.index(source),
+        "rust" => RustIndexer.index(source),
+        "swift" => SwiftIndexer.index(source),
+        "ts" | "typescript" => TypeScriptIndexer.index(source),
+        _ => Extraction::default(),
     }
 }

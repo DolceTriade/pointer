@@ -611,8 +611,7 @@ impl Database for PostgresDb {
         }
 
         if let Some(name) = &request.name {
-            qb.push(" AND s.name = ")
-                .push_bind(name);
+            qb.push(" AND s.name = ").push_bind(name);
         }
 
         if let Some(regex) = &request.name_regex {

@@ -456,7 +456,6 @@ async fn ingest_report(pool: &PgPool, report: IndexReport) -> Result<(), ApiErro
 
 const INSERT_BATCH_SIZE: usize = 1000;
 
-
 fn dedup_by_key<'a, T, K, F>(items: &'a [T], mut key: F) -> Vec<&'a T>
 where
     K: Eq + std::hash::Hash,
