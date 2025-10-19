@@ -1,5 +1,5 @@
 #[cfg(feature = "ssr")]
-use crate::db::{SnippetRequest, SymbolReferenceRequest};
+use crate::db::SnippetRequest;
 use crate::db::{
     SnippetResponse, TreeEntry,
     models::{FileReference, SymbolResult},
@@ -244,7 +244,7 @@ pub async fn fetch_symbol_insights(
         commit_sha: Some(commit.clone()),
         path: None,
         path_regex: None,
-        include_references: Some(false),
+        include_references: Some(true),
         limit: Some(50),
     };
 
@@ -290,28 +290,30 @@ pub async fn fetch_symbol_insights(
 
     let mut matches = Vec::with_capacity(search_response.symbols.len());
 
-    for definition in search_response.symbols {
-        let references = db
-            .get_symbol_references(SymbolReferenceRequest {
-                repository: definition.repository.clone(),
-                commit_sha: definition.commit_sha.clone(),
-                fully_qualified: definition.fully_qualified.clone(),
-                file_path: Some(definition.file_path.clone()),
-                line: definition.line,
-                column: definition.column,
-            })
-            .await
-            .map_err(|e| ServerFnError::new(e.to_string()))?;
+    for mut definition in search_response.symbols {
+        let references = definition.references.take().unwrap_or_default();
 
-        let mut enriched = Vec::with_capacity(references.references.len());
-        for reference in references.references {
-            let line = reference.line.max(1) as u32;
+        let mut enriched = Vec::with_capacity(references.len());
+        for reference in references {
+            let line = reference.line.max(1);
+            let file_reference = FileReference {
+                repository: reference.repository.clone(),
+                commit_sha: reference.commit_sha.clone(),
+                file_path: reference.file_path.clone(),
+                namespace: reference.namespace.clone(),
+                name: reference.name.clone(),
+                kind: reference.kind.clone(),
+                line: reference.line.try_into().unwrap_or(i32::MAX),
+                column: reference.column.try_into().unwrap_or(i32::MAX),
+            };
+
+            let snippet_line = line.max(1) as u32;
             let snippet = match db
                 .get_file_snippet(SnippetRequest {
-                    repository: reference.repository.clone(),
-                    commit_sha: reference.commit_sha.clone(),
-                    file_path: reference.file_path.clone(),
-                    line,
+                    repository: file_reference.repository.clone(),
+                    commit_sha: file_reference.commit_sha.clone(),
+                    file_path: file_reference.file_path.clone(),
+                    line: snippet_line,
                     context: Some(2),
                 })
                 .await
@@ -320,15 +322,18 @@ pub async fn fetch_symbol_insights(
                 Err(err) => {
                     tracing::warn!(
                         "Failed to fetch snippet for {}:{}:{}: {err}",
-                        reference.repository,
-                        reference.file_path,
+                        file_reference.repository,
+                        file_reference.file_path,
                         line
                     );
                     None
                 }
             };
 
-            enriched.push(SymbolReferenceWithSnippet { reference, snippet });
+            enriched.push(SymbolReferenceWithSnippet {
+                reference: file_reference,
+                snippet,
+            });
         }
 
         matches.push(SymbolMatch {

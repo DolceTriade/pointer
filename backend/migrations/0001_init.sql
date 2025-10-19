@@ -107,14 +107,12 @@ CREATE OR REPLACE FUNCTION symbol_weight(
           END
         + CASE
             WHEN needle IS NULL OR needle = '' THEN 0
-            WHEN LOWER(symbol_name) = LOWER(needle) THEN 40
-            WHEN POSITION(LOWER(needle) IN LOWER(symbol_name)) > 0 THEN 15
+            WHEN symbol_name = needle THEN 40
             ELSE 0
           END
         + CASE
             WHEN needle IS NULL OR needle = '' THEN 0
-            WHEN LOWER(fully_qualified) = LOWER(needle) THEN 35
-            WHEN POSITION(LOWER(needle) IN LOWER(fully_qualified)) > 0 THEN 12
+            WHEN fully_qualified = needle THEN 35
             ELSE 0
           END
         + CASE
@@ -129,7 +127,7 @@ CREATE OR REPLACE FUNCTION symbol_weight(
                     WHEN namespace = namespace_filter THEN 95
                     WHEN namespace LIKE namespace_filter || '::%' THEN 75
                     WHEN namespace_filter LIKE namespace || '::%' THEN 55
-                    ELSE GREATEST(similarity(LOWER(namespace), LOWER(namespace_filter)) * 85 - 20, -20)
+                    ELSE -20
                 END
             )
           END

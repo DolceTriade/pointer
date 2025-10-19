@@ -6,7 +6,7 @@ use crate::db::{
 };
 use crate::dsl::{CaseSensitivity, ContentPredicate, TextSearchPlan, TextSearchRequest};
 use async_trait::async_trait;
-use sqlx::{PgPool, Postgres, QueryBuilder, Transaction};
+use sqlx::{PgPool, Postgres, QueryBuilder, Transaction, types::Json};
 use std::{
     collections::{HashMap, HashSet},
     io::Read,
@@ -523,7 +523,7 @@ impl Database for PostgresDb {
     }
 
     async fn search_symbols(&self, request: SearchRequest) -> Result<SearchResponse, DbError> {
-        let needle_lower = request.name.as_ref().map(|s| s.to_lowercase());
+        let needle = request.name.clone();
         let namespace_hint = request
             .namespace
             .clone()
@@ -579,7 +579,7 @@ impl Database for PostgresDb {
                         COALESCE(sr.kind, 'definition'), \
                         ",
         );
-        qb.push_bind(needle_lower.as_deref());
+        qb.push_bind(needle.as_deref());
         qb.push(
             ", \
                         ",
@@ -611,12 +611,12 @@ impl Database for PostgresDb {
         }
 
         if let Some(name) = &request.name {
-            qb.push(" AND s.name ILIKE ")
-                .push_bind(format!("%{}%", name));
+            qb.push(" AND s.name = ")
+                .push_bind(name);
         }
 
         if let Some(regex) = &request.name_regex {
-            qb.push(" AND s.name ~* ").push_bind(regex);
+            qb.push(" AND s.name ~ ").push_bind(regex);
         }
 
         if let Some(namespace) = &request.namespace {
@@ -668,11 +668,45 @@ impl Database for PostgresDb {
                  (sr.kind = 'definition') DESC, \
                  sr.line_number, \
                  sr.column_number \
-             ) \
-             SELECT id, symbol, namespace, kind, fully_qualified, language, repository, commit_sha, file_path, line_number, column_number, score \
-             FROM ranked \
-             ORDER BY score DESC, symbol ASC LIMIT ",
+             ) ",
         );
+
+        let include_refs = request.include_references.unwrap_or(false);
+        if include_refs {
+            qb.push(
+                "SELECT ranked.id, ranked.symbol, ranked.namespace, ranked.kind, ranked.fully_qualified, ranked.language, \
+                        ranked.repository, ranked.commit_sha, ranked.file_path, ranked.line_number, ranked.column_number, ranked.score, \
+                        refs.references \
+                 FROM ranked \
+                 LEFT JOIN LATERAL ( \
+                     SELECT jsonb_agg( \
+                         jsonb_build_object( \
+                             'namespace', NULLIF(sn_all.namespace, ''), \
+                             'name', ranked.symbol, \
+                             'kind', sr_all.kind, \
+                             'line', sr_all.line_number, \
+                             'column', sr_all.column_number, \
+                             'repository', ranked.repository, \
+                             'commit_sha', ranked.commit_sha, \
+                             'file_path', ranked.file_path \
+                         ) ORDER BY sr_all.line_number, sr_all.column_number \
+                     ) AS references \
+                     FROM symbol_references sr_all \
+                     JOIN symbol_namespaces sn_all ON sn_all.id = sr_all.namespace_id \
+                     WHERE sr_all.symbol_id = ranked.id \
+                 ) refs ON TRUE \
+                 ORDER BY ranked.score DESC, ranked.symbol ASC LIMIT ",
+            );
+        } else {
+            qb.push(
+                "SELECT ranked.id, ranked.symbol, ranked.namespace, ranked.kind, ranked.fully_qualified, ranked.language, \
+                        ranked.repository, ranked.commit_sha, ranked.file_path, ranked.line_number, ranked.column_number, ranked.score, \
+                        NULL::jsonb AS references \
+                 FROM ranked \
+                 ORDER BY ranked.score DESC, ranked.symbol ASC LIMIT ",
+            );
+        }
+
         let limit = request.limit.unwrap_or(100).clamp(1, 1000);
         qb.push_bind(limit);
 
@@ -682,52 +716,27 @@ impl Database for PostgresDb {
             .await
             .map_err(|e| DbError::Database(e.to_string()))?;
 
-        let include_refs = request.include_references.unwrap_or(false);
-        let mut reference_map: HashMap<i32, Vec<ReferenceRow>> = HashMap::new();
-
-        if include_refs {
-            let symbol_ids: HashSet<i32> = rows.iter().map(|row| row.id).collect();
-
-            if !symbol_ids.is_empty() {
-                let lookup: Vec<i32> = symbol_ids.into_iter().collect();
-                let ref_rows: Vec<ReferenceRow> = sqlx::query_as(
-                    "SELECT sr.symbol_id, NULLIF(sn.namespace, '') AS namespace, s.name AS symbol, sr.kind, \
-                            sr.line_number AS line, sr.column_number AS column \
-                     FROM symbol_references sr \
-                     JOIN symbols s ON s.id = sr.symbol_id \
-                     JOIN symbol_namespaces sn ON sn.id = sr.namespace_id \
-                     WHERE sr.symbol_id = ANY($1)",
-                )
-                .bind(&lookup)
-                .fetch_all(&self.pool)
-                .await
-                .map_err(|e| DbError::Database(e.to_string()))?;
-
-                for reference in ref_rows {
-                    reference_map
-                        .entry(reference.symbol_id)
-                        .or_default()
-                        .push(reference);
-                }
-            }
-        }
-
         let mut results = Vec::with_capacity(rows.len());
         for row in rows {
             let references = if include_refs {
-                reference_map.get(&row.id).map(|refs| {
-                    refs.iter()
+                row.references.as_ref().map(|refs_json| {
+                    refs_json
+                        .0
+                        .iter()
                         .map(|r| ReferenceResult {
-                            name: r.symbol.clone(),
+                            name: r.name.clone(),
                             namespace: r.namespace.clone(),
                             kind: r.kind.clone(),
                             fully_qualified: r
                                 .namespace
                                 .as_ref()
-                                .map(|ns| format!("{}::{}", ns, r.symbol))
-                                .unwrap_or_else(|| r.symbol.clone()),
-                            line: r.line.max(0) as usize,
-                            column: r.column.max(0) as usize,
+                                .map(|ns| format!("{}::{}", ns, r.name))
+                                .unwrap_or_else(|| r.name.clone()),
+                            repository: r.repository.clone(),
+                            commit_sha: r.commit_sha.clone(),
+                            file_path: r.file_path.clone(),
+                            line: r.line.unwrap_or_default().max(0) as usize,
+                            column: r.column.unwrap_or_default().max(0) as usize,
                         })
                         .collect()
                 })
@@ -1579,6 +1588,7 @@ struct SearchResultRow {
 
 #[derive(sqlx::FromRow)]
 struct SymbolRow {
+    #[allow(dead_code)]
     id: i32,
     symbol: String,
     namespace: Option<String>,
@@ -1594,16 +1604,19 @@ struct SymbolRow {
     column: Option<i32>,
     #[sqlx(rename = "score")]
     _score: f64,
+    references: Option<Json<Vec<ReferenceEntry>>>,
 }
 
-#[derive(sqlx::FromRow)]
-struct ReferenceRow {
-    symbol_id: i32,
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+struct ReferenceEntry {
     namespace: Option<String>,
-    symbol: String,
+    name: String,
     kind: Option<String>,
-    line: i32,
-    column: i32,
+    repository: String,
+    commit_sha: String,
+    file_path: String,
+    line: Option<i32>,
+    column: Option<i32>,
 }
 
 #[derive(Clone, Debug)]

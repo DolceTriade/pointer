@@ -57,6 +57,9 @@ pub struct ReferenceResult {
     pub namespace: Option<String>,
     pub kind: Option<String>,
     pub fully_qualified: String,
+    pub repository: String,
+    pub commit_sha: String,
+    pub file_path: String,
     pub line: usize,
     pub column: usize,
 }
