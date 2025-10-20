@@ -19,6 +19,8 @@ pub struct SnippetRequest {
     pub file_path: String,
     pub line: u32,
     pub context: Option<u32>,
+    pub highlight: Option<String>,
+    pub case_sensitive: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -158,6 +160,10 @@ pub trait Database: Clone + Send + Sync + 'static {
         file_path: &str,
     ) -> Result<RawFileContent, DbError>;
     async fn get_file_snippet(&self, request: SnippetRequest) -> Result<SnippetResponse, DbError>;
+    async fn get_file_snippets(
+        &self,
+        requests: Vec<SnippetRequest>,
+    ) -> Result<Vec<SnippetResponse>, DbError>;
     async fn get_symbol_references(
         &self,
         request: SymbolReferenceRequest,

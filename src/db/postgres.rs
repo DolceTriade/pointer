@@ -374,52 +374,137 @@ impl Database for PostgresDb {
     }
 
     async fn get_file_snippet(&self, request: SnippetRequest) -> Result<SnippetResponse, DbError> {
-        if request.line == 0 {
-            return Err(DbError::Internal("line numbers are 1-based".to_string()));
+        let snippets = self.get_file_snippets(vec![request]).await?;
+        snippets
+            .into_iter()
+            .next()
+            .ok_or_else(|| DbError::Internal("missing snippet response".to_string()))
+    }
+
+    async fn get_file_snippets(
+        &self,
+        requests: Vec<SnippetRequest>,
+    ) -> Result<Vec<SnippetResponse>, DbError> {
+        if requests.is_empty() {
+            return Ok(Vec::new());
         }
 
-        let data = self
-            .load_file_data(&request.repository, &request.commit_sha, &request.file_path)
-            .await?;
+        let total = requests.len();
+        let mut repositories = Vec::with_capacity(total);
+        let mut commits = Vec::with_capacity(total);
+        let mut paths = Vec::with_capacity(total);
+        let mut lines = Vec::with_capacity(total);
+        let mut contexts = Vec::with_capacity(total);
 
-        let file_text = String::from_utf8_lossy(&data.bytes);
-        let lines: Vec<String> = file_text.lines().map(|line| line.to_string()).collect();
+        for request in requests {
+            if request.line == 0 {
+                return Err(DbError::Internal("line numbers are 1-based".to_string()));
+            }
 
-        if lines.is_empty() {
-            return Err(DbError::Internal("file is empty".to_string()));
+            repositories.push(request.repository);
+            commits.push(request.commit_sha);
+            paths.push(request.file_path);
+            lines.push(i32::try_from(request.line).unwrap_or(i32::MAX));
+            contexts.push(request.context.unwrap_or(3).min(3) as i32);
         }
 
-        let total_lines = lines.len() as u32;
-        if request.line > total_lines {
-            return Err(DbError::Internal(
-                "line number exceeds file length".to_string(),
-            ));
+        let rows: Vec<SnippetRow> = sqlx::query_as(
+            r#"
+WITH req AS (
+    SELECT
+        (ordinality - 1)::int AS idx,
+        repo,
+        commit_sha,
+        file_path,
+        line,
+        context
+    FROM
+        unnest($1::text[], $2::text[], $3::text[], $4::int[], $5::int[])
+        WITH ORDINALITY AS t(repo, commit_sha, file_path, line, context, ordinality)
+), data AS (
+    SELECT
+        req.idx,
+        req.line,
+        req.context,
+        cb.line_count,
+        string_agg(chunks.text_content, '' ORDER BY cbc.chunk_index) AS text_content
+    FROM req
+    JOIN files f
+      ON f.repository = req.repo
+     AND f.commit_sha = req.commit_sha
+     AND f.file_path = req.file_path
+    JOIN content_blobs cb
+      ON cb.hash = f.content_hash
+    JOIN content_blob_chunks cbc
+      ON cbc.content_hash = cb.hash
+    JOIN chunks
+      ON chunks.chunk_hash = cbc.chunk_hash
+    GROUP BY req.idx, req.line, req.context, cb.line_count
+)
+SELECT
+    idx,
+    line,
+    context,
+    line_count,
+    GREATEST(line - context, 1) AS start_line,
+    LEAST(line + context, line_count) AS end_line,
+    array_to_string(
+        (string_to_array(text_content, E'\n'))[
+            GREATEST(line - context, 1):
+            LEAST(line + context, line_count)
+        ],
+        E'\n'
+    ) AS snippet
+FROM data
+ORDER BY idx
+            "#
+        )
+        .bind(&repositories)
+        .bind(&commits)
+        .bind(&paths)
+        .bind(&lines)
+        .bind(&contexts)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DbError::Database(e.to_string()))?;
+
+        let mut responses: Vec<Option<SnippetResponse>> = vec![None; total];
+
+        for row in rows {
+            let idx = usize::try_from(row.idx)
+                .map_err(|_| DbError::Internal("invalid snippet index".to_string()))?;
+            if idx >= responses.len() {
+                return Err(DbError::Internal("snippet index out of bounds".to_string()));
+            }
+
+            let snippet_text = row.snippet.unwrap_or_default();
+            let lines_vec: Vec<String> = if snippet_text.is_empty() {
+                Vec::new()
+            } else {
+                snippet_text.split('\n').map(|s| s.to_string()).collect()
+            };
+
+            let start_line = row.start_line.max(1) as u32;
+            let highlight_line = row.line.max(1) as u32;
+            let total_lines = row.line_count.max(0) as u32;
+            let end_line = row.end_line.max(row.start_line);
+            let truncated = start_line > 1 || end_line < row.line_count;
+
+            responses[idx] = Some(SnippetResponse {
+                start_line,
+                highlight_line,
+                total_lines,
+                lines: lines_vec,
+                truncated,
+            });
         }
 
-        let context = request.context.unwrap_or(3).min(1000);
-        let start_line = if request.line <= context {
-            1
-        } else {
-            request.line - context
-        };
-        let end_line = (request.line + context).min(total_lines);
-
-        let start_index = (start_line - 1) as usize;
-        let end_index = end_line as usize;
-        let snippet_lines = lines[start_index..end_index]
-            .iter()
-            .map(|line| line.to_string())
-            .collect();
-
-        let truncated = start_line > 1 || end_line < total_lines;
-
-        Ok(SnippetResponse {
-            start_line,
-            highlight_line: request.line,
-            total_lines,
-            lines: snippet_lines,
-            truncated,
-        })
+        responses
+            .into_iter()
+            .map(|snippet| {
+                snippet.ok_or_else(|| DbError::Internal("missing snippet response".to_string()))
+            })
+            .collect()
     }
 
     async fn get_symbol_references(
@@ -1616,6 +1701,17 @@ struct ReferenceEntry {
     file_path: String,
     line: Option<i32>,
     column: Option<i32>,
+}
+
+#[derive(sqlx::FromRow)]
+struct SnippetRow {
+    idx: i32,
+    line: i32,
+    context: i32,
+    line_count: i32,
+    start_line: i32,
+    end_line: i32,
+    snippet: Option<String>,
 }
 
 #[derive(Clone, Debug)]

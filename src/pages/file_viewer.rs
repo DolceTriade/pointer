@@ -293,7 +293,9 @@ pub async fn fetch_symbol_insights(
     for mut definition in search_response.symbols {
         let references = definition.references.take().unwrap_or_default();
 
-        let mut enriched = Vec::with_capacity(references.len());
+        let mut reference_entries = Vec::with_capacity(references.len());
+        let mut snippet_requests = Vec::with_capacity(references.len());
+
         for reference in references {
             let line = reference.line.max(1);
             let file_reference = FileReference {
@@ -307,29 +309,37 @@ pub async fn fetch_symbol_insights(
                 column: reference.column.try_into().unwrap_or(i32::MAX),
             };
 
-            let snippet_line = line.max(1) as u32;
-            let snippet = match db
-                .get_file_snippet(SnippetRequest {
-                    repository: file_reference.repository.clone(),
-                    commit_sha: file_reference.commit_sha.clone(),
-                    file_path: file_reference.file_path.clone(),
-                    line: snippet_line,
-                    context: Some(2),
-                })
-                .await
-            {
-                Ok(snippet) => Some(snippet),
+            snippet_requests.push(SnippetRequest {
+                repository: file_reference.repository.clone(),
+                commit_sha: file_reference.commit_sha.clone(),
+                file_path: file_reference.file_path.clone(),
+                line: line.max(1) as u32,
+                context: Some(1),
+                highlight: Some(reference.name.clone()),
+                case_sensitive: Some(true),
+            });
+
+            reference_entries.push(file_reference);
+        }
+
+        let snippet_responses = if snippet_requests.is_empty() {
+            Vec::new()
+        } else {
+            match db.get_file_snippets(snippet_requests).await {
+                Ok(snippets) => snippets,
                 Err(err) => {
                     tracing::warn!(
-                        "Failed to fetch snippet for {}:{}:{}: {err}",
-                        file_reference.repository,
-                        file_reference.file_path,
-                        line
+                        "Failed to fetch snippets for {} references: {err}",
+                        reference_entries.len()
                     );
-                    None
+                    Vec::new()
                 }
-            };
+            }
+        };
 
+        let mut enriched = Vec::with_capacity(reference_entries.len());
+        for (idx, file_reference) in reference_entries.into_iter().enumerate() {
+            let snippet = snippet_responses.get(idx).cloned();
             enriched.push(SymbolReferenceWithSnippet {
                 reference: file_reference,
                 snippet,

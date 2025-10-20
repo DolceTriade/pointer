@@ -131,12 +131,13 @@ CREATE OR REPLACE FUNCTION symbol_weight(
                 END
             )
           END
+        -- MODIFIED SECTION FOR HIGHER PATH WEIGHT
         + CASE
             WHEN path_hint IS NULL OR path_hint = '' THEN 0
-            WHEN file_path = path_hint THEN 65
-            WHEN file_path LIKE path_hint || '%' THEN 45
-            WHEN path_hint LIKE file_path || '%' THEN 35
-            ELSE GREATEST(similarity(file_path, path_hint) * 60 - 15, -15)
+            WHEN file_path = path_hint THEN 150
+            WHEN file_path LIKE path_hint || '%' THEN 90
+            WHEN path_hint LIKE file_path || '%' THEN 70
+            ELSE GREATEST(similarity(file_path, path_hint) * 120 - 30, -30)
           END
 $$ LANGUAGE SQL IMMUTABLE;
 
