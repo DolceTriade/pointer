@@ -184,31 +184,17 @@ impl Indexer {
                 let source = String::from_utf8_lossy(&bytes);
                 let namespace_hint = utils::namespace_from_path(Some(lang), &relative_path);
 
-                let Extraction {
-                    symbols,
-                    references,
-                } = extractors::extract(lang, &source);
+                let Extraction { references } = extractors::extract(lang, &source);
+                let symbols = derive_symbols(&references);
+
                 if symbols.is_empty() {
                     debug!(file = %normalized_path, language = lang, "no symbols extracted");
                 }
 
-                for ExtractedSymbol {
-                    name,
-                    kind: _,
-                    namespace: symbol_namespace,
-                } in symbols
-                {
-                    let namespace = symbol_namespace.or_else(|| namespace_hint.clone());
-                    let fully_qualified = match &namespace {
-                        Some(ns) => format!("{}::{}", ns, name),
-                        None => name.clone(),
-                    };
-
+                for ExtractedSymbol { name } in symbols {
                     report.symbol_records.push(SymbolRecord {
                         content_hash: content_hash.clone(),
-                        namespace,
                         name,
-                        fully_qualified,
                     });
                 }
 
@@ -250,6 +236,23 @@ impl Indexer {
     pub fn config(&self) -> &IndexerConfig {
         &self.config
     }
+}
+
+use crate::extractors::ExtractedReference;
+
+fn derive_symbols(references: &[ExtractedReference]) -> Vec<ExtractedSymbol> {
+    let mut symbols = Vec::new();
+    let mut seen_symbols = HashSet::new();
+
+    for reference in references {
+        if seen_symbols.insert(&reference.name) {
+            symbols.push(ExtractedSymbol {
+                name: reference.name.clone(),
+            });
+        }
+    }
+
+    symbols
 }
 
 fn should_skip(path: &Path) -> bool {

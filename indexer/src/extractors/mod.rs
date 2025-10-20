@@ -16,8 +16,6 @@ mod typescript;
 #[derive(Debug, Clone)]
 pub struct ExtractedSymbol {
     pub name: String,
-    pub kind: String, // e.g., "fn_def", "var_decl", "struct", etc.
-    pub namespace: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -31,8 +29,13 @@ pub struct ExtractedReference {
 
 #[derive(Debug, Clone, Default)]
 pub struct Extraction {
-    pub symbols: Vec<ExtractedSymbol>,
     pub references: Vec<ExtractedReference>,
+}
+
+impl From<Vec<ExtractedReference>> for Extraction {
+    fn from(references: Vec<ExtractedReference>) -> Self {
+        Self { references }
+    }
 }
 
 // Define the trait for language-specific indexing

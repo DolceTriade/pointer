@@ -1,6 +1,6 @@
 use tree_sitter::{Node, Parser};
 
-use super::{ExtractedReference, ExtractedSymbol, Extraction};
+use super::{ExtractedReference, Extraction};
 
 pub fn extract(source: &str) -> Extraction {
     let mut parser = Parser::new();
@@ -13,435 +13,174 @@ pub fn extract(source: &str) -> Extraction {
         None => return Extraction::default(),
     };
 
-    let root = tree.root_node();
-    let source_bytes = source.as_bytes();
-    let mut stack = vec![root];
-    let mut symbols = Vec::new();
     let mut references = Vec::new();
+    let source_bytes = source.as_bytes();
+    collect_references(&tree.root_node(), source_bytes, &mut references, &[]);
 
-    // First pass: collect symbols (definitions and declarations)
-    while let Some(node) = stack.pop() {
-        let mut extracted = collect_symbols(&node, source_bytes);
-        symbols.append(&mut extracted);
+    references.into()
+}
 
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            stack.push(child);
-        }
-    }
+fn collect_references(
+    node: &Node,
+    source: &[u8],
+    references: &mut Vec<ExtractedReference>,
+    namespace_stack: &[String],
+) {
+    let mut new_namespace_stack = namespace_stack.to_owned();
 
-    // Second pass: collect all identifiers as references (including those that are also symbols)
-    // This allows for proper symbol-to-reference mapping where the same identifier can be both
-    let mut stack = vec![root];
-    while let Some(node) = stack.pop() {
-        if node.kind() == "identifier" || node.kind() == "field_identifier" {
-            if let Ok(text) = node.utf8_text(source_bytes) {
-                let name = text.trim();
-                if !name.is_empty() {
-                    let pos = node.start_position();
-                    references.push(ExtractedReference {
-                        name: name.to_string(),
-                        kind: Some("reference".to_string()),
-                        namespace: None,
-                        line: pos.row.saturating_add(1) as usize,
-                        column: pos.column.saturating_add(1) as usize,
-                    });
+    match node.kind() {
+        "function_definition" => {
+            if let Some(declarator) = node.child_by_field_name("declarator") {
+                if let Some(name_node) = find_identifier_in_declarator(&declarator) {
+                    if let Ok(name) = name_node.utf8_text(source) {
+                        let pos = name_node.start_position();
+                        references.push(ExtractedReference {
+                            name: name.to_string(),
+                            kind: Some("definition".to_string()),
+                            namespace: if namespace_stack.is_empty() {
+                                None
+                            } else {
+                                Some(namespace_stack.join("::"))
+                            },
+                            line: pos.row + 1,
+                            column: pos.column + 1,
+                        });
+                        new_namespace_stack.push(name.to_string());
+                    }
                 }
             }
         }
-
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            stack.push(child);
-        }
-    }
-
-    Extraction {
-        symbols,
-        references,
-    }
-}
-
-fn collect_symbols(node: &Node, source: &[u8]) -> Vec<ExtractedSymbol> {
-    match node.kind() {
-        "function_definition" => {
-            let name = node
-                .child_by_field_name("declarator")
-                .and_then(|decl| identifier_from_declarator(&decl, source));
-            match name {
-                Some(name) => vec![ExtractedSymbol {
-                    name,
-                    kind: "fn_def".to_string(), // Changed to distinguish definitions
-                    namespace: None,
-                }],
-                None => Vec::new(),
-            }
-        }
-        "function_declarator" => {
-            // This can be part of a declaration that's not a definition
-            if let Some(parent) = node.parent() {
-                if parent.kind() == "declaration" {
-                    // Check if this is just a declaration (not a definition)
-                    if is_function_declaration_only(&parent, source) {
-                        if let Some(name) = identifier_from_declarator(node, source) {
-                            return vec![ExtractedSymbol {
-                                name,
-                                kind: "fn_decl".to_string(), // Function declaration
-                                namespace: None,
-                            }];
+        "declaration" => {
+            if is_function_declaration_only(node) {
+                if let Some(declarator) = node
+                    .children(&mut node.walk())
+                    .find(|c| c.kind() == "function_declarator")
+                {
+                    if let Some(name_node) = find_identifier_in_declarator(&declarator) {
+                        if let Ok(name) = name_node.utf8_text(source) {
+                            let pos = name_node.start_position();
+                            references.push(ExtractedReference {
+                                name: name.to_string(),
+                                kind: Some("declaration".to_string()),
+                                namespace: if namespace_stack.is_empty() {
+                                    None
+                                } else {
+                                    Some(namespace_stack.join("::"))
+                                },
+                                line: pos.row + 1,
+                                column: pos.column + 1,
+                            });
+                        }
+                    }
+                }
+            } else {
+                for child in node.children(&mut node.walk()) {
+                    if child.kind() == "init_declarator" {
+                        if let Some(declarator) = child.child_by_field_name("declarator") {
+                            if let Some(name_node) = find_identifier_in_declarator(&declarator) {
+                                if let Ok(name) = name_node.utf8_text(source) {
+                                    let pos = name_node.start_position();
+                                    references.push(ExtractedReference {
+                                        name: name.to_string(),
+                                        kind: Some("definition".to_string()),
+                                        namespace: if namespace_stack.is_empty() {
+                                            None
+                                        } else {
+                                            Some(namespace_stack.join("::"))
+                                        },
+                                        line: pos.row + 1,
+                                        column: pos.column + 1,
+                                    });
+                                }
+                            }
                         }
                     }
                 }
             }
-            Vec::new()
         }
-        "struct_specifier" => {
-            let mut symbols = symbol_from_named(node, source, "struct_def");
-            symbols.extend(function_pointer_fields(node, source));
-            symbols
-        }
-        "union_specifier" => {
-            let mut symbols = symbol_from_named(node, source, "union_def");
-            symbols.extend(function_pointer_fields(node, source));
-            symbols
-        }
-        "enum_specifier" => symbol_from_named(node, source, "enum_def"),
-        "declaration" => {
-            // Handle various types of declarations
-            symbols_from_declaration(node, source)
-        }
-        "preproc_function_def" => macro_symbol(node, source, true),
-        "preproc_def" => macro_symbol(node, source, false),
-        _ => Vec::new(),
-    }
-}
-
-// Check if a declaration is just a function declaration (not definition)
-fn is_function_declaration_only(decl_node: &Node, _source: &[u8]) -> bool {
-    // Look for a function declarator without a function body
-    let mut cursor = decl_node.walk();
-    for child in decl_node.children(&mut cursor) {
-        if child.kind() == "compound_statement" {
-            // If there's a compound statement, it's a definition
-            return false;
-        }
-    }
-    // If there's no compound statement, it's likely just a declaration
-    true
-}
-
-fn macro_symbol(node: &Node, source: &[u8], is_function_like: bool) -> Vec<ExtractedSymbol> {
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        if child.kind() == "identifier" {
-            if let Ok(text) = child.utf8_text(source) {
-                return vec![ExtractedSymbol {
-                    name: text.to_string(),
-                    kind: if is_function_like {
-                        "macro_fn"
-                    } else {
-                        "macro_var"
-                    }
-                    .to_string(),
-                    namespace: None,
-                }];
-            }
-        }
-    }
-
-    Vec::new()
-}
-
-fn symbol_from_named(node: &Node, source: &[u8], kind: &str) -> Vec<ExtractedSymbol> {
-    let name_node = match node.child_by_field_name("name") {
-        Some(name) => name,
-        None => return Vec::new(),
-    };
-
-    let name = match name_node.utf8_text(source) {
-        Ok(text) => text.to_string(),
-        Err(_) => return Vec::new(),
-    };
-
-    vec![ExtractedSymbol {
-        name,
-        kind: kind.to_string(),
-        namespace: None,
-    }]
-}
-
-fn symbols_from_declaration(node: &Node, source: &[u8]) -> Vec<ExtractedSymbol> {
-    if is_typedef(node, source) {
-        return Vec::new();
-    }
-
-    // Check if this is a function declaration without a body (forward declaration)
-    if is_function_declaration_only(node, source) {
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            if child.kind() == "function_declarator" {
-                if let Some(name) = identifier_from_declarator(&child, source) {
-                    return vec![ExtractedSymbol {
-                        name,
-                        kind: "fn_decl".to_string(), // Function declaration
-                        namespace: namespace_for_node(node, source),
-                    }];
+        "struct_specifier" | "union_specifier" | "enum_specifier" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                if let Ok(name) = name_node.utf8_text(source) {
+                    let pos = name_node.start_position();
+                    references.push(ExtractedReference {
+                        name: name.to_string(),
+                        kind: Some("definition".to_string()),
+                        namespace: if namespace_stack.is_empty() {
+                            None
+                        } else {
+                            Some(namespace_stack.join("::"))
+                        },
+                        line: pos.row + 1,
+                        column: pos.column + 1,
+                    });
+                    new_namespace_stack.push(name.to_string());
                 }
             }
         }
-    }
-
-    let mut vars = Vec::new();
-    let mut cursor = node.walk();
-    let namespace = namespace_for_node(node, source);
-
-    for child in node.children(&mut cursor) {
-        match child.kind() {
-            "init_declarator" => {
-                let declarator = child.child_by_field_name("declarator").unwrap_or(child);
-                if declarator.kind() == "function_declarator" {
-                    // This is a function definition within the declaration
-                    if let Some(name) = identifier_from_declarator(&declarator, source) {
-                        vars.push(ExtractedSymbol {
-                            name,
-                            kind: "fn_def".to_string(),
-                            namespace: namespace.clone(),
-                        });
-                    }
-                    continue;
-                }
-                if let Some(name) = identifier_from_declarator(&declarator, source) {
-                    // Check if this has an initializer - if so, it's a definition; otherwise a declaration
-                    let is_definition = has_initializer(&child, source);
-                    let kind = if is_definition { "var_def" } else { "var_decl" };
-                    vars.push(ExtractedSymbol {
-                        name,
-                        kind: kind.to_string(),
-                        namespace: namespace.clone(),
+        "identifier" => {
+            if !is_part_of_definition_or_declaration(node) {
+                if let Ok(name) = node.utf8_text(source) {
+                    let pos = node.start_position();
+                    references.push(ExtractedReference {
+                        name: name.to_string(),
+                        kind: Some("reference".to_string()),
+                        namespace: if namespace_stack.is_empty() {
+                            None
+                        } else {
+                            Some(namespace_stack.join("::"))
+                        },
+                        line: pos.row + 1,
+                        column: pos.column + 1,
                     });
                 }
             }
-            "declarator"
-            | "pointer_declarator"
-            | "reference_declarator"
-            | "abstract_declarator"
-            | "parenthesized_declarator" => {
-                if child.kind() == "function_declarator" {
-                    // This is handled above as a function declaration
-                    continue;
-                }
-                if let Some(name) = identifier_from_declarator(&child, source) {
-                    let is_function_like = declarator_contains_function(&child);
-                    if is_function_like {
-                        // This is a function pointer declaration/definition
-                        let is_definition = has_initializer(&child, source);
-                        let kind = if is_definition { "fn_def" } else { "fn_decl" };
-                        vars.push(ExtractedSymbol {
-                            name,
-                            kind: kind.to_string(),
-                            namespace: namespace.clone(),
-                        });
-                    } else {
-                        // Check if this has an initializer - if so, it's a definition; otherwise a declaration
-                        let is_definition = has_initializer(node, source); // Check the parent declaration
-                        let kind = if is_definition { "var_def" } else { "var_decl" };
-                        vars.push(ExtractedSymbol {
-                            name,
-                            kind: kind.to_string(),
-                            namespace: namespace.clone(),
-                        });
-                    }
-                }
-            }
-            "function_declarator" => {
-                // This should already be handled as a function declaration above
-                if let Some(name) = identifier_from_declarator(&child, source) {
-                    vars.push(ExtractedSymbol {
-                        name,
-                        kind: "fn_def".to_string(), // Function definition
-                        namespace: namespace.clone(),
-                    });
-                }
-            }
-            "identifier" => {
-                if let Some(parent) = child.parent() {
-                    if parent.kind() == "init_declarator" {
-                        continue;
-                    }
-                }
-                if let Ok(text) = child.utf8_text(source) {
-                    let is_function_like = identifier_in_function_declarator(&child);
-                    if is_function_like {
-                        vars.push(ExtractedSymbol {
-                            name: text.to_string(),
-                            kind: "fn_def".to_string(),
-                            namespace: namespace.clone(),
-                        });
-                    } else {
-                        // Check if this has an initializer - if so, it's a definition; otherwise a declaration
-                        let is_definition = has_initializer_in_declaration(node, source);
-                        let kind = if is_definition { "var_def" } else { "var_decl" };
-                        vars.push(ExtractedSymbol {
-                            name: text.to_string(),
-                            kind: kind.to_string(),
-                            namespace: namespace.clone(),
-                        });
-                    }
-                }
-            }
-            _ => {}
         }
+        _ => {}
     }
 
-    vars
+    for child in node.children(&mut node.walk()) {
+        collect_references(&child, source, references, &new_namespace_stack);
+    }
 }
 
-// Check if a node has an initializer
-fn has_initializer(node: &Node, _source: &[u8]) -> bool {
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        if child.kind() == "initializer" {
-            return true;
-        }
+fn find_identifier_in_declarator<'a>(declarator: &Node<'a>) -> Option<Node<'a>> {
+    match declarator.kind() {
+        "identifier" => Some(*declarator),
+        "pointer_declarator"
+        | "function_declarator"
+        | "array_declarator"
+        | "parenthesized_declarator" => declarator
+            .child_by_field_name("declarator")
+            .and_then(|d| find_identifier_in_declarator(&d)),
+        _ => None,
     }
-    false
 }
 
-// Check if the declaration has an initializer anywhere
-fn has_initializer_in_declaration(decl_node: &Node, _source: &[u8]) -> bool {
-    let mut stack = vec![*decl_node];
-
-    while let Some(current) = stack.pop() {
-        if current.kind() == "initializer" {
-            return true;
-        }
-
-        let mut cursor = current.walk();
-        for child in current.children(&mut cursor) {
-            stack.push(child);
-        }
-    }
-
-    false
+fn is_function_declaration_only(node: &Node) -> bool {
+    node.child_by_field_name("body").is_none()
 }
 
-fn is_typedef(node: &Node, source: &[u8]) -> bool {
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        if child.kind() == "storage_class_specifier" {
-            if let Ok(text) = child.utf8_text(source) {
-                if text.trim() == "typedef" {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
-
-fn identifier_from_declarator(node: &Node, source: &[u8]) -> Option<String> {
-    if matches!(node.kind(), "identifier" | "field_identifier") {
-        return node.utf8_text(source).ok().map(|text| text.to_string());
-    }
-
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        if let Some(name) = identifier_from_declarator(&child, source) {
-            return Some(name);
-        }
-    }
-
-    None
-}
-
-fn declarator_contains_function(node: &Node) -> bool {
-    if node.kind() == "function_declarator" {
-        return true;
-    }
-
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        if declarator_contains_function(&child) {
-            return true;
-        }
-    }
-
-    false
-}
-
-fn namespace_for_node(node: &Node, source: &[u8]) -> Option<String> {
-    let mut parts = Vec::new();
+fn is_part_of_definition_or_declaration(node: &Node) -> bool {
     let mut current = node.parent();
-
     while let Some(parent) = current {
         match parent.kind() {
-            "struct_specifier" | "union_specifier" => {
-                if let Some(name_node) = parent.child_by_field_name("name") {
-                    if let Ok(text) = name_node.utf8_text(source) {
-                        parts.push(text.to_string());
+            "function_definition"
+            | "declaration"
+            | "struct_specifier"
+            | "union_specifier"
+            | "enum_specifier" => {
+                if let Some(name_node) = find_identifier_in_declarator(&parent) {
+                    if name_node == *node {
+                        return true;
                     }
                 }
-            }
-            "function_definition" => {
-                if let Some(declarator) = parent.child_by_field_name("declarator") {
-                    if let Some(name) = identifier_from_declarator(&declarator, source) {
-                        parts.push(name);
+                if let Some(name_node) = parent.child_by_field_name("name") {
+                    if name_node == *node {
+                        return true;
                     }
                 }
             }
             _ => {}
-        }
-        current = parent.parent();
-    }
-
-    if parts.is_empty() {
-        None
-    } else {
-        parts.reverse();
-        Some(parts.join("::"))
-    }
-}
-
-fn function_pointer_fields(node: &Node, source: &[u8]) -> Vec<ExtractedSymbol> {
-    let mut results = Vec::new();
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        if child.kind() == "field_declaration_list" {
-            collect_function_declarators(&child, source, &mut results);
-        }
-    }
-
-    results
-}
-
-fn collect_function_declarators(node: &Node, source: &[u8], out: &mut Vec<ExtractedSymbol>) {
-    let mut stack = vec![*node];
-
-    while let Some(current) = stack.pop() {
-        if current.kind() == "function_declarator" {
-            if let Some(name) = identifier_from_declarator(&current, source) {
-                out.push(ExtractedSymbol {
-                    name,
-                    kind: "fn_def".to_string(), // Function pointer definition
-                    namespace: namespace_for_node(&current, source),
-                });
-            }
-        }
-
-        let mut cursor = current.walk();
-        for child in current.children(&mut cursor) {
-            if child.kind() != ";" {
-                stack.push(child);
-            }
-        }
-    }
-}
-
-fn identifier_in_function_declarator(node: &Node) -> bool {
-    let mut current = node.parent();
-    while let Some(parent) = current {
-        if parent.kind().ends_with("declarator") && declarator_contains_function(&parent) {
-            return true;
         }
         current = parent.parent();
     }
@@ -451,6 +190,7 @@ fn identifier_in_function_declarator(node: &Node) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     #[test]
     fn extracts_functions_types_and_variables() {
@@ -486,49 +226,43 @@ mod tests {
         "#;
 
         let extraction = extract(source);
-        let mut symbols = extraction.symbols;
-        symbols.sort_by(|a, b| a.name.cmp(&b.name));
+        let references = extraction.references;
 
-        assert!(
-            symbols
-                .iter()
-                .any(|s| s.name == "Foo" && s.kind == "struct_def")
-        );
-        assert!(
-            symbols
-                .iter()
-                .any(|s| s.name == "Bar" && s.kind == "enum_def")
-        );
-        assert!(
-            symbols
-                .iter()
-                .any(|s| s.name == "helper" && s.kind == "fn_def")
-        );
-        assert!(
-            symbols
-                .iter()
-                .any(|s| s.name == "run" && s.kind == "fn_def")
-        );
-
-        let var_names: Vec<_> = symbols
+        let definitions: HashSet<_> = references
             .iter()
-            .filter(|s| s.kind.starts_with("var_")) // Match both var_def and var_decl
-            .map(|s| s.name.as_str())
+            .filter(|r| r.kind == Some("definition".to_string()))
+            .map(|r| (r.name.as_str(), r.namespace.as_deref()))
             .collect();
 
-        assert!(var_names.contains(&"counter"));
-        assert!(var_names.contains(&"local"));
-        assert!(var_names.contains(&"result"));
-        assert!(var_names.contains(&"uninitialized"));
+        assert!(definitions.contains(&("Foo", None)));
+        assert!(definitions.contains(&("Bar", None)));
+        assert!(definitions.contains(&("helper", None)));
+        assert!(definitions.contains(&("run", None)));
+        assert!(definitions.contains(&("counter", None)));
+        assert!(definitions.contains(&("local", Some("helper"))));
+        assert!(definitions.contains(&("result", Some("run"))));
+        assert!(definitions.contains(&("global_handler", None)));
+        assert!(definitions.contains(&("local_callback", Some("helper"))));
+        assert!(definitions.contains(&("on_ready", Some("Callbacks"))));
 
-        let fn_symbols: Vec<_> = symbols
+        let declarations: HashSet<_> = references
             .iter()
-            .filter(|s| s.kind.starts_with("fn_")) // Match both fn_def and fn_decl
-            .map(|s| (s.name.as_str(), s.namespace.as_deref()))
+            .filter(|r| r.kind == Some("declaration".to_string()))
+            .map(|r| (r.name.as_str(), r.namespace.as_deref()))
             .collect();
 
-        assert!(fn_symbols.contains(&("global_handler", None)));
-        assert!(fn_symbols.contains(&("local_callback", Some("helper"))));
-        assert!(fn_symbols.contains(&("on_ready", Some("Callbacks"))));
+        assert!(declarations.contains(&("uninitialized", None)));
+
+        let refs: HashSet<_> = references
+            .iter()
+            .filter(|r| r.kind == Some("reference".to_string()))
+            .map(|r| r.name.as_str())
+            .collect();
+
+        assert!(refs.contains("customType"));
+        assert!(refs.contains("local"));
+        assert!(refs.contains("Foo"));
+        assert!(refs.contains("helper"));
+        assert!(refs.contains("result"));
     }
 }

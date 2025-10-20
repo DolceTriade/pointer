@@ -1,6 +1,6 @@
 use tree_sitter::{Node, Parser};
 
-use super::{ExtractedReference, ExtractedSymbol, Extraction};
+use super::{ExtractedReference, Extraction};
 
 pub fn extract(source: &str) -> Extraction {
     let mut parser = Parser::new();
@@ -13,81 +13,71 @@ pub fn extract(source: &str) -> Extraction {
         None => return Extraction::default(),
     };
 
-    let root = tree.root_node();
-    let source_bytes = source.as_bytes();
-    let mut stack = vec![root];
-    let mut symbols = Vec::new();
     let mut references = Vec::new();
+    let source_bytes = source.as_bytes();
+    collect_references(&tree.root_node(), source_bytes, &mut references, &[]);
 
-    while let Some(node) = stack.pop() {
-        if let Some(symbol) = extract_symbol(&node, source_bytes) {
-            symbols.push(symbol);
+    references.into()
+}
+
+fn collect_references(
+    node: &Node,
+    source: &[u8],
+    references: &mut Vec<ExtractedReference>,
+    namespace_stack: &[String],
+) {
+    let mut new_namespace_stack = namespace_stack.to_owned();
+
+    match node.kind() {
+        "binding" => {
+            if let Some(attr_node) = node.child_by_field_name("attrpath") {
+                if let Some(mut segments) = attrpath_segments(&attr_node, source) {
+                    if !segments.is_empty() {
+                        let name = segments.pop().unwrap();
+                        let pos = attr_node.start_position();
+                        let mut ns = namespace_stack.to_owned();
+                        ns.extend(segments);
+
+                        references.push(ExtractedReference {
+                            name: name.clone(),
+                            kind: Some("definition".to_string()),
+                            namespace: if ns.is_empty() {
+                                None
+                            } else {
+                                Some(ns.join("."))
+                            },
+                            line: pos.row + 1,
+                            column: pos.column + 1,
+                        });
+                        new_namespace_stack.push(name);
+                    }
+                }
+            }
         }
-
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            stack.push(child);
-        }
-    }
-
-    // Collect all identifiers as references (including those that are also symbols)
-    // This allows for proper symbol-to-reference mapping where the same identifier can be both
-    let mut stack = vec![root];
-    while let Some(node) = stack.pop() {
-        if node.kind() == "identifier" {
-            if let Ok(text) = node.utf8_text(source_bytes) {
-                let name = text.trim();
-                if !name.is_empty() {
+        "identifier" => {
+            if !is_part_of_definition_or_declaration(node) {
+                if let Ok(name) = node.utf8_text(source) {
                     let pos = node.start_position();
                     references.push(ExtractedReference {
                         name: name.to_string(),
                         kind: Some("reference".to_string()),
-                        namespace: None,
-                        line: pos.row.saturating_add(1) as usize,
-                        column: pos.column.saturating_add(1) as usize,
+                        namespace: if namespace_stack.is_empty() {
+                            None
+                        } else {
+                            Some(namespace_stack.join("."))
+                        },
+                        line: pos.row + 1,
+                        column: pos.column + 1,
                     });
                 }
             }
         }
-
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            stack.push(child);
-        }
+        _ => {}
     }
 
-    Extraction {
-        symbols,
-        references,
+    for child in node.children(&mut node.walk()) {
+        collect_references(&child, source, references, &new_namespace_stack);
     }
-}
-
-fn extract_symbol(node: &Node, source: &[u8]) -> Option<ExtractedSymbol> {
-    if node.kind() != "binding" {
-        return None;
-    }
-
-    let attr = node.child_by_field_name("attrpath")?;
-    let mut segments = attrpath_segments(&attr, source)?;
-    if segments.is_empty() {
-        return None;
-    }
-
-    let name = segments.pop()?;
-    let mut namespace_segments = ancestor_namespaces(node, source);
-    namespace_segments.extend(segments);
-
-    let namespace = if namespace_segments.is_empty() {
-        None
-    } else {
-        Some(namespace_segments.join("."))
-    };
-
-    Some(ExtractedSymbol {
-        name,
-        kind: "attr".to_string(),
-        namespace,
-    })
 }
 
 fn attrpath_segments(node: &Node, source: &[u8]) -> Option<Vec<String>> {
@@ -105,36 +95,21 @@ fn attrpath_segments(node: &Node, source: &[u8]) -> Option<Vec<String>> {
     if parts.is_empty() { None } else { Some(parts) }
 }
 
-fn ancestor_namespaces(node: &Node, source: &[u8]) -> Vec<String> {
-    let mut segments = Vec::new();
+fn is_part_of_definition_or_declaration(node: &Node) -> bool {
     let mut current = node.parent();
-
     while let Some(parent) = current {
         if parent.kind() == "binding" {
-            if let Some(path) = parent.child_by_field_name("attrpath") {
-                if let Some(parts) = attrpath_segments(&path, source) {
-                    segments.push(parts);
-                }
-            }
+            return true;
         }
         current = parent.parent();
     }
-
-    segments.reverse();
-
-    let mut flattened = Vec::new();
-    for group in segments {
-        for part in group {
-            flattened.push(part);
-        }
-    }
-
-    flattened
+    false
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     #[test]
     fn extracts_attr_bindings() {
@@ -149,28 +124,17 @@ mod tests {
         "#;
 
         let extraction = extract(source);
-        let mut symbols = extraction.symbols;
-        symbols.sort_by(|a, b| a.name.cmp(&b.name));
+        let references = extraction.references;
 
-        assert!(
-            symbols.iter().any(|s| s.name == "bar"
-                && s.kind == "attr"
-                && s.namespace.as_deref() == Some("foo"))
-        );
-        assert!(
-            symbols
-                .iter()
-                .any(|s| s.name == "qux" && s.namespace.as_deref() == Some("foo.baz"))
-        );
-        assert!(
-            symbols
-                .iter()
-                .any(|s| s.name == "nested" && s.namespace.is_none())
-        );
-        assert!(
-            symbols
-                .iter()
-                .any(|s| s.name == "inner" && s.namespace.as_deref() == Some("nested"))
-        );
+        let definitions: HashSet<_> = references
+            .iter()
+            .filter(|r| r.kind == Some("definition".to_string()))
+            .map(|r| (r.name.as_str(), r.namespace.as_deref()))
+            .collect();
+
+        assert!(definitions.contains(&("bar", Some("foo"))));
+        assert!(definitions.contains(&("qux", Some("foo.baz"))));
+        assert!(definitions.contains(&("nested", None)));
+        assert!(definitions.contains(&("inner", Some("nested"))));
     }
 }

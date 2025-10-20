@@ -1,6 +1,6 @@
 use tree_sitter::{Node, Parser};
 
-use super::{ExtractedReference, ExtractedSymbol, Extraction};
+use super::{ExtractedReference, Extraction};
 
 pub fn extract(source: &str) -> Extraction {
     let mut parser = Parser::new();
@@ -13,132 +13,75 @@ pub fn extract(source: &str) -> Extraction {
         None => return Extraction::default(),
     };
 
-    let root = tree.root_node();
-    let source_bytes = source.as_bytes();
-    let package = package_name(&root, source_bytes);
-    let mut stack = vec![root];
-    let mut symbols = Vec::new();
     let mut references = Vec::new();
+    let source_bytes = source.as_bytes();
+    collect_references(&tree.root_node(), source_bytes, &mut references, &[]);
 
-    while let Some(node) = stack.pop() {
-        if let Some(symbol) = extract_symbol(&node, source_bytes, package.as_deref()) {
-            symbols.push(symbol);
+    references.into()
+}
+
+fn collect_references(
+    node: &Node,
+    source: &[u8],
+    references: &mut Vec<ExtractedReference>,
+    namespace_stack: &[String],
+) {
+    let mut new_namespace_stack = namespace_stack.to_owned();
+
+    match node.kind() {
+        "message" | "enum" | "service" | "rpc" => {
+            if let Some(name_node) = node_name_node(node) {
+                if let Ok(name) = name_node.utf8_text(source) {
+                    let pos = name_node.start_position();
+                    references.push(ExtractedReference {
+                        name: name.to_string(),
+                        kind: Some("definition".to_string()),
+                        namespace: if namespace_stack.is_empty() {
+                            None
+                        } else {
+                            Some(namespace_stack.join("."))
+                        },
+                        line: pos.row + 1,
+                        column: pos.column + 1,
+                    });
+                    new_namespace_stack.push(name.to_string());
+                }
+            }
         }
-
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            stack.push(child);
+        "package" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                if let Ok(name) = name_node.utf8_text(source) {
+                    new_namespace_stack.push(name.to_string());
+                }
+            }
         }
-    }
-
-    // Collect all identifiers as references (including those that are also symbols)
-    // This allows for proper symbol-to-reference mapping where the same identifier can be both
-    let identifier_kinds = vec!["identifier", "field_identifier"];
-    let mut stack = vec![root];
-    while let Some(node) = stack.pop() {
-        if identifier_kinds.iter().any(|&kind| kind == node.kind()) {
-            if let Ok(text) = node.utf8_text(source_bytes) {
-                let name = text.trim();
-                if !name.is_empty() {
+        "identifier" | "field_identifier" => {
+            if !is_part_of_definition_or_declaration(node) {
+                if let Ok(name) = node.utf8_text(source) {
                     let pos = node.start_position();
                     references.push(ExtractedReference {
                         name: name.to_string(),
                         kind: Some("reference".to_string()),
-                        namespace: None,
-                        line: pos.row.saturating_add(1) as usize,
-                        column: pos.column.saturating_add(1) as usize,
+                        namespace: if namespace_stack.is_empty() {
+                            None
+                        } else {
+                            Some(namespace_stack.join("."))
+                        },
+                        line: pos.row + 1,
+                        column: pos.column + 1,
                     });
                 }
             }
         }
-
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            stack.push(child);
-        }
+        _ => {}
     }
 
-    Extraction {
-        symbols,
-        references,
+    for child in node.children(&mut node.walk()) {
+        collect_references(&child, source, references, &new_namespace_stack);
     }
 }
 
-fn extract_symbol(node: &Node, source: &[u8], package: Option<&str>) -> Option<ExtractedSymbol> {
-    match node.kind() {
-        "message" => symbol_from_named(node, source, "message", package),
-        "enum" => symbol_from_named(node, source, "enum", package),
-        "service" => symbol_from_named(node, source, "service", package),
-        "rpc" => symbol_from_named(node, source, "rpc", package),
-        _ => None,
-    }
-}
-
-fn symbol_from_named(
-    node: &Node,
-    source: &[u8],
-    kind: &str,
-    package: Option<&str>,
-) -> Option<ExtractedSymbol> {
-    let name = node_name(node, source)?;
-    let namespace = namespace_for_node(node, source, package);
-
-    Some(ExtractedSymbol {
-        name,
-        kind: kind.to_string(),
-        namespace,
-    })
-}
-
-fn package_name(root: &Node, source: &[u8]) -> Option<String> {
-    let mut cursor = root.walk();
-    for child in root.children(&mut cursor) {
-        if child.kind() == "package" {
-            if let Some(name_node) = child
-                .child_by_field_name("name")
-                .or_else(|| child.named_child(0))
-            {
-                if let Ok(text) = name_node.utf8_text(source) {
-                    return Some(text.to_string());
-                }
-            }
-        }
-    }
-    None
-}
-
-fn namespace_for_node(node: &Node, source: &[u8], package: Option<&str>) -> Option<String> {
-    let mut names = Vec::new();
-    let mut current = node.parent();
-
-    while let Some(parent) = current {
-        match parent.kind() {
-            "message" | "service" => {
-                if let Some(text) = node_name(&parent, source) {
-                    names.push(text);
-                }
-            }
-            _ => {}
-        }
-        current = parent.parent();
-    }
-
-    if names.is_empty() {
-        package.map(|pkg| pkg.to_string())
-    } else {
-        names.reverse();
-        if let Some(pkg) = package {
-            let mut full = Vec::with_capacity(names.len() + 1);
-            full.push(pkg.to_string());
-            full.extend(names);
-            Some(full.join("."))
-        } else {
-            Some(names.join("."))
-        }
-    }
-}
-
-fn node_name(node: &Node, source: &[u8]) -> Option<String> {
+fn node_name_node<'a>(node: &Node<'a>) -> Option<Node<'a>> {
     for field in [
         "name",
         "message_name",
@@ -147,17 +90,30 @@ fn node_name(node: &Node, source: &[u8]) -> Option<String> {
         "rpc_name",
     ] {
         if let Some(child) = node.child_by_field_name(field) {
-            return child.utf8_text(source).ok().map(|text| text.to_string());
+            return Some(child);
         }
     }
-
     node.named_child(0)
-        .and_then(|child| child.utf8_text(source).ok().map(|text| text.to_string()))
+}
+
+fn is_part_of_definition_or_declaration(node: &Node) -> bool {
+    let mut current = node.parent();
+    while let Some(parent) = current {
+        match parent.kind() {
+            "message" | "enum" | "service" | "rpc" | "package" => {
+                return true;
+            }
+            _ => {}
+        }
+        current = parent.parent();
+    }
+    false
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     #[test]
     fn extracts_proto_symbols() {
@@ -180,29 +136,18 @@ mod tests {
         "#;
 
         let extraction = extract(source);
-        let mut symbols = extraction.symbols;
-        symbols.sort_by(|a, b| a.name.cmp(&b.name));
+        let references = extraction.references;
 
-        assert!(symbols.iter().any(|s| s.name == "Foo"
-            && s.kind == "message"
-            && s.namespace.as_deref() == Some("demo.api")));
-        assert!(
-            symbols
-                .iter()
-                .any(|s| s.name == "Nested" && s.namespace.as_deref() == Some("demo.api.Foo"))
-        );
-        assert!(
-            symbols
-                .iter()
-                .any(|s| s.name == "Status" && s.kind == "enum")
-        );
-        assert!(
-            symbols
-                .iter()
-                .any(|s| s.name == "Demo" && s.kind == "service")
-        );
-        assert!(symbols.iter().any(|s| s.name == "Run"
-            && s.kind == "rpc"
-            && s.namespace.as_deref() == Some("demo.api.Demo")));
+        let definitions: HashSet<_> = references
+            .iter()
+            .filter(|r| r.kind == Some("definition".to_string()))
+            .map(|r| (r.name.as_str(), r.namespace.as_deref()))
+            .collect();
+
+        assert!(definitions.contains(&("Foo", Some("demo.api"))));
+        assert!(definitions.contains(&("Nested", Some("demo.api.Foo"))));
+        assert!(definitions.contains(&("Status", Some("demo.api"))));
+        assert!(definitions.contains(&("Demo", Some("demo.api"))));
+        assert!(definitions.contains(&("Run", Some("demo.api.Demo"))));
     }
 }

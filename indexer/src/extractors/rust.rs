@@ -1,6 +1,6 @@
 use tree_sitter::{Node, Parser};
 
-use super::{ExtractedReference, ExtractedSymbol, Extraction};
+use super::{ExtractedReference, Extraction};
 
 pub fn extract(source: &str) -> Extraction {
     let mut parser = Parser::new();
@@ -13,160 +13,104 @@ pub fn extract(source: &str) -> Extraction {
         None => return Extraction::default(),
     };
 
-    let root = tree.root_node();
-    let mut stack = vec![root];
-    let mut symbols = Vec::new();
     let mut references = Vec::new();
     let source_bytes = source.as_bytes();
+    collect_references(&tree.root_node(), source_bytes, &mut references, &[]);
 
-    while let Some(node) = stack.pop() {
-        let mut extracted = collect_symbols(&node, source_bytes);
-        if !extracted.is_empty() {
-            tracing::debug!("Extracted symbol {extracted:#?}");
-        }
-        symbols.append(&mut extracted);
+    references.into()
+}
 
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            stack.push(child);
-        }
-    }
+fn collect_references(
+    node: &Node,
+    source: &[u8],
+    references: &mut Vec<ExtractedReference>,
+    namespace_stack: &[String],
+) {
+    let mut new_namespace_stack = namespace_stack.to_owned();
 
-    // Collect references (identifiers that are not symbols)
-    let mut stack = vec![root];
-    while let Some(node) = stack.pop() {
-        if node.kind() == "identifier"
-            || node.kind() == "type_identifier"
-            || node.kind() == "field_identifier"
-        {
-            if let Ok(text) = node.utf8_text(source_bytes) {
-                let name = text.trim();
-                if !name.is_empty()
-                    && !name.starts_with("self")
-                    && name != "Self"
-                    && name != "super"
-                    && name != "crate"
-                {
-                    let pos = node.start_position();
+    match node.kind() {
+        "function_item" | "method_item" | "struct_item" | "enum_item" | "trait_item"
+        | "mod_item" | "const_item" | "static_item" | "type_item" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                if let Ok(name) = name_node.utf8_text(source) {
+                    let pos = name_node.start_position();
                     references.push(ExtractedReference {
                         name: name.to_string(),
-                        kind: Some("reference".to_string()),
-                        namespace: None,
-                        line: pos.row.saturating_add(1) as usize,
-                        column: pos.column.saturating_add(1) as usize,
+                        kind: Some("definition".to_string()),
+                        namespace: if namespace_stack.is_empty() {
+                            None
+                        } else {
+                            Some(namespace_stack.join("::"))
+                        },
+                        line: pos.row + 1,
+                        column: pos.column + 1,
+                    });
+                    new_namespace_stack.push(name.to_string());
+                }
+            }
+        }
+        "field_declaration" | "tuple_field_declaration" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                if let Ok(name) = name_node.utf8_text(source) {
+                    let pos = name_node.start_position();
+                    references.push(ExtractedReference {
+                        name: name.to_string(),
+                        kind: Some("definition".to_string()),
+                        namespace: if namespace_stack.is_empty() {
+                            None
+                        } else {
+                            Some(namespace_stack.join("::"))
+                        },
+                        line: pos.row + 1,
+                        column: pos.column + 1,
                     });
                 }
             }
         }
-
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            stack.push(child);
+        "let_declaration" => {
+            if let Some(pattern) = node.child_by_field_name("pattern") {
+                let mut names = Vec::new();
+                collect_pattern_bindings(&pattern, source, &mut names);
+                for name in names {
+                    let pos = pattern.start_position();
+                    references.push(ExtractedReference {
+                        name: name.to_string(),
+                        kind: Some("definition".to_string()),
+                        namespace: if namespace_stack.is_empty() {
+                            None
+                        } else {
+                            Some(namespace_stack.join("::"))
+                        },
+                        line: pos.row + 1,
+                        column: pos.column + 1,
+                    });
+                }
+            }
         }
-    }
-
-    Extraction {
-        symbols,
-        references,
-    }
-}
-
-fn collect_symbols(node: &Node, source: &[u8]) -> Vec<ExtractedSymbol> {
-    match node.kind() {
-        "function_item" | "method_item" => symbol_from_function(node, source),
-        "struct_item" => symbol_from_named_item(node, source, "struct"),
-        "enum_item" => symbol_from_named_item(node, source, "enum"),
-        "trait_item" => symbol_from_named_item(node, source, "trait"),
-        "mod_item" => symbol_from_named_item(node, source, "mod"),
-        "const_item" => symbol_from_named_item(node, source, "const"),
-        "static_item" => symbol_from_named_item(node, source, "static"),
-        "type_item" => symbol_from_named_item(node, source, "type"),
-        "field_declaration" => symbols_from_field(node, source),
-        "tuple_field_declaration" => symbols_from_field(node, source),
-        "let_declaration" => symbols_from_let(node, source),
-        _ => Vec::new(),
-    }
-}
-
-fn symbol_from_function(node: &Node, source: &[u8]) -> Vec<ExtractedSymbol> {
-    let kind = if has_impl_ancestor(node) {
-        "method"
-    } else {
-        "fn"
-    };
-    symbol_from_named_item(node, source, kind)
-}
-
-fn symbol_from_named_item(node: &Node, source: &[u8], kind: &str) -> Vec<ExtractedSymbol> {
-    let name_node = match node.child_by_field_name("name") {
-        Some(name) => name,
-        None => return Vec::new(),
-    };
-
-    let name = match name_node.utf8_text(source) {
-        Ok(text) => text.to_string(),
-        Err(_) => return Vec::new(),
-    };
-
-    let namespace = namespace_for_node(node, source);
-
-    vec![ExtractedSymbol {
-        name,
-        kind: kind.to_string(),
-        namespace,
-    }]
-}
-
-fn symbols_from_field(node: &Node, source: &[u8]) -> Vec<ExtractedSymbol> {
-    let name_node = match node.child_by_field_name("name") {
-        Some(name) => name,
-        None => return Vec::new(),
-    };
-
-    let name = match name_node.utf8_text(source) {
-        Ok(text) => text.trim().to_string(),
-        Err(_) => return Vec::new(),
-    };
-
-    let namespace = namespace_for_node(node, source);
-
-    vec![ExtractedSymbol {
-        name,
-        kind: "field".to_string(),
-        namespace,
-    }]
-}
-
-fn has_impl_ancestor(node: &Node) -> bool {
-    let mut current = node.parent();
-    while let Some(parent) = current {
-        if parent.kind() == "impl_item" {
-            return true;
+        "identifier" | "type_identifier" | "field_identifier" => {
+            if !is_part_of_definition_or_declaration(node) {
+                if let Ok(name) = node.utf8_text(source) {
+                    let pos = node.start_position();
+                    references.push(ExtractedReference {
+                        name: name.to_string(),
+                        kind: Some("reference".to_string()),
+                        namespace: if namespace_stack.is_empty() {
+                            None
+                        } else {
+                            Some(namespace_stack.join("::"))
+                        },
+                        line: pos.row + 1,
+                        column: pos.column + 1,
+                    });
+                }
+            }
         }
-        current = parent.parent();
+        _ => {}
     }
-    false
-}
 
-fn symbols_from_let(node: &Node, source: &[u8]) -> Vec<ExtractedSymbol> {
-    let pattern = match node.child_by_field_name("pattern") {
-        Some(pattern) => pattern,
-        None => return Vec::new(),
-    };
-
-    let mut names = Vec::new();
-    collect_pattern_bindings(&pattern, source, &mut names);
-
-    let namespace = namespace_for_node(node, source);
-
-    names
-        .into_iter()
-        .map(|name| ExtractedSymbol {
-            name,
-            kind: "var".to_string(),
-            namespace: namespace.clone(),
-        })
-        .collect()
+    for child in node.children(&mut node.walk()) {
+        collect_references(&child, source, references, &new_namespace_stack);
+    }
 }
 
 fn collect_pattern_bindings(pattern: &Node, source: &[u8], out: &mut Vec<String>) {
@@ -200,63 +144,35 @@ fn collect_pattern_bindings(pattern: &Node, source: &[u8], out: &mut Vec<String>
     }
 }
 
-fn namespace_for_node(node: &Node, source: &[u8]) -> Option<String> {
-    let mut names = Vec::new();
+fn is_part_of_definition_or_declaration(node: &Node) -> bool {
     let mut current = node.parent();
     while let Some(parent) = current {
         match parent.kind() {
-            "mod_item" => {
-                if let Some(name_node) = parent.child_by_field_name("name") {
-                    if let Ok(name) = name_node.utf8_text(source) {
-                        names.push(name.to_string());
-                    }
-                }
-            }
-            "impl_item" => {
-                if let Some(name) = impl_target_name(&parent, source) {
-                    names.push(name);
-                }
-            }
-            "struct_item" | "enum_item" | "trait_item" => {
-                if let Some(name_node) = parent.child_by_field_name("name") {
-                    if let Ok(name) = name_node.utf8_text(source) {
-                        names.push(name.to_string());
-                    }
-                }
+            "function_item"
+            | "method_item"
+            | "struct_item"
+            | "enum_item"
+            | "trait_item"
+            | "mod_item"
+            | "const_item"
+            | "static_item"
+            | "type_item"
+            | "field_declaration"
+            | "tuple_field_declaration"
+            | "let_declaration" => {
+                return true;
             }
             _ => {}
         }
         current = parent.parent();
     }
-
-    if names.is_empty() {
-        None
-    } else {
-        names.reverse();
-        Some(names.join("::"))
-    }
-}
-
-fn impl_target_name(node: &Node, source: &[u8]) -> Option<String> {
-    if let Some(type_node) = node.child_by_field_name("type") {
-        return type_node
-            .utf8_text(source)
-            .ok()
-            .map(|t| t.trim().to_string());
-    }
-
-    if let Some(type_node) = node.child_by_field_name("trait") {
-        if let Ok(text) = type_node.utf8_text(source) {
-            return Some(text.trim().to_string());
-        }
-    }
-
-    None
+    false
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     #[test]
     fn extracts_public_symbols_with_namespaces_and_vars() {
@@ -287,46 +203,27 @@ mod tests {
         "#;
 
         let extraction = extract(source);
-        let mut symbols = extraction.symbols;
-        symbols.sort_by(|a, b| a.name.cmp(&b.name));
+        let references = extraction.references;
 
-        assert!(symbols.iter().any(|s| s.name == "foo" && s.kind == "mod"));
-        assert!(symbols.iter().any(|s| s.name == "Bar"
-            && s.kind == "struct"
-            && s.namespace.as_deref() == Some("foo")));
-        assert!(symbols.iter().any(|s| s.name == "helper"
-            && s.kind == "fn"
-            && s.namespace.as_deref() == Some("foo")));
-        assert!(
-            symbols
-                .iter()
-                .any(|s| s.name == "TopLevel" && s.kind == "enum")
-        );
-        assert!(symbols.iter().any(|s| s.name == "top_fn" && s.kind == "fn"));
-
-        assert!(
-            symbols
-                .iter()
-                .any(|s| s.name == "private_fn" && s.kind == "fn")
-        );
-        assert!(symbols.iter().any(|s| {
-            s.name == "method" && s.kind == "method" && s.namespace.as_deref() == Some("foo::Bar")
-        }));
-        assert!(symbols.iter().any(|s| s.name == "hidden" && s.kind == "fn"));
-
-        let var_names: Vec<_> = symbols
+        let definitions: HashSet<_> = references
             .iter()
-            .filter(|s| s.kind == "var")
-            .map(|s| s.name.as_str())
+            .filter(|r| r.kind == Some("definition".to_string()))
+            .map(|r| (r.name.as_str(), r.namespace.as_deref()))
             .collect();
-        assert!(var_names.contains(&"count"));
-        assert!(var_names.contains(&"inner"));
-        assert!(var_names.contains(&"left"));
-        assert!(var_names.contains(&"right"));
-        assert!(!var_names.contains(&"_ignored"));
 
-        assert!(symbols.iter().any(|s| {
-            s.name == "inner" && s.kind == "field" && s.namespace.as_deref() == Some("foo::Bar")
-        }));
+        assert!(definitions.contains(&("foo", None)));
+        assert!(definitions.contains(&("Bar", Some("foo"))));
+        assert!(definitions.contains(&("inner", Some("foo.Bar"))));
+        assert!(definitions.contains(&("helper", Some("foo"))));
+        assert!(definitions.contains(&("private_fn", Some("foo"))));
+        assert!(definitions.contains(&("method", Some("foo.Bar"))));
+        assert!(definitions.contains(&("inner", Some("foo.Bar.method"))));
+        assert!(definitions.contains(&("left", Some("foo.Bar.method"))));
+        assert!(definitions.contains(&("right", Some("foo.Bar.method"))));
+        assert!(definitions.contains(&("TopLevel", None)));
+        assert!(definitions.contains(&("top_fn", None)));
+        assert!(definitions.contains(&("hidden", None)));
+        assert!(definitions.contains(&("variable_owner", None)));
+        assert!(definitions.contains(&("count", Some("variable_owner"))));
     }
 }

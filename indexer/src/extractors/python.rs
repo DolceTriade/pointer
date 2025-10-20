@@ -1,6 +1,6 @@
 use tree_sitter::{Node, Parser};
 
-use super::{ExtractedReference, ExtractedSymbol, Extraction};
+use super::{ExtractedReference, Extraction};
 
 pub fn extract(source: &str) -> Extraction {
     let mut parser = Parser::new();
@@ -13,106 +13,85 @@ pub fn extract(source: &str) -> Extraction {
         None => return Extraction::default(),
     };
 
-    let root = tree.root_node();
-    let source_bytes = source.as_bytes();
-    let mut stack = vec![root];
-    let mut symbols = Vec::new();
     let mut references = Vec::new();
+    let source_bytes = source.as_bytes();
+    collect_references(&tree.root_node(), source_bytes, &mut references, &[]);
 
-    while let Some(node) = stack.pop() {
-        let mut extracted = collect_symbols(&node, source_bytes);
-        symbols.append(&mut extracted);
+    references.into()
+}
 
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            stack.push(child);
-        }
-    }
+fn collect_references(
+    node: &Node,
+    source: &[u8],
+    references: &mut Vec<ExtractedReference>,
+    namespace_stack: &[String],
+) {
+    let mut new_namespace_stack = namespace_stack.to_owned();
 
-    // Collect all identifiers as references (including those that are also symbols)
-    // This allows for proper symbol-to-reference mapping where the same identifier can be both
-    let mut stack = vec![root];
-    while let Some(node) = stack.pop() {
-        if node.kind() == "identifier" {
-            if let Ok(text) = node.utf8_text(source_bytes) {
-                let name = text.trim();
-                if !name.is_empty() {
-                    let pos = node.start_position();
+    match node.kind() {
+        "class_definition" | "function_definition" | "async_function_definition" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                if let Ok(name) = name_node.utf8_text(source) {
+                    let pos = name_node.start_position();
                     references.push(ExtractedReference {
                         name: name.to_string(),
-                        kind: Some("reference".to_string()),
-                        namespace: None,
-                        line: pos.row.saturating_add(1) as usize,
-                        column: pos.column.saturating_add(1) as usize,
+                        kind: Some("definition".to_string()),
+                        namespace: if namespace_stack.is_empty() {
+                            None
+                        } else {
+                            Some(namespace_stack.join("."))
+                        },
+                        line: pos.row + 1,
+                        column: pos.column + 1,
+                    });
+                    new_namespace_stack.push(name.to_string());
+                }
+            }
+        }
+        "assignment" => {
+            if let Some(left) = node.child_by_field_name("left") {
+                let mut names = Vec::new();
+                collect_target_names(&left, source, &mut names);
+                for name in names {
+                    let pos = left.start_position();
+                    references.push(ExtractedReference {
+                        name: name.to_string(),
+                        kind: Some("definition".to_string()),
+                        namespace: if namespace_stack.is_empty() {
+                            None
+                        } else {
+                            Some(namespace_stack.join("."))
+                        },
+                        line: pos.row + 1,
+                        column: pos.column + 1,
                     });
                 }
             }
         }
-
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            stack.push(child);
+        "identifier" => {
+            if !is_part_of_definition_or_declaration(node) {
+                if let Ok(name) = node.utf8_text(source) {
+                    let pos = node.start_position();
+                    references.push(ExtractedReference {
+                        name: name.to_string(),
+                        kind: Some("reference".to_string()),
+                        namespace: if namespace_stack.is_empty() {
+                            None
+                        } else {
+                            Some(namespace_stack.join("."))
+                        },
+                        line: pos.row + 1,
+                        column: pos.column + 1,
+                    });
+                }
+            }
         }
+        _ => {}
     }
 
-    Extraction {
-        symbols,
-        references,
+    for child in node.children(&mut node.walk()) {
+        collect_references(&child, source, references, &new_namespace_stack);
     }
-}
-
-fn collect_symbols(node: &Node, source: &[u8]) -> Vec<ExtractedSymbol> {
-    match node.kind() {
-        "class_definition" => symbol_from_named(node, source, "class"),
-        "function_definition" | "async_function_definition" => {
-            let kind = function_kind(node, source);
-            symbol_from_named(node, source, kind)
-        }
-        "assignment" => symbols_from_assignment(node, source),
-        _ => Vec::new(),
-    }
-}
-
-fn symbol_from_named(node: &Node, source: &[u8], kind: &str) -> Vec<ExtractedSymbol> {
-    let name_node = match node.child_by_field_name("name") {
-        Some(name) => name,
-        None => return Vec::new(),
-    };
-    let name = match name_node.utf8_text(source) {
-        Ok(text) => text.to_string(),
-        Err(_) => return Vec::new(),
-    };
-    let namespace = namespace_for_node(node, source);
-
-    vec![ExtractedSymbol {
-        name,
-        kind: kind.to_string(),
-        namespace,
-    }]
-}
-
-fn symbols_from_assignment(node: &Node, source: &[u8]) -> Vec<ExtractedSymbol> {
-    let namespace = namespace_for_node(node, source);
-    let mut names = Vec::new();
-
-    if let Some(left) = node.child_by_field_name("left") {
-        collect_target_names(&left, source, &mut names);
-    }
-
-    let value_is_function = node
-        .child_by_field_name("right")
-        .map(|right| python_expression_is_function(&right))
-        .unwrap_or(false);
-    let classify_as_function = value_is_function && names.len() == 1;
-
-    names
-        .into_iter()
-        .map(|name| ExtractedSymbol {
-            name,
-            kind: if classify_as_function { "fn" } else { "var" }.to_string(),
-            namespace: namespace.clone(),
-        })
-        .collect()
 }
 
 fn collect_target_names(node: &Node, source: &[u8], out: &mut Vec<String>) {
@@ -132,66 +111,27 @@ fn collect_target_names(node: &Node, source: &[u8], out: &mut Vec<String>) {
     }
 }
 
-fn python_expression_is_function(node: &Node) -> bool {
-    match node.kind() {
-        "lambda" => true,
-        "parenthesized_expression" => {
-            let mut cursor = node.walk();
-            for child in node.children(&mut cursor) {
-                if child.is_named() && python_expression_is_function(&child) {
-                    return true;
-                }
-            }
-            false
-        }
-        _ => false,
-    }
-}
-
-fn namespace_for_node(node: &Node, source: &[u8]) -> Option<String> {
-    let mut names = Vec::new();
+fn is_part_of_definition_or_declaration(node: &Node) -> bool {
     let mut current = node.parent();
-
     while let Some(parent) = current {
         match parent.kind() {
-            "class_definition" | "function_definition" | "async_function_definition" => {
-                if let Some(name_node) = parent.child_by_field_name("name") {
-                    if let Ok(text) = name_node.utf8_text(source) {
-                        names.push(text.to_string());
-                    }
-                }
+            "class_definition"
+            | "function_definition"
+            | "async_function_definition"
+            | "assignment" => {
+                return true;
             }
             _ => {}
         }
         current = parent.parent();
     }
-
-    if names.is_empty() {
-        None
-    } else {
-        names.reverse();
-        Some(names.join("."))
-    }
-}
-
-fn function_kind<'a>(node: &'a Node, source: &[u8]) -> &'static str {
-    if let Some(name_node) = node.child_by_field_name("name") {
-        let start = node.start_byte();
-        let end = name_node.start_byte();
-        if start < end && end <= source.len() {
-            if let Ok(text) = std::str::from_utf8(&source[start..end]) {
-                if text.contains("async") {
-                    return "async_fn";
-                }
-            }
-        }
-    }
-    "fn"
+    false
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     #[test]
     fn extracts_python_symbols_and_variables() {
@@ -217,51 +157,36 @@ mod tests {
         "#;
 
         let extraction = extract(source);
-        let mut symbols = extraction.symbols;
-        symbols.sort_by(|a, b| a.name.cmp(&b.name));
+        let references = extraction.references;
 
-        assert!(
-            symbols
-                .iter()
-                .any(|s| s.name == "Outer" && s.kind == "class")
-        );
-        assert!(
-            symbols
-                .iter()
-                .any(|s| s.name == "Inner" && s.namespace.as_deref() == Some("Outer"))
-        );
-        assert!(symbols.iter().any(|s| s.name == "nested_async"
-            && s.kind == "async_fn"
-            && s.namespace.as_deref() == Some("Outer.Inner")));
-        assert!(symbols.iter().any(|s| s.name == "method"
-            && s.kind == "fn"
-            && s.namespace.as_deref() == Some("Outer")));
-        assert!(symbols.iter().any(|s| s.name == "helper"
-            && s.kind == "fn"
-            && s.namespace.as_deref() == Some("Outer.method")));
-        assert!(
-            symbols
-                .iter()
-                .any(|s| s.name == "top_level" && s.kind == "fn" && s.namespace.is_none())
-        );
-
-        let vars: Vec<_> = symbols
+        let definitions: HashSet<_> = references
             .iter()
-            .filter(|s| s.kind == "var")
-            .map(|s| (s.name.as_str(), s.namespace.as_deref()))
+            .filter(|r| r.kind == Some("definition".to_string()))
+            .map(|r| (r.name.as_str(), r.namespace.as_deref()))
             .collect();
 
-        assert!(vars.contains(&("value", Some("Outer.method.helper"))));
-        assert!(vars.contains(&("count", Some("Outer.method"))));
-        assert!(vars.contains(&("answer", Some("top_level"))));
-        assert!(vars.contains(&("env", None)));
-        assert!(!vars.iter().any(|(name, _)| *name == "compute"));
+        assert!(definitions.contains(&("Outer", None)));
+        assert!(definitions.contains(&("Inner", Some("Outer"))));
+        assert!(definitions.contains(&("nested_async", Some("Outer.Inner"))));
+        assert!(definitions.contains(&("method", Some("Outer"))));
+        assert!(definitions.contains(&("helper", Some("Outer.method"))));
+        assert!(definitions.contains(&("value", Some("Outer.method.helper"))));
+        assert!(definitions.contains(&("count", Some("Outer.method"))));
+        assert!(definitions.contains(&("top_level", None)));
+        assert!(definitions.contains(&("answer", Some("top_level"))));
+        assert!(definitions.contains(&("env", None)));
+        assert!(definitions.contains(&("compute", None)));
 
-        let fn_symbols: Vec<_> = symbols
+        let refs: HashSet<_> = references
             .iter()
-            .filter(|s| s.kind == "fn")
-            .map(|s| (s.name.as_str(), s.namespace.as_deref()))
+            .filter(|r| r.kind == Some("reference".to_string()))
+            .map(|r| r.name.as_str())
             .collect();
-        assert!(fn_symbols.contains(&("compute", None)));
+
+        assert!(refs.contains("value"));
+        assert!(refs.contains("helper"));
+        assert!(refs.contains("count"));
+        assert!(refs.contains("answer"));
+        assert!(refs.contains("value"));
     }
 }

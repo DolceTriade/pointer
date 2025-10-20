@@ -12,9 +12,7 @@ pub struct ContentBlob {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SymbolRecord {
     pub content_hash: String,
-    pub namespace: Option<String>,
     pub name: String,
-    pub fully_qualified: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
