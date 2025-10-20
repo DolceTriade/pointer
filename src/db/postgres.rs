@@ -1707,7 +1707,6 @@ struct ReferenceEntry {
 struct SnippetRow {
     idx: i32,
     line: i32,
-    context: i32,
     line_count: i32,
     start_line: i32,
     end_line: i32,

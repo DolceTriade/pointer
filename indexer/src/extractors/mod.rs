@@ -1,4 +1,3 @@
-use tree_sitter::{Node, Parser};
 
 mod c;
 mod cpp;
