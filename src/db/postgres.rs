@@ -457,7 +457,7 @@ SELECT
     ) AS snippet
 FROM data
 ORDER BY idx
-            "#
+            "#,
         )
         .bind(&repositories)
         .bind(&commits)

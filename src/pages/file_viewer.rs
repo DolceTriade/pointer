@@ -1003,6 +1003,32 @@ fn CodeIntelPanel(
                                                                     (None, link)
                                                                 };
                                                                 let reference_count = references.len();
+                                                                let definition_repo = definition.repository.clone();
+                                                                let grouped_references = {
+                                                                    let mut groups: Vec<
+                                                                        (String, String, String, Vec<SymbolReferenceWithSnippet>),
+                                                                    > = Vec::new();
+                                                                    for entry in references.into_iter() {
+                                                                        let repo_name = entry.reference.repository.clone();
+                                                                        let commit_sha = entry.reference.commit_sha.clone();
+                                                                        let file_path = entry.reference.file_path.clone();
+                                                                        if let Some((_, _, _, items)) = groups
+                                                                            .iter_mut()
+                                                                            .find(|(existing_repo, existing_commit, existing_path, _)| {
+                                                                                existing_repo == &repo_name
+                                                                                    && existing_commit == &commit_sha
+                                                                                    && existing_path == &file_path
+                                                                            })
+                                                                        {
+                                                                            items.push(entry);
+                                                                        } else {
+                                                                            groups
+                                                                                .push((repo_name, commit_sha, file_path, vec![entry]));
+                                                                        }
+                                                                    }
+                                                                    groups
+                                                                };
+
                                                                 view! {
                                                                     <div class="rounded border border-gray-200 dark:border-gray-700 p-3">
                                                                         <div class="flex items-center justify-between gap-2">
@@ -1053,7 +1079,7 @@ fn CodeIntelPanel(
                                                                             <h3 class="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
                                                                                 {format!("References ({reference_count})")}
                                                                             </h3>
-                                                                            {if references.is_empty() {
+                                                                            {if grouped_references.is_empty() {
                                                                                 Either::Left(
                                                                                     view! {
                                                                                         <p class="text-xs text-gray-500 dark:text-gray-400 mt-2">
@@ -1062,73 +1088,105 @@ fn CodeIntelPanel(
                                                                                     },
                                                                                 )
                                                                             } else {
+                                                                                let groups = grouped_references;
                                                                                 Either::Right(
                                                                                     view! {
                                                                                         <div class="mt-3 space-y-3">
-                                                                                            {references
+                                                                                            {groups
                                                                                                 .into_iter()
-                                                                                                .map(|entry| {
-                                                                                                    let reference = entry.reference;
-                                                                                                    let line_number = reference.line.max(1);
-                                                                                                    let reference_link = format!(
-                                                                                                        "/repo/{}/tree/{}/{}#L{}",
-                                                                                                        reference.repository,
-                                                                                                        reference.commit_sha,
-                                                                                                        reference.file_path,
-                                                                                                        line_number,
-                                                                                                    );
+                                                                                                .map(|(repo_name, _commit_sha, file_path, entries)| {
+                                                                                                    let file_reference_count = entries.len();
+                                                                                                    let reference_label = if file_reference_count == 1 {
+                                                                                                        "1 match".to_string()
+                                                                                                    } else {
+                                                                                                        format!("{file_reference_count} matches")
+                                                                                                    };
+                                                                                                    let summary_label = if repo_name == definition_repo {
+                                                                                                        file_path.clone()
+                                                                                                    } else {
+                                                                                                        format!("{repo_name}/{file_path}")
+                                                                                                    };
+
                                                                                                     view! {
-                                                                                                        <A
-                                                                                                            href=reference_link
-                                                                                                            attr:class="block rounded border border-gray-200 dark:border-gray-700 hover:border-blue-400 dark:hover:border-blue-400/60 transition-colors overflow-x-none"
-                                                                                                        >
-                                                                                                            <div class="flex items-center justify-between gap-2 px-3 py-2">
-                                                                                                                <div class="min-w-0">
-                                                                                                                    <p class="text-sm text-blue-600 dark:text-blue-400 truncate">
-                                                                                                                        {reference.file_path.clone()}
-                                                                                                                    </p>
-                                                                                                                    <p class="text-xs text-gray-500 dark:text-gray-400">
-                                                                                                                        {format!(
-                                                                                                                            "Line {}  •  Column {}",
+                                                                                                        <details class="border border-gray-200 dark:border-gray-700 rounded">
+                                                                                                            <summary class="flex items-center justify-between gap-2 px-3 py-2 cursor-pointer select-none hover:bg-gray-100 dark:hover:bg-gray-700 rounded">
+                                                                                                                <span class="min-w-0 truncate text-sm text-blue-600 dark:text-blue-400">
+                                                                                                                    {summary_label}
+                                                                                                                </span>
+                                                                                                                <span class="text-xs text-gray-500 dark:text-gray-400">
+                                                                                                                    {reference_label}
+                                                                                                                </span>
+                                                                                                            </summary>
+                                                                                                            <div class="mt-2 space-y-2 px-3 pb-3">
+                                                                                                                {entries
+                                                                                                                    .into_iter()
+                                                                                                                    .map(|entry| {
+                                                                                                                        let reference = entry.reference;
+                                                                                                                        let line_number = reference.line.max(1);
+                                                                                                                        let reference_link = format!(
+                                                                                                                            "/repo/{}/tree/{}/{}#L{}",
+                                                                                                                            reference.repository,
+                                                                                                                            reference.commit_sha,
+                                                                                                                            reference.file_path,
                                                                                                                             line_number,
-                                                                                                                            reference.column,
-                                                                                                                        )}
-                                                                                                                    </p>
-                                                                                                                </div>
+                                                                                                                        );
+                                                                                                                        view! {
+                                                                                                                            <A
+                                                                                                                                href=reference_link
+                                                                                                                                attr:class="block rounded border border-gray-200 dark:border-gray-700 hover:border-blue-400 dark:hover:border-blue-400/60 transition-colors overflow-x-none"
+                                                                                                                            >
+                                                                                                                                <div class="flex items-center justify-between gap-2 px-3 py-2">
+                                                                                                                                    <div class="min-w-0">
+                                                                                                                                        <p class="text-sm text-blue-600 dark:text-blue-400 truncate">
+                                                                                                                                            {reference.file_path.clone()}
+                                                                                                                                        </p>
+                                                                                                                                        <p class="text-xs text-gray-500 dark:text-gray-400">
+                                                                                                                                            {format!(
+                                                                                                                                                "Line {}  •  Column {}",
+                                                                                                                                                line_number,
+                                                                                                                                                reference.column,
+                                                                                                                                            )}
+                                                                                                                                        </p>
+                                                                                                                                    </div>
+                                                                                                                                </div>
+                                                                                                                                {entry
+                                                                                                                                    .snippet
+                                                                                                                                    .map(|snippet| {
+                                                                                                                                        let highlight_line = snippet.highlight_line;
+                                                                                                                                        let start_line = snippet.start_line;
+                                                                                                                                        view! {
+                                                                                                                                            <div class="bg-gray-50 dark:bg-gray-900/50 border-t border-gray-200 dark:border-gray-700 px-3 py-2 text-xs font-mono">
+                                                                                                                                                {snippet
+                                                                                                                                                    .lines
+                                                                                                                                                    .into_iter()
+                                                                                                                                                    .enumerate()
+                                                                                                                                                    .map(|(idx, text)| {
+                                                                                                                                                        let current_line = start_line + idx as u32;
+                                                                                                                                                        let is_highlight = current_line == highlight_line;
+                                                                                                                                                        let row_class = if is_highlight {
+                                                                                                                                                            "flex gap-3 bg-blue-100/80 dark:bg-blue-900/40 rounded px-2 py-1"
+                                                                                                                                                        } else {
+                                                                                                                                                            "flex gap-3 px-2 py-1"
+                                                                                                                                                        };
+                                                                                                                                                        view! {
+                                                                                                                                                            <div class=row_class>
+                                                                                                                                                                <span class="w-12 text-right text-[10px] text-gray-500">
+                                                                                                                                                                    {current_line}
+                                                                                                                                                                </span>
+                                                                                                                                                                <span class="whitespace-pre-wrap break-words">{text}</span>
+                                                                                                                                                            </div>
+                                                                                                                                                        }
+                                                                                                                                                    })
+                                                                                                                                                    .collect_view()}
+                                                                                                                                            </div>
+                                                                                                                                        }
+                                                                                                                                    })}
+                                                                                                                            </A>
+                                                                                                                        }
+                                                                                                                    })
+                                                                                                                    .collect_view()}
                                                                                                             </div>
-                                                                                                            {entry
-                                                                                                                .snippet
-                                                                                                                .map(|snippet| {
-                                                                                                                    let highlight_line = snippet.highlight_line;
-                                                                                                                    let start_line = snippet.start_line;
-                                                                                                                    view! {
-                                                                                                                        <div class="bg-gray-50 dark:bg-gray-900/50 border-t border-gray-200 dark:border-gray-700 px-3 py-2 text-xs font-mono">
-                                                                                                                            {snippet
-                                                                                                                                .lines
-                                                                                                                                .into_iter()
-                                                                                                                                .enumerate()
-                                                                                                                                .map(|(idx, text)| {
-                                                                                                                                    let current_line = start_line + idx as u32;
-                                                                                                                                    let is_highlight = current_line == highlight_line;
-                                                                                                                                    let row_class = if is_highlight {
-                                                                                                                                        "flex gap-3 bg-blue-100/80 dark:bg-blue-900/40 rounded px-2 py-1"
-                                                                                                                                    } else {
-                                                                                                                                        "flex gap-3 px-2 py-1"
-                                                                                                                                    };
-                                                                                                                                    view! {
-                                                                                                                                        <div class=row_class>
-                                                                                                                                            <span class="w-12 text-right text-[10px] text-gray-500">
-                                                                                                                                                {current_line}
-                                                                                                                                            </span>
-                                                                                                                                            <span class="whitespace-pre-wrap break-words">{text}</span>
-                                                                                                                                        </div>
-                                                                                                                                    }
-                                                                                                                                })
-                                                                                                                                .collect_view()}
-                                                                                                                        </div>
-                                                                                                                    }
-                                                                                                                })}
-                                                                                                        </A>
+                                                                                                        </details>
                                                                                                     }
                                                                                                 })
                                                                                                 .collect_view()}
