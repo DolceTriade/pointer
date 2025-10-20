@@ -1015,7 +1015,7 @@ ORDER BY idx
                 for pattern in &plan.file_globs {
                     qb.push(" AND f.file_path ILIKE ");
                     qb.push_bind(pattern);
-                    qb.push(" ESCAPE '\\\\'");
+                    qb.push(" ESCAPE '\\'");
                 }
             }
 
@@ -1023,7 +1023,7 @@ ORDER BY idx
                 for pattern in &plan.excluded_file_globs {
                     qb.push(" AND f.file_path NOT ILIKE ");
                     qb.push_bind(pattern);
-                    qb.push(" ESCAPE '\\\\'");
+                    qb.push(" ESCAPE '\\'");
                 }
             }
 
