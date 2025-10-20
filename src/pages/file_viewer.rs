@@ -451,34 +451,106 @@ fn Breadcrumbs(
         segs
     });
 
+    let copy_feedback = RwSignal::new(None::<String>);
+    let copy_segments = {
+        let segments = segments.clone();
+        let copy_feedback = copy_feedback.clone();
+        move |_event: leptos::ev::MouseEvent| {
+            let parts: Vec<String> = segments
+                .get_untracked()
+                .into_iter()
+                .map(|(name, _, _)| name)
+                .collect();
+
+            if parts.is_empty() {
+                return;
+            }
+
+            let joined = parts.join("/");
+            if let Some(window) = web_sys::window() {
+                let clipboard = window.navigator().clipboard();
+                _ = clipboard.write_text(&joined);
+                copy_feedback.set(Some(joined.clone()));
+                let signal = copy_feedback.clone();
+                set_timeout(
+                    move || {
+                        signal.set(None);
+                    },
+                    std::time::Duration::from_secs(2),
+                );
+            }
+        }
+    };
+
     view! {
-        <div class="text-sm breadcrumbs mb-6">
-            <ul>
-                <li>
-                    <A href=move || format!("/repo/{}", repo())>{move || repo()}</A>
-                </li>
-                <li>
-                    <A href=move || {
-                        format!("/repo/{}/tree/{}/", repo(), branch())
-                    }>{move || branch()}</A>
-                </li>
-                <For
-                    each=move || segments.get()
-                    key=|(_, p, _)| p.clone()
-                    children=move |(name, p, is_last)| {
-                        let full_path = format!("/repo/{}/tree/{}/{}", repo.get(), branch.get(), p);
-                        view! {
-                            <li>
-                                {if is_last {
-                                    Either::Left(view! { <span>{name}</span> })
-                                } else {
-                                    Either::Right(view! { <A href=full_path>{name}</A> })
-                                }}
-                            </li>
+        <div class="flex flex-wrap items-center gap-3 mb-6">
+            <div class="text-sm breadcrumbs flex-1 min-w-0">
+                <ul>
+                    <li>
+                        <A href=move || format!("/repo/{}", repo())>{move || repo()}</A>
+                    </li>
+                    <li>
+                        <A href=move || {
+                            format!("/repo/{}/tree/{}/", repo(), branch())
+                        }>{move || branch()}</A>
+                    </li>
+                    <For
+                        each=move || segments.get()
+                        key=|(_, p, _)| p.clone()
+                        children=move |(name, p, is_last)| {
+                            let full_path = format!("/repo/{}/tree/{}/{}", repo.get(), branch.get(), p);
+                            view! {
+                                <li>
+                                    {if is_last {
+                                        Either::Left(view! { <span class="truncate">{name}</span> })
+                                    } else {
+                                        Either::Right(view! { <A href=full_path>{name}</A> })
+                                    }}
+                                </li>
+                            }
                         }
-                    }
-                />
-            </ul>
+                    />
+                </ul>
+            </div>
+            <Show when=move || !segments.get().is_empty() fallback=|| ()>
+                <button
+                    class="btn btn-xs btn-outline gap-2"
+                    type="button"
+                    on:click=copy_segments
+                    title="Copy file path"
+                >
+                    <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.5"
+                        class="h-3.5 w-3.5"
+                    >
+                        <path
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                            d="M8 8h8a2 2 0 012 2v8a2 2 0 01-2 2H8a2 2 0 01-2-2v-8a2 2 0 012-2z"
+                        ></path>
+                        <path
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                            d="M16 4h-8a2 2 0 00-2 2v2h2V6h8v8h-2v2h2a2 2 0 002-2v-8a2 2 0 00-2-2z"
+                        ></path>
+                    </svg>
+                    <span>"Copy path"</span>
+                </button>
+            </Show>
+            <Show when=move || copy_feedback.get().is_some() fallback=|| ()>
+                <span class="badge badge-success badge-outline text-xs font-mono">
+                    {move || {
+                        copy_feedback
+                            .get()
+                            .map(|value| format!("Copied {value}"))
+                            .unwrap_or_default()
+                    }}
+                </span>
+            </Show>
         </div>
     }
 }
