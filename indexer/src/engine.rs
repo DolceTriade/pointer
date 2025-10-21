@@ -8,7 +8,7 @@ use ignore::WalkBuilder;
 use tracing::{debug, trace, warn};
 
 use crate::config::IndexerConfig;
-use crate::extractors::{self, ExtractedSymbol, Extraction};
+use crate::extractors::{self, ExtractedSymbol};
 use crate::models::{
     BranchHead, ChunkMapping, ContentBlob, FilePointer, IndexArtifacts, IndexReport,
     ReferenceRecord, SymbolRecord, UniqueChunk,
@@ -184,8 +184,10 @@ impl Indexer {
                 let source = String::from_utf8_lossy(&bytes);
                 let namespace_hint = utils::namespace_from_path(Some(lang), &relative_path);
 
-                let Extraction { references } = extractors::extract(lang, &source);
-                let symbols = derive_symbols(&references);
+                let extraction =
+                    extractors::extract(lang, &source, namespace_hint.as_deref());
+
+                let symbols = derive_symbols(&extraction.references);
 
                 if symbols.is_empty() {
                     debug!(file = %normalized_path, language = lang, "no symbols extracted");
@@ -198,7 +200,7 @@ impl Indexer {
                     });
                 }
 
-                for reference in references {
+                for reference in extraction.references {
                     let namespace = reference.namespace.or_else(|| namespace_hint.clone());
                     let fully_qualified = match &namespace {
                         Some(ns) => format!("{}::{}", ns, reference.name),
