@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -8,6 +8,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use reqwest::blocking::{Client, Response};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
+use tempfile::tempfile;
 use tracing::info;
 use uuid::Uuid;
 use zstd::stream::Encoder;
@@ -34,8 +35,8 @@ pub fn upload_index(url: &str, api_key: Option<&str>, artifacts: &IndexArtifacts
     )?;
 
     // 2. Check which unique chunks the server needs
-    let needed_chunk_hashes =
-        request_needed_chunks(&client, &endpoints, api_key, &artifacts.unique_chunks)?;
+    let chunk_hashes = artifacts.chunk_hashes().to_vec();
+    let needed_chunk_hashes = request_needed_chunks(&client, &endpoints, api_key, &chunk_hashes)?;
 
     // 3. Upload the content of the needed chunks
     if !needed_chunk_hashes.is_empty() {
@@ -43,7 +44,7 @@ pub fn upload_index(url: &str, api_key: Option<&str>, artifacts: &IndexArtifacts
             &client,
             &endpoints,
             api_key,
-            &artifacts.unique_chunks,
+            artifacts,
             &needed_chunk_hashes,
         )?;
     } else {
@@ -108,15 +109,15 @@ fn request_needed_chunks(
     client: &Client,
     endpoints: &Endpoints,
     api_key: Option<&str>,
-    unique_chunks: &[UniqueChunk],
+    chunk_hashes: &[String],
 ) -> Result<HashSet<String>> {
-    if unique_chunks.is_empty() {
+    if chunk_hashes.is_empty() {
         return Ok(HashSet::new());
     }
-    info!(count = unique_chunks.len(), "checking for needed chunks");
+    info!(count = chunk_hashes.len(), "checking for needed chunks");
 
     let request = ChunkNeedRequest {
-        hashes: unique_chunks.iter().map(|c| c.chunk_hash.clone()).collect(),
+        hashes: chunk_hashes.to_vec(),
     };
 
     let response: ChunkNeedResponse = post_json(client, &endpoints.chunks_need, api_key, &request)?
@@ -131,12 +132,13 @@ fn upload_unique_chunks(
     client: &Client,
     endpoints: &Endpoints,
     api_key: Option<&str>,
-    unique_chunks: &[UniqueChunk],
+    artifacts: &IndexArtifacts,
     needed_hashes: &HashSet<String>,
 ) -> Result<()> {
-    let needed_chunks: Vec<&UniqueChunk> = unique_chunks
+    let needed_chunks: Vec<&String> = artifacts
+        .chunk_hashes()
         .iter()
-        .filter(|c| needed_hashes.contains(&c.chunk_hash))
+        .filter(|hash| needed_hashes.contains(hash.as_str()))
         .collect();
 
     if needed_chunks.is_empty() {
@@ -148,10 +150,18 @@ fn upload_unique_chunks(
         "uploading unique chunk content"
     );
     for batch in needed_chunks.chunks(100) {
-        // Chunks can be large, use a smaller batch size
-        let payload = UniqueChunkUploadRequest {
-            chunks: batch.iter().map(|c| (*c).clone()).collect(),
-        };
+        let mut chunks = Vec::with_capacity(batch.len());
+        for hash in batch {
+            let text_content = artifacts
+                .read_chunk(hash)
+                .with_context(|| format!("failed to read chunk content for {}", hash))?;
+            chunks.push(UniqueChunk {
+                chunk_hash: (*hash).clone(),
+                text_content,
+            });
+        }
+
+        let payload = UniqueChunkUploadRequest { chunks };
         post_json(client, &endpoints.chunks_upload, api_key, &payload)?;
     }
     info!("unique chunk content uploaded");
@@ -185,37 +195,64 @@ fn upload_manifest(
     api_key: Option<&str>,
     report: &IndexReport,
 ) -> Result<()> {
-    let json = serde_json::to_vec(report).context("failed to serialize index report")?;
+    let upload_id = Uuid::new_v4().to_string();
 
-    let mut encoder = Encoder::new(Vec::new(), 0)?;
-    encoder
-        .write_all(&json)
-        .context("failed to compress manifest")?;
-    let compressed = encoder
+    let temp_file = tempfile().context("failed to create temporary file for manifest")?;
+    let mut encoder = Encoder::new(temp_file, 0)?;
+    serde_json::to_writer(&mut encoder, report).context("failed to serialize index report")?;
+    let mut file = encoder
         .finish()
         .context("failed to finalize manifest compression")?;
 
-    let upload_id = Uuid::new_v4().to_string();
-    let total_chunks = if compressed.is_empty() {
-        1
-    } else {
-        ((compressed.len() + MANIFEST_CHUNK_SIZE - 1) / MANIFEST_CHUNK_SIZE) as u32
-    };
+    let total_len = file
+        .seek(SeekFrom::End(0))
+        .context("failed to measure compressed manifest")?;
+    let chunk_size = MANIFEST_CHUNK_SIZE as u64;
+    let mut total_chunks = ((total_len + chunk_size.saturating_sub(1)) / chunk_size) as u32;
+    if total_chunks == 0 {
+        total_chunks = 1;
+    }
+    file.seek(SeekFrom::Start(0))
+        .context("failed to rewind compressed manifest")?;
 
-    for (index, chunk) in compressed.chunks(MANIFEST_CHUNK_SIZE).enumerate() {
+    if total_len == 0 {
         let payload = ManifestChunkRequest {
             upload_id: upload_id.clone(),
-            chunk_index: index as u32,
+            chunk_index: 0,
             total_chunks,
-            data: BASE64.encode(chunk),
+            data: String::new(),
         };
 
         post_json(client, &endpoints.manifest_chunk, api_key, &payload)?;
-        info!(
-            chunk = index + 1,
-            total = total_chunks,
-            "uploaded manifest chunk"
-        );
+        info!(chunk = 1, total = total_chunks, "uploaded manifest chunk");
+    } else {
+        let mut buffer = vec![0u8; MANIFEST_CHUNK_SIZE];
+        let mut chunk_index: u32 = 0;
+
+        loop {
+            let read = file
+                .read(&mut buffer)
+                .context("failed to read compressed manifest chunk")?;
+            if read == 0 {
+                break;
+            }
+
+            let payload = ManifestChunkRequest {
+                upload_id: upload_id.clone(),
+                chunk_index,
+                total_chunks,
+                data: BASE64.encode(&buffer[..read]),
+            };
+
+            post_json(client, &endpoints.manifest_chunk, api_key, &payload)?;
+            info!(
+                chunk = (chunk_index + 1),
+                total = total_chunks,
+                "uploaded manifest chunk"
+            );
+
+            chunk_index += 1;
+        }
     }
 
     let finalize = ManifestFinalizeRequest {

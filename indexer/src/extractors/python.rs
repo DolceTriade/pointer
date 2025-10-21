@@ -340,21 +340,12 @@ mod tests {
 
         collected.sort_by(|a, b| a.0.cmp(&b.0));
 
-        assert!(collected.contains(&(
-            "Inner".to_string(),
-            Some("pkg.module".to_string())
-        )));
-        assert!(collected.contains(&(
-            "method".to_string(),
-            Some("pkg.module::Inner".to_string())
-        )));
+        assert!(collected.contains(&("Inner".to_string(), Some("pkg.module".to_string()))));
+        assert!(collected.contains(&("method".to_string(), Some("pkg.module::Inner".to_string()))));
         assert!(collected.contains(&(
             "value".to_string(),
             Some("pkg.module::Inner::method".to_string())
         )));
-        assert!(collected.contains(&(
-            "top_level_var".to_string(),
-            Some("pkg.module".to_string())
-        )));
+        assert!(collected.contains(&("top_level_var".to_string(), Some("pkg.module".to_string()))));
     }
 }

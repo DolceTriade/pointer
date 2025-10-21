@@ -1,4 +1,7 @@
+use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
+
+use crate::chunk_store::ChunkStore;
 
 // Represents a file's metadata. Content is stored separately.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,9 +71,37 @@ pub struct ChunkMapping {
 }
 
 // The final output of the indexer.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IndexArtifacts {
     pub report: IndexReport,
-    pub unique_chunks: Vec<UniqueChunk>,
+    chunk_store: ChunkStore,
     pub chunk_mappings: Vec<ChunkMapping>,
+}
+
+impl IndexArtifacts {
+    pub(crate) fn new(
+        report: IndexReport,
+        chunk_store: ChunkStore,
+        chunk_mappings: Vec<ChunkMapping>,
+    ) -> Self {
+        Self {
+            report,
+            chunk_store,
+            chunk_mappings,
+        }
+    }
+
+    pub fn chunk_hashes(&self) -> &[String] {
+        self.chunk_store.hashes()
+    }
+
+    pub fn chunk_count(&self) -> usize {
+        self.chunk_store.len()
+    }
+
+    pub fn read_chunk(&self, hash: &str) -> Result<String> {
+        match self.chunk_store.read_chunk(hash)? {
+            Some(text) => Ok(text),
+            None => Err(anyhow!("missing chunk content for hash {hash}")),
+        }
+    }
 }
