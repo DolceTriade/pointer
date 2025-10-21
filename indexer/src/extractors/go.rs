@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use tree_sitter::{Node, Parser};
 
 use super::{ExtractedReference, Extraction};
@@ -15,7 +16,14 @@ pub fn extract(source: &str) -> Extraction {
 
     let mut references = Vec::new();
     let source_bytes = source.as_bytes();
-    collect_references(&tree.root_node(), source_bytes, &mut references, &[]);
+    let mut defined_nodes = HashSet::new();
+    collect_references(
+        &tree.root_node(),
+        source_bytes,
+        &mut references,
+        &[],
+        &mut defined_nodes,
+    );
 
     references.into()
 }
@@ -25,76 +33,111 @@ fn collect_references(
     source: &[u8],
     references: &mut Vec<ExtractedReference>,
     namespace_stack: &[String],
+    defined_nodes: &mut HashSet<usize>,
 ) {
-    let mut new_namespace_stack = namespace_stack.to_owned();
+    if node.kind() == "source_file" {
+        let mut current_namespace = namespace_stack.to_vec();
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.kind() == "package_clause" {
+                let mut pkg_cursor = child.walk();
+                let mut name_node_opt = None;
+                for grand in child.children(&mut pkg_cursor) {
+                    if matches!(grand.kind(), "identifier" | "package_identifier") {
+                        name_node_opt = Some(grand);
+                        break;
+                    }
+                }
+                if let Some(name_node) = name_node_opt {
+                    if let Some(name) = record_definition_node(
+                        &name_node,
+                        source,
+                        references,
+                        namespace_stack,
+                        "definition",
+                        defined_nodes,
+                    ) {
+                        current_namespace = push_namespace(namespace_stack, &name);
+                    }
+                }
+            } else {
+                collect_references(
+                    &child,
+                    source,
+                    references,
+                    &current_namespace,
+                    defined_nodes,
+                );
+            }
+        }
+        return;
+    }
+
+    let mut next_namespace = namespace_stack.to_vec();
 
     match node.kind() {
         "function_declaration" => {
             if let Some(name_node) = node.child_by_field_name("name") {
-                if let Ok(name) = name_node.utf8_text(source) {
-                    let pos = name_node.start_position();
-                    references.push(ExtractedReference {
-                        name: name.to_string(),
-                        kind: Some("definition".to_string()),
-                        namespace: if namespace_stack.is_empty() {
-                            None
-                        } else {
-                            Some(namespace_stack.join("."))
-                        },
-                        line: pos.row + 1,
-                        column: pos.column + 1,
-                    });
-                    new_namespace_stack.push(name.to_string());
+                if let Some(name) = record_definition_node(
+                    &name_node,
+                    source,
+                    references,
+                    namespace_stack,
+                    "definition",
+                    defined_nodes,
+                ) {
+                    next_namespace = push_namespace(namespace_stack, &name);
                 }
             }
         }
         "method_declaration" => {
-            if let Some(name_node) = node.child_by_field_name("name") {
-                if let Ok(name) = name_node.utf8_text(source) {
-                    let pos = name_node.start_position();
-                    let mut namespace = if namespace_stack.is_empty() {
-                        None
-                    } else {
-                        Some(namespace_stack.join("."))
-                    };
-
-                    if let Some(receiver) = node.child_by_field_name("receiver") {
-                        if let Some(receiver_type) = receiver.child_by_field_name("type") {
-                            if let Ok(receiver_type_name) = receiver_type.utf8_text(source) {
-                                namespace = merge_namespaces(
-                                    namespace.as_deref(),
-                                    Some(receiver_type_name.trim_start_matches('*')),
-                                );
+            let mut method_namespace = namespace_stack.to_vec();
+            if let Some(receiver) = node.child_by_field_name("receiver") {
+                let mut receiver_type_name = None;
+                let mut cursor = receiver.walk();
+                for param in receiver.children(&mut cursor) {
+                    if param.kind() == "parameter_declaration" {
+                        if let Some(receiver_type) = param.child_by_field_name("type") {
+                            receiver_type_name = find_type_identifier(&receiver_type, source);
+                            if receiver_type_name.is_some() {
+                                break;
                             }
                         }
                     }
-
-                    references.push(ExtractedReference {
-                        name: name.to_string(),
-                        kind: Some("definition".to_string()),
-                        namespace,
-                        line: pos.row + 1,
-                        column: pos.column + 1,
-                    });
-                    new_namespace_stack.push(name.to_string());
+                }
+                if let Some(receiver_name) = receiver_type_name {
+                    if let Some(clean) = sanitize_identifier(&receiver_name) {
+                        method_namespace = push_namespace(namespace_stack, &clean);
+                    }
                 }
             }
+
+            if let Some(name_node) = node.child_by_field_name("name") {
+                if let Some(name) = record_definition_node(
+                    &name_node,
+                    source,
+                    references,
+                    &method_namespace,
+                    "definition",
+                    defined_nodes,
+                ) {
+                    method_namespace = push_namespace(&method_namespace, &name);
+                }
+            }
+
+            next_namespace = method_namespace;
         }
         "type_spec" => {
             if let Some(name_node) = node.child_by_field_name("name") {
-                if let Ok(name) = name_node.utf8_text(source) {
-                    let pos = name_node.start_position();
-                    references.push(ExtractedReference {
-                        name: name.to_string(),
-                        kind: Some("definition".to_string()),
-                        namespace: if namespace_stack.is_empty() {
-                            None
-                        } else {
-                            Some(namespace_stack.join("."))
-                        },
-                        line: pos.row + 1,
-                        column: pos.column + 1,
-                    });
+                if let Some(name) = record_definition_node(
+                    &name_node,
+                    source,
+                    references,
+                    namespace_stack,
+                    "definition",
+                    defined_nodes,
+                ) {
+                    next_namespace = push_namespace(namespace_stack, &name);
                 }
             }
         }
@@ -106,62 +149,186 @@ fn collect_references(
                 collect_go_binding_names(node, source, &mut names);
             }
 
-            for name_node in names {
-                if let Ok(name) = name_node.utf8_text(source) {
-                    let pos = name_node.start_position();
-                    references.push(ExtractedReference {
-                        name: name.to_string(),
-                        kind: Some("definition".to_string()),
-                        namespace: if namespace_stack.is_empty() {
-                            None
-                        } else {
-                            Some(namespace_stack.join("."))
-                        },
-                        line: pos.row + 1,
-                        column: pos.column + 1,
-                    });
-                }
+            for binding in names {
+                record_definition_node(
+                    &binding,
+                    source,
+                    references,
+                    namespace_stack,
+                    "definition",
+                    defined_nodes,
+                );
             }
         }
-        "package_clause" => {
+        "field_declaration" => {
             if let Some(name_node) = node.child_by_field_name("name") {
-                if let Ok(name) = name_node.utf8_text(source) {
-                    new_namespace_stack.push(name.to_string());
+                let mut names = Vec::new();
+                collect_go_binding_names(&name_node, source, &mut names);
+                for binding in names {
+                    record_definition_node(
+                        &binding,
+                        source,
+                        references,
+                        namespace_stack,
+                        "definition",
+                        defined_nodes,
+                    );
+                }
+            } else {
+                let mut names = Vec::new();
+                collect_go_binding_names(node, source, &mut names);
+                for binding in names {
+                    record_definition_node(
+                        &binding,
+                        source,
+                        references,
+                        namespace_stack,
+                        "definition",
+                        defined_nodes,
+                    );
                 }
             }
         }
-        "identifier" => {
-            if !is_part_of_definition_or_declaration(node) {
-                if let Ok(name) = node.utf8_text(source) {
-                    let pos = node.start_position();
-                    references.push(ExtractedReference {
-                        name: name.to_string(),
-                        kind: Some("reference".to_string()),
-                        namespace: if namespace_stack.is_empty() {
-                            None
-                        } else {
-                            Some(namespace_stack.join("."))
-                        },
-                        line: pos.row + 1,
-                        column: pos.column + 1,
-                    });
+        "method_spec" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                if let Some(name) = record_definition_node(
+                    &name_node,
+                    source,
+                    references,
+                    namespace_stack,
+                    "definition",
+                    defined_nodes,
+                ) {
+                    next_namespace = push_namespace(namespace_stack, &name);
                 }
             }
+        }
+        "method_elem" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                if let Some(name) = record_definition_node(
+                    &name_node,
+                    source,
+                    references,
+                    namespace_stack,
+                    "definition",
+                    defined_nodes,
+                ) {
+                    next_namespace = push_namespace(namespace_stack, &name);
+                }
+            }
+        }
+        "parameter_declaration" | "variadic_parameter" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let mut names = Vec::new();
+                collect_go_binding_names(&name_node, source, &mut names);
+                for binding in names {
+                    record_definition_node(
+                        &binding,
+                        source,
+                        references,
+                        namespace_stack,
+                        "definition",
+                        defined_nodes,
+                    );
+                }
+            }
+        }
+        "identifier" | "field_identifier" | "type_identifier" => {
+            record_reference_node(node, source, references, namespace_stack, defined_nodes);
         }
         _ => {}
     }
 
-    for child in node.children(&mut node.walk()) {
-        collect_references(&child, source, references, &new_namespace_stack);
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_references(&child, source, references, &next_namespace, defined_nodes);
+    }
+}
+
+fn push_namespace(namespace_stack: &[String], segment: &str) -> Vec<String> {
+    let mut next = namespace_stack.to_vec();
+    next.push(segment.to_string());
+    next
+}
+
+fn namespace_from_stack(namespace_stack: &[String]) -> Option<String> {
+    if namespace_stack.is_empty() {
+        None
+    } else {
+        Some(namespace_stack.join("."))
+    }
+}
+
+fn sanitize_identifier(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed == "_" {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn record_definition_node(
+    node: &Node,
+    source: &[u8],
+    references: &mut Vec<ExtractedReference>,
+    namespace_stack: &[String],
+    kind: &str,
+    defined_nodes: &mut HashSet<usize>,
+) -> Option<String> {
+    if let Ok(raw) = node.utf8_text(source) {
+        if let Some(name) = sanitize_identifier(raw) {
+            let pos = node.start_position();
+            references.push(ExtractedReference {
+                name: name.clone(),
+                kind: Some(kind.to_string()),
+                namespace: namespace_from_stack(namespace_stack),
+                line: pos.row + 1,
+                column: pos.column + 1,
+            });
+            defined_nodes.insert(node.id());
+            return Some(name);
+        }
+    }
+    None
+}
+
+fn record_reference_node(
+    node: &Node,
+    source: &[u8],
+    references: &mut Vec<ExtractedReference>,
+    namespace_stack: &[String],
+    defined_nodes: &HashSet<usize>,
+) {
+    if defined_nodes.contains(&node.id()) {
+        return;
+    }
+
+    if let Ok(raw) = node.utf8_text(source) {
+        if let Some(name) = sanitize_identifier(raw) {
+            let pos = node.start_position();
+            references.push(ExtractedReference {
+                name,
+                kind: Some("reference".to_string()),
+                namespace: namespace_from_stack(namespace_stack),
+                line: pos.row + 1,
+                column: pos.column + 1,
+            });
+        }
     }
 }
 
 fn collect_go_binding_names<'a>(node: &Node<'a>, source: &[u8], out: &mut Vec<Node<'a>>) {
     match node.kind() {
-        "identifier" => {
+        "identifier" | "field_identifier" | "type_identifier" => {
             out.push(*node);
         }
-        "identifier_list" | "expression_list" | "parenthesized_expression" => {
+        "identifier_list"
+        | "field_identifier_list"
+        | "expression_list"
+        | "parameter_list"
+        | "parenthesized_expression"
+        | "parenthesized_identifier_list" => {
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
                 if child.is_named() {
@@ -169,101 +336,148 @@ fn collect_go_binding_names<'a>(node: &Node<'a>, source: &[u8], out: &mut Vec<No
                 }
             }
         }
-        _ => {}
-    }
-}
-
-fn is_part_of_definition_or_declaration(node: &Node) -> bool {
-    let mut current = node.parent();
-    while let Some(parent) = current {
-        match parent.kind() {
-            "function_declaration"
-            | "method_declaration"
-            | "type_spec"
-            | "short_var_declaration"
-            | "var_spec"
-            | "const_spec"
-            | "package_clause" => {
-                return true;
+        _ => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.is_named() {
+                    collect_go_binding_names(&child, source, out);
+                }
             }
-            _ => {}
         }
-        current = parent.parent();
     }
-    false
 }
 
-fn merge_namespaces(package: Option<&str>, receiver: Option<&str>) -> Option<String> {
-    match (package, receiver) {
-        (Some(pkg), Some(rcv)) => Some(format!("{}.{}", pkg, rcv)),
-        (Some(pkg), None) => Some(pkg.to_string()),
-        (None, Some(rcv)) => Some(rcv.to_string()),
-        (None, None) => None,
+fn find_type_identifier(node: &Node, source: &[u8]) -> Option<String> {
+    match node.kind() {
+        "type_identifier" | "identifier" => {
+            node.utf8_text(source).ok().and_then(sanitize_identifier)
+        }
+        _ => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if let Some(name) = find_type_identifier(&child, source) {
+                    return Some(name);
+                }
+            }
+            None
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
+
+    fn collect_kinds(
+        references: &[ExtractedReference],
+    ) -> (
+        HashMap<(String, Option<String>), usize>,
+        HashMap<(String, Option<String>), usize>,
+    ) {
+        let mut definitions = HashMap::new();
+        let mut references_map = HashMap::new();
+        for r in references {
+            let key = (r.name.clone(), r.namespace.clone());
+            match r.kind.as_deref() {
+                Some("definition") | Some("declaration") => {
+                    *definitions.entry(key).or_insert(0) += 1;
+                }
+                Some("reference") => {
+                    *references_map.entry(key).or_insert(0) += 1;
+                }
+                other => panic!("unexpected kind: {:?}", other),
+            }
+        }
+        (definitions, references_map)
+    }
 
     #[test]
-    fn extracts_go_symbols_and_variables() {
+    fn extracts_comprehensive_go_identifiers() {
         let source = r#"
             package demo
 
-            var top = 1
-            var handler func(int) int
-            var typed1, typed2 func() int
-            var withLiteral = func() int { return 0 }
-            var mix1, mix2 = func() {}, 42
+            import "fmt"
+
+            const constantValue = 3
 
             type Foo struct {
                 Value int
-            }
-            type Bar interface {}
-
-            func helper() {
-                local := 3
-                localFn := func() int { return local }
+                Embedded
             }
 
-            func (f *Foo) Method() {
-                var counter int
+            type Bar interface {
+                DoThing(input int) (result int)
+            }
+
+            func helper(arg int) int {
+                local := arg + constantValue
+                return local
+            }
+
+            func (f *Foo) Method(extra int) {
+                counter := 0
+                f.Value = counter
+                helper(counter)
+            }
+
+            func useInterface(b Bar) {
+                fmt.Println(b)
             }
         "#;
 
         let extraction = extract(source);
         let references = extraction.references;
+        let (definitions, references_map) = collect_kinds(&references);
 
-        let definitions: HashSet<_> = references
-            .iter()
-            .filter(|r| r.kind == Some("definition".to_string()))
-            .map(|r| (r.name.as_str(), r.namespace.as_deref()))
-            .collect();
+        let expected_defs = HashSet::from([
+            ("demo".to_string(), None),
+            ("constantValue".to_string(), Some("demo".to_string())),
+            ("Foo".to_string(), Some("demo".to_string())),
+            ("Value".to_string(), Some("demo.Foo".to_string())),
+            ("Embedded".to_string(), Some("demo.Foo".to_string())),
+            ("Bar".to_string(), Some("demo".to_string())),
+            ("DoThing".to_string(), Some("demo.Bar".to_string())),
+            ("input".to_string(), Some("demo.Bar.DoThing".to_string())),
+            ("result".to_string(), Some("demo.Bar.DoThing".to_string())),
+            ("helper".to_string(), Some("demo".to_string())),
+            ("arg".to_string(), Some("demo.helper".to_string())),
+            ("local".to_string(), Some("demo.helper".to_string())),
+            ("f".to_string(), Some("demo.Foo.Method".to_string())),
+            ("Method".to_string(), Some("demo.Foo".to_string())),
+            ("extra".to_string(), Some("demo.Foo.Method".to_string())),
+            ("counter".to_string(), Some("demo.Foo.Method".to_string())),
+            ("useInterface".to_string(), Some("demo".to_string())),
+            ("b".to_string(), Some("demo.useInterface".to_string())),
+        ]);
 
-        assert!(definitions.contains(&("demo", None)));
-        assert!(definitions.contains(&("top", Some("demo"))));
-        assert!(definitions.contains(&("handler", Some("demo"))));
-        assert!(definitions.contains(&("typed1", Some("demo"))));
-        assert!(definitions.contains(&("typed2", Some("demo"))));
-        assert!(definitions.contains(&("withLiteral", Some("demo"))));
-        assert!(definitions.contains(&("mix1", Some("demo"))));
-        assert!(definitions.contains(&("mix2", Some("demo"))));
-        assert!(definitions.contains(&("Foo", Some("demo"))));
-        assert!(definitions.contains(&("Bar", Some("demo"))));
-        assert!(definitions.contains(&("helper", Some("demo"))));
-        assert!(definitions.contains(&("local", Some("demo.helper"))));
-        assert!(definitions.contains(&("localFn", Some("demo.helper"))));
-        assert!(definitions.contains(&("Method", Some("demo.Foo"))));
-        assert!(definitions.contains(&("counter", Some("demo.Foo.Method"))));
+        for key in &expected_defs {
+            assert!(
+                definitions.contains_key(key),
+                "missing definition for {:?}",
+                key
+            );
+        }
 
-        let refs: HashSet<_> = references
-            .iter()
-            .filter(|r| r.kind == Some("reference".to_string()))
-            .map(|r| r.name.as_str())
-            .collect();
+        let expected_refs = HashSet::from([
+            ("constantValue".to_string(), Some("demo.helper".to_string())),
+            ("arg".to_string(), Some("demo.helper".to_string())),
+            ("local".to_string(), Some("demo.helper".to_string())),
+            ("f".to_string(), Some("demo.Foo.Method".to_string())),
+            ("Value".to_string(), Some("demo.Foo.Method".to_string())),
+            ("counter".to_string(), Some("demo.Foo.Method".to_string())),
+            ("helper".to_string(), Some("demo.Foo.Method".to_string())),
+            ("b".to_string(), Some("demo.useInterface".to_string())),
+            ("fmt".to_string(), Some("demo.useInterface".to_string())),
+            ("Println".to_string(), Some("demo.useInterface".to_string())),
+        ]);
 
-        assert!(refs.contains("local"));
+        for key in &expected_refs {
+            assert!(
+                references_map.contains_key(key),
+                "missing reference for {:?}",
+                key
+            );
+        }
     }
 }
