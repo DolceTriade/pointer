@@ -1040,15 +1040,19 @@ ORDER BY idx
             }
 
             if !plan.branches.is_empty() {
-                qb.push(" AND f.commit_sha = ANY(");
+                qb.push(" AND (f.commit_sha = ANY(");
                 qb.push_bind(&plan.branches);
-                qb.push(")");
+                qb.push(") OR EXISTS (SELECT 1 FROM branches b WHERE b.repository = f.repository AND b.commit_sha = f.commit_sha AND b.branch = ANY(");
+                qb.push_bind(&plan.branches);
+                qb.push(")))");
             }
 
             if !plan.excluded_branches.is_empty() {
                 qb.push(" AND NOT (f.commit_sha = ANY(");
                 qb.push_bind(&plan.excluded_branches);
-                qb.push("))");
+                qb.push(") OR EXISTS (SELECT 1 FROM branches b WHERE b.repository = f.repository AND b.commit_sha = f.commit_sha AND b.branch = ANY(");
+                qb.push_bind(&plan.excluded_branches);
+                qb.push(")))");
             }
 
             qb.push(
