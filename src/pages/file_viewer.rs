@@ -498,7 +498,12 @@ fn Breadcrumbs(
                         each=move || segments.get()
                         key=|(_, p, _)| p.clone()
                         children=move |(name, p, is_last)| {
-                            let full_path = format!("/repo/{}/tree/{}/{}", repo.get(), branch.get(), p);
+                            let full_path = format!(
+                                "/repo/{}/tree/{}/{}",
+                                repo.get(),
+                                branch.get(),
+                                p,
+                            );
                             view! {
                                 <li>
                                     {if is_last {
@@ -573,6 +578,7 @@ fn FileTreeNodes(
             />
         </ul>
     }
+    .into_any()
 }
 
 #[component]
@@ -641,52 +647,50 @@ fn FileTreeNode(
                         if expanded.get().contains(&dir_path) { "▼" } else { "▶" }
                     };
                     let name = entry.name.clone();
-                    Either::Left(
-                        // "▶" "▼"
-                        view! {
-                            <span class="w-4 text-gray-500">{icon}</span>
-                            <DirectoryIcon />
-                            <span class="ml-1 text-blue-600 hover:underline truncate" title=name>
-                                {entry.name}
-                            </span>
-                        },
-                    )
+                    // "▶" "▼"
+                    view! {
+                        <span class="w-4 text-gray-500">{icon}</span>
+                        <DirectoryIcon />
+                        <span class="ml-1 text-blue-600 hover:underline truncate" title=name>
+                            {entry.name}
+                        </span>
+                    }
+                        .into_any()
                 } else {
                     let name = entry.name.clone();
-                    Either::Right(
-                        view! {
-                            <FileIcon />
-                            <span class="w-4"></span>
-                            <A
-                                href=link
-                                attr:class="ml-1 text-blue-600 hover:underline truncate"
-                                attr:title=name.clone()
-                            >
-                                {entry.name}
-                            </A>
-                        },
-                    )
+                    view! {
+                        <FileIcon />
+                        <span class="w-4"></span>
+                        <A
+                            href=link
+                            attr:class="ml-1 text-blue-600 hover:underline truncate"
+                            attr:title=name.clone()
+                        >
+                            {entry.name}
+                        </A>
+                    }
+                        .into_any()
                 }}
             </div>
             {
                 let entry = expand_entry.clone();
                 move || {
-                    if is_dir && expanded.get().contains(&entry.path) {
-                        children
-                            .get()
-                            .map(|nodes| {
-                                view! {
-                                    <FileTreeNodes
-                                        entries=nodes
-                                        repo=repo
-                                        branch=branch
-                                        expanded=expanded
-                                    />
-                                }
-                            })
-                    } else {
-                        None
-                    }
+                    (is_dir && expanded.get().contains(&entry.path))
+                        .then(|| {
+                            children
+                                .get()
+                                .map(|nodes| {
+                                    view! {
+                                        <FileTreeNodes
+                                            entries=nodes
+                                            repo=repo
+                                            branch=branch
+                                            expanded=expanded
+                                        />
+                                    }
+                                        .into_any()
+                                })
+                        })
                 }
             }
         </li>

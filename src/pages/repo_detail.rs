@@ -97,10 +97,7 @@ pub fn RepoDetailPage() -> impl IntoView {
                                                             "Available branches"
                                                         </h2>
                                                         <p class="text-xs text-slate-400">
-                                                            {format!(
-                                                                "Showing {} of {} branches",
-                                                                visible_count, total
-                                                            )}
+                                                            {format!("Showing {} of {} branches", visible_count, total)}
                                                         </p>
                                                     </div>
                                                     <span class="text-xs text-slate-500">
@@ -113,10 +110,7 @@ pub fn RepoDetailPage() -> impl IntoView {
                                                         {visible
                                                             .into_iter()
                                                             .map(|branch| {
-                                                                let href = format!(
-                                                                    "/repo/{}/tree/{}",
-                                                                    repo, &branch
-                                                                );
+                                                                let href = format!("/repo/{}/tree/{}", repo, &branch);
                                                                 view! {
                                                                     <li class="last:border-b-0">
                                                                         <A
@@ -126,9 +120,7 @@ pub fn RepoDetailPage() -> impl IntoView {
                                                                             <span class="font-mono text-sm text-slate-100 break-words">
                                                                                 {branch.clone()}
                                                                             </span>
-                                                                            <span class="text-xs text-slate-400">
-                                                                                "Open"
-                                                                            </span>
+                                                                            <span class="text-xs text-slate-400">"Open"</span>
                                                                         </A>
                                                                     </li>
                                                                 }
@@ -139,32 +131,38 @@ pub fn RepoDetailPage() -> impl IntoView {
 
                                                 {if has_more {
                                                     let set_show_all = set_show_all_branches.clone();
-                                                    Some(view! {
-                                                        <button
-                                                            type="button"
-                                                            class="mt-4 text-sm font-medium text-sky-400 hover:text-sky-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-500"
-                                                            on:click=move |_| set_show_all.update(|value| *value = !*value)
-                                                        >
-                                                            {if show_all {
-                                                                "Show fewer branches".to_string()
-                                                            } else {
-                                                                format!("Show all {} branches", total)
-                                                            }}
-                                                        </button>
-                                                    })
+                                                    Some(
+                                                        view! {
+                                                            <button
+                                                                type="button"
+                                                                class="mt-4 text-sm font-medium text-sky-400 hover:text-sky-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-500"
+                                                                on:click=move |_| {
+                                                                    set_show_all.update(|value| *value = !*value)
+                                                                }
+                                                            >
+                                                                {if show_all {
+                                                                    "Show fewer branches".to_string()
+                                                                } else {
+                                                                    format!("Show all {} branches", total)
+                                                                }}
+                                                            </button>
+                                                        },
+                                                    )
                                                 } else {
                                                     None
                                                 }}
 
                                                 {if !show_all && total > visible_count {
-                                                    Some(view! {
-                                                        <p class="mt-2 text-xs text-slate-500">
-                                                            {format!(
-                                                                "Showing the first {} branches. Use the button above to see the rest.",
-                                                                MAX_VISIBLE_BRANCHES
-                                                            )}
-                                                        </p>
-                                                    })
+                                                    Some(
+                                                        view! {
+                                                            <p class="mt-2 text-xs text-slate-500">
+                                                                {format!(
+                                                                    "Showing the first {} branches. Use the button above to see the rest.",
+                                                                    MAX_VISIBLE_BRANCHES,
+                                                                )}
+                                                            </p>
+                                                        },
+                                                    )
                                                 } else {
                                                     None
                                                 }}

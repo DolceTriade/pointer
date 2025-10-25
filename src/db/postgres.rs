@@ -949,8 +949,18 @@ ORDER BY idx
                     cm.content_hash,
                     cm.start_line,
                     cm.chunk_line_count AS line_count,
-                    ctx.context_snippet AS content_text,
-                    ctx.match_line_number,
+                    cm.text_content,
+                    cm.chunk_index,
+                ",
+            );
+            qb.push_bind(&plan.highlight_pattern);
+            qb.push(
+                " AS highlight_pattern,
+                ",
+            );
+            qb.push_bind(highlight_case_sensitive);
+            qb.push(
+                " AS highlight_case_sensitive,
                 ",
             );
             qb.push_bind(plan.include_historical);
@@ -1054,16 +1064,11 @@ ORDER BY idx
                 qb.push_bind(&plan.excluded_branches);
                 qb.push(")))");
             }
-
             qb.push(
                 "
                 ) cm
-                CROSS JOIN LATERAL extract_context_with_highlight(cm.text_content, ",
+            )",
             );
-            qb.push_bind(&plan.highlight_pattern);
-            qb.push(", 3, ");
-            qb.push_bind(highlight_case_sensitive);
-            qb.push(") ctx)");
         }
 
         let page_index = u64::from(request.page);
@@ -1078,44 +1083,77 @@ ORDER BY idx
         let fetch_limit = fetch_limit_u64.min(i64::MAX as u64) as i64;
 
         qb.push(
-            ")
-            SELECT DISTINCT ON (pr.repository, pr.commit_sha, pr.file_path, pr.start_line, pr.match_line_number)
-                pr.repository,
-                pr.commit_sha,
-                pr.file_path,
-                pr.content_hash,
-                pr.start_line,
-                pr.line_count,
-                pr.content_text,
-                pr.match_line_number,
+            "),
+            limited_plan AS (
+                SELECT
+                    pr.repository,
+                    pr.commit_sha,
+                    pr.file_path,
+                    pr.content_hash,
+                    pr.start_line,
+                    pr.line_count,
+                    pr.text_content,
+                    pr.chunk_index,
+                    pr.highlight_pattern,
+                    pr.highlight_case_sensitive,
+                    pr.include_historical
+                FROM
+                    plan_results pr
+                ORDER BY
+                    pr.repository,
+                    pr.commit_sha,
+                    pr.file_path,
+                    pr.start_line,
+                    pr.chunk_index
+                LIMIT ",
+        );
+        qb.push_bind(fetch_limit);
+        qb.push(
+            "
+            )
+            SELECT DISTINCT ON (lp.repository, lp.commit_sha, lp.file_path, lp.start_line, ctx.match_line_number)
+                lp.repository,
+                lp.commit_sha,
+                lp.file_path,
+                lp.content_hash,
+                lp.start_line,
+                lp.line_count,
+                ctx.context_snippet AS content_text,
+                ctx.match_line_number,
                 COALESCE(branch_match.branches, ARRAY[]::TEXT[]) AS branches,
                 CASE
                     WHEN repo_branches.repo_has_branches IS TRUE AND branch_match.branches IS NULL THEN TRUE
                     ELSE FALSE
                 END AS is_historical
             FROM
-                plan_results pr
+                limited_plan lp
+            CROSS JOIN LATERAL extract_context_with_highlight(
+                lp.text_content,
+                lp.highlight_pattern,
+                3,
+                lp.highlight_case_sensitive
+            ) ctx
             LEFT JOIN LATERAL (
                 SELECT array_agg(DISTINCT branch) AS branches
                 FROM branches b
-                WHERE b.repository = pr.repository AND b.commit_sha = pr.commit_sha
+                WHERE b.repository = lp.repository AND b.commit_sha = lp.commit_sha
             ) branch_match ON TRUE
             LEFT JOIN LATERAL (
                 SELECT TRUE AS repo_has_branches
                 FROM branches b
-                WHERE b.repository = pr.repository
+                WHERE b.repository = lp.repository
                 LIMIT 1
             ) repo_branches ON TRUE
             WHERE
-                pr.include_historical
+                lp.include_historical
                 OR branch_match.branches IS NOT NULL
                 OR repo_branches.repo_has_branches IS NULL
             ORDER BY
-                pr.repository,
-                pr.commit_sha,
-                pr.file_path,
-                pr.start_line,
-                pr.match_line_number
+                lp.repository,
+                lp.commit_sha,
+                lp.file_path,
+                lp.start_line,
+                ctx.match_line_number
             LIMIT ",
         );
         qb.push_bind(fetch_limit);
