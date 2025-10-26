@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use web_sys::wasm_bindgen::{JsCast, UnwrapThrowExt};
 
+const SYMBOL_HIGHLIGHT_CLASS: &str = "selected-symbol-highlight";
+
 #[derive(Params, PartialEq, Clone, Debug)]
 pub struct FileViewerParams {
     pub repo: String,
@@ -749,6 +751,100 @@ fn LineHighlighter() -> impl IntoView {
     view! { <div id="mehigh" class="hidden"></div> }
 }
 
+fn clear_symbol_highlights(document: &web_sys::Document, root: &web_sys::Element) {
+    let selector = format!(".{SYMBOL_HIGHLIGHT_CLASS}");
+    if let Ok(nodes) = root.query_selector_all(&selector) {
+        let len = nodes.length();
+        for idx in 0..len {
+            if let Some(node) = nodes.item(idx) {
+                if let Ok(element) = node.dyn_into::<web_sys::Element>() {
+                    if let Some(parent) = element.parent_node() {
+                        let text_content = element.text_content().unwrap_or_default();
+                        let text_node: web_sys::Node =
+                            document.create_text_node(&text_content).into();
+                        let _ = parent.replace_child(&text_node, &element);
+                    }
+                }
+            }
+        }
+    }
+    let root_node: web_sys::Node = root.clone().into();
+    root_node.normalize();
+}
+
+fn apply_symbol_highlights(document: &web_sys::Document, root: &web_sys::Element, needle: &str) {
+    fn highlight_text_nodes(document: &web_sys::Document, node: &web_sys::Node, needle: &str) {
+        let mut child_opt = node.first_child();
+        while let Some(child) = child_opt {
+            let next = child.next_sibling();
+            match child.node_type() {
+                web_sys::Node::TEXT_NODE => highlight_text_node(document, &child, needle),
+                web_sys::Node::ELEMENT_NODE => {
+                    let skip = child
+                        .dyn_ref::<web_sys::Element>()
+                        .map(|el| {
+                            el.class_list()
+                                .contains(SYMBOL_HIGHLIGHT_CLASS)
+                        })
+                        .unwrap_or(false);
+                    if !skip {
+                        highlight_text_nodes(document, &child, needle);
+                    }
+                }
+                _ => {}
+            }
+            child_opt = next;
+        }
+    }
+
+    fn highlight_text_node(document: &web_sys::Document, text_node: &web_sys::Node, needle: &str) {
+        if needle.is_empty() {
+            return;
+        }
+        let value = match text_node.node_value() {
+            Some(v) => v,
+            None => return,
+        };
+        if value.len() < needle.len() || !value.contains(needle) {
+            return;
+        }
+        let needle_len = needle.len();
+        if let Some(parent) = text_node.parent_node() {
+            let fragment = document.create_document_fragment();
+            let text_ref = value.as_str();
+            let mut cursor = 0;
+            while let Some(rel_pos) = text_ref[cursor..].find(needle) {
+                let start = cursor + rel_pos;
+                let end = start + needle_len;
+                if start > cursor {
+                    let prefix = &text_ref[cursor..start];
+                    if !prefix.is_empty() {
+                        let node: web_sys::Node = document.create_text_node(prefix).into();
+                        fragment.append_child(&node).unwrap_throw();
+                    }
+                }
+                let matched = &text_ref[start..end];
+                let element = document.create_element("mark").unwrap_throw();
+                element.set_class_name(SYMBOL_HIGHLIGHT_CLASS);
+                element.set_text_content(Some(matched));
+                let node: web_sys::Node = element.into();
+                fragment.append_child(&node).unwrap_throw();
+                cursor = end;
+            }
+            let tail = &text_ref[cursor..];
+            if !tail.is_empty() {
+                let node: web_sys::Node = document.create_text_node(tail).into();
+                fragment.append_child(&node).unwrap_throw();
+            }
+            let fragment_node: web_sys::Node = fragment.into();
+            let _ = parent.replace_child(&fragment_node, text_node);
+        }
+    }
+
+    let root_node: web_sys::Node = root.clone().into();
+    highlight_text_nodes(document, &root_node, needle);
+}
+
 #[component]
 fn FileContent(
     html: String,
@@ -824,6 +920,27 @@ fn FileContent(
             }
         }
     };
+
+    {
+        let code_ref = code_ref.clone();
+        let selected_symbol = selected_symbol.clone();
+        Effect::new(move |_| {
+            let current_symbol = selected_symbol.get();
+            if let Some(code_el) = code_ref.get() {
+                if let Some(window) = web_sys::window() {
+                    if let Some(document) = window.document() {
+                        let element: web_sys::Element = code_el.unchecked_into();
+                        clear_symbol_highlights(&document, &element);
+                        if let Some(symbol) = current_symbol {
+                            if !symbol.is_empty() {
+                                apply_symbol_highlights(&document, &element, &symbol);
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
 
     view! {
         <div class="flex font-mono text-sm overflow-x-auto">
