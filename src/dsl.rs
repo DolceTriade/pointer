@@ -9,7 +9,6 @@ pub enum Filter {
     File(String),
     Lang(String),
     Branch(String),
-    Symbol(String),
     Regex(String),
     CaseSensitive(CaseSensitivity),
     Type(ResultType),
@@ -49,7 +48,6 @@ impl fmt::Display for Filter {
             Filter::File(s) => write!(f, "file:\"{}\"", s),
             Filter::Lang(s) => write!(f, "lang:\"{}\"", s),
             Filter::Branch(s) => write!(f, "branch:\"{}\"", s),
-            Filter::Symbol(s) => write!(f, "sym:\"{}\"", s),
             Filter::Regex(s) => write!(f, "regex:\"{}\"", s),
             Filter::CaseSensitive(cs) => match cs {
                 CaseSensitivity::Yes => write!(f, "case:yes"),
@@ -146,7 +144,6 @@ impl QueryParser {
             "f" => Ok(Filter::File(value)), // alias for file
             "lang" | "l" => Ok(Filter::Lang(value)),
             "branch" | "b" => Ok(Filter::Branch(value)),
-            "sym" => Ok(Filter::Symbol(value)),
             "regex" => Ok(Filter::Regex(value)),
             "case" => match value.as_str() {
                 "yes" => Ok(Filter::CaseSensitive(CaseSensitivity::Yes)),
@@ -680,11 +677,6 @@ impl FlatQuery {
                 } else {
                     base.branches.push(value.clone());
                 }
-            }
-            Filter::Symbol(_) => {
-                return Err(QueryPlanError::Unsupported(
-                    "symbol: filters are not supported in text search".to_string(),
-                ));
             }
             Filter::Regex(pattern) => {
                 let predicate = ContentPredicate::Regex(pattern.clone());
