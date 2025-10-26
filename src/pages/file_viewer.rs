@@ -246,44 +246,55 @@ pub async fn fetch_symbol_insights(
         commit_sha: Some(commit.clone()),
         path: None,
         path_regex: None,
+        path_hint: None,
         include_references: Some(true),
         limit: Some(50),
     };
 
-    if let Some(filter) = match params.scope {
-        SymbolSearchScope::Repository => None,
-        SymbolSearchScope::Directory => params.path.as_ref().and_then(|path| {
-            let trimmed = path.trim_matches('/');
-            if trimmed.is_empty() {
-                None
-            } else {
-                let dir = if path.ends_with('/') {
-                    trimmed.to_string()
-                } else {
-                    trimmed
-                        .rsplit_once('/')
-                        .map(|(dir, _)| dir.to_string())
-                        .unwrap_or_default()
-                };
+    fn directory_prefix(path: &str) -> Option<String> {
+        let trimmed = path.trim_matches('/');
+        if trimmed.is_empty() {
+            return None;
+        }
+        let dir = if path.ends_with('/') {
+            trimmed.to_string()
+        } else {
+            trimmed
+                .rsplit_once('/')
+                .map(|(dir, _)| dir.to_string())
+                .unwrap_or_default()
+        };
 
-                if dir.is_empty() {
-                    None
-                } else {
-                    Some(format!("{dir}/"))
-                }
-            }
-        }),
-        SymbolSearchScope::File => params.path.as_ref().and_then(|path| {
-            let trimmed = path.trim_matches('/');
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_string())
-            }
-        }),
-    } {
-        request.path = Some(filter);
+        if dir.is_empty() {
+            None
+        } else {
+            Some(format!("{dir}/"))
+        }
     }
+
+    let dir_hint = params.path.as_deref().and_then(directory_prefix);
+
+    let file_hint = params
+        .path
+        .as_deref()
+        .map(|path| path.trim_matches('/'))
+        .filter(|trimmed| !trimmed.is_empty())
+        .map(str::to_string);
+
+    let (path_filter, path_hint) = match params.scope {
+        SymbolSearchScope::Repository => (None, dir_hint.clone().or(file_hint.clone())),
+        SymbolSearchScope::Directory => {
+            let filter = dir_hint.clone();
+            (filter.clone(), filter)
+        }
+        SymbolSearchScope::File => {
+            let filter = file_hint.clone();
+            (filter.clone(), filter)
+        }
+    };
+
+    request.path = path_filter;
+    request.path_hint = path_hint;
 
     let search_response = db
         .search_symbols(request)
@@ -782,10 +793,7 @@ fn apply_symbol_highlights(document: &web_sys::Document, root: &web_sys::Element
                 web_sys::Node::ELEMENT_NODE => {
                     let skip = child
                         .dyn_ref::<web_sys::Element>()
-                        .map(|el| {
-                            el.class_list()
-                                .contains(SYMBOL_HIGHLIGHT_CLASS)
-                        })
+                        .map(|el| el.class_list().contains(SYMBOL_HIGHLIGHT_CLASS))
                         .unwrap_or(false);
                     if !skip {
                         highlight_text_nodes(document, &child, needle);
@@ -1268,6 +1276,9 @@ fn CodeIntelPanel(
                                                                                     </p>
                                                                                 }
                                                                             })}
+                                                                        <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                                                                            {format!("Score: {:.3}", definition.score)}
+                                                                        </p>
                                                                         <div class="mt-4">
                                                                             <h3 class="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
                                                                                 {format!("References ({reference_count})")}

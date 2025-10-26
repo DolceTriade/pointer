@@ -134,6 +134,8 @@ struct SearchRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     path_regex: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    path_hint: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     include_references: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     limit: Option<i64>,
@@ -257,6 +259,7 @@ fn run_query(args: QueryArgs) -> Result<()> {
         commit_sha: args.commit_sha.as_deref(),
         path: args.path.as_deref(),
         path_regex: args.path_regex.as_deref(),
+        path_hint: None,
         include_references: if args.include_references {
             Some(true)
         } else {

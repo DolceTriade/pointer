@@ -676,7 +676,7 @@ ORDER BY idx
                         ",
         );
 
-        let path_hint = request.path.clone();
+        let path_hint = request.path_hint.clone().or(request.path.clone());
         qb.push_bind(path_hint.as_deref());
 
         qb.push(
@@ -839,6 +839,16 @@ ORDER BY idx
 
             let kind = row.kind.clone().unwrap_or_else(|| "definition".to_string());
 
+            tracing::debug!(
+                target: "pointer::search_symbols",
+                symbol = %row.fully_qualified,
+                score = row.score,
+                repository = %row.repository,
+                file_path = %row.file_path,
+                kind = %kind,
+                "symbol ranking debug"
+            );
+
             results.push(SymbolResult {
                 symbol: row.symbol,
                 namespace: row.namespace,
@@ -851,6 +861,7 @@ ORDER BY idx
                 line,
                 column,
                 references,
+                score: row.score,
             });
         }
 
@@ -1729,7 +1740,7 @@ struct SymbolRow {
     #[sqlx(rename = "column_number")]
     column: Option<i32>,
     #[sqlx(rename = "score")]
-    _score: f64,
+    score: f64,
     references: Option<Json<Vec<ReferenceEntry>>>,
 }
 

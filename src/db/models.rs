@@ -49,6 +49,7 @@ pub struct SymbolResult {
     pub line: Option<usize>,
     pub column: Option<usize>,
     pub references: Option<Vec<ReferenceResult>>,
+    pub score: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

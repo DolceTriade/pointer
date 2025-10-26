@@ -60,6 +60,7 @@ pub struct SearchRequest {
     pub commit_sha: Option<String>,
     pub path: Option<String>,
     pub path_regex: Option<String>,
+    pub path_hint: Option<String>,
     pub include_references: Option<bool>,
     pub limit: Option<i64>,
 }
