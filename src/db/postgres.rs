@@ -1,4 +1,7 @@
-use crate::db::models::{FileReference as DbFileReference, SearchResultsPage, SearchSnippet};
+use crate::db::models::{
+    FacetCount, FileReference as DbFileReference, SearchResultsPage, SearchResultsStats,
+    SearchSnippet,
+};
 use crate::db::{
     Database, DbError, DbUniqueChunk, FileReference, RawFileContent, ReferenceResult, RepoSummary,
     RepoTreeQuery, SearchRequest, SearchResponse, SearchResult, SnippetRequest, SnippetResponse,
@@ -1357,6 +1360,12 @@ ORDER BY idx
             has_more = true;
         }
 
+        let stats = if start >= total {
+            SearchResultsStats::default()
+        } else {
+            build_search_stats(&aggregates, start, page_size)
+        };
+
         let results = if start >= total {
             Vec::new()
         } else {
@@ -1419,6 +1428,7 @@ ORDER BY idx
             page: request.page,
             page_size: request.page_size,
             query: request.original_query.clone(),
+            stats,
         })
     }
 
@@ -1809,6 +1819,60 @@ struct FileAggregate {
     entries: Vec<SearchResultRow>,
     classification: MatchClass,
     score: f32,
+}
+
+const FACET_LIMIT: usize = 8;
+
+fn build_search_stats(
+    aggregates: &[FileAggregate],
+    start: usize,
+    page_size: usize,
+) -> SearchResultsStats {
+    let mut directory_counts: HashMap<String, u32> = HashMap::new();
+    let mut repository_counts: HashMap<String, u32> = HashMap::new();
+    let mut branch_counts: HashMap<String, u32> = HashMap::new();
+
+    for aggregate in aggregates.iter().skip(start).take(page_size) {
+        if let Some(best) = aggregate.entries.first() {
+            if let Some(directory) = parent_directory(&best.file_path) {
+                *directory_counts.entry(directory).or_insert(0) += 1;
+            }
+            *repository_counts
+                .entry(best.repository.clone())
+                .or_insert(0) += 1;
+
+            if !best.branches.is_empty() {
+                let unique_branches: HashSet<&String> = best.branches.iter().collect();
+                for branch in unique_branches {
+                    *branch_counts.entry(branch.clone()).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+
+    SearchResultsStats {
+        common_directories: map_to_facets(directory_counts, FACET_LIMIT),
+        top_repositories: map_to_facets(repository_counts, FACET_LIMIT),
+        top_branches: map_to_facets(branch_counts, FACET_LIMIT),
+    }
+}
+
+fn map_to_facets(counts: HashMap<String, u32>, limit: usize) -> Vec<FacetCount> {
+    let mut items: Vec<(String, u32)> = counts.into_iter().collect();
+    items.sort_by(|a, b| {
+        b.1.cmp(&a.1)
+            .then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase()))
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    items
+        .into_iter()
+        .take(limit)
+        .map(|(value, count)| FacetCount { value, count })
+        .collect()
+}
+
+fn parent_directory(path: &str) -> Option<String> {
+    path.rsplit_once('/').map(|(dir, _)| dir.to_string())
 }
 
 fn dedup_by_key<'a, T, K, F>(items: &'a [T], mut key: F) -> Vec<&'a T>

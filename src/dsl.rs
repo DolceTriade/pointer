@@ -140,8 +140,9 @@ impl QueryParser {
             "content" => Ok(Filter::Content(value)),
             "c" => Ok(Filter::Content(value)), // alias for content
             "repo" | "r" => Ok(Filter::Repo(value)),
-            "file" => Ok(Filter::File(value)),
-            "f" => Ok(Filter::File(value)), // alias for file
+            "file" => Ok(Filter::File(value.clone())),
+            "f" => Ok(Filter::File(value.clone())), // alias for file
+            "path" => Ok(Filter::File(value)),
             "lang" | "l" => Ok(Filter::Lang(value)),
             "branch" | "b" => Ok(Filter::Branch(value)),
             "regex" => Ok(Filter::Regex(preprocess_regex_pattern(&value)?)),

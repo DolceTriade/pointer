@@ -88,12 +88,26 @@ pub struct SearchResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FacetCount {
+    pub value: String,
+    pub count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SearchResultsStats {
+    pub common_directories: Vec<FacetCount>,
+    pub top_repositories: Vec<FacetCount>,
+    pub top_branches: Vec<FacetCount>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchResultsPage {
     pub results: Vec<SearchResult>,
     pub has_more: bool,
     pub page: u32,
     pub page_size: u32,
     pub query: String,
+    pub stats: SearchResultsStats,
 }
 
 impl SearchResultsPage {
@@ -104,6 +118,7 @@ impl SearchResultsPage {
             page,
             page_size,
             query,
+            stats: SearchResultsStats::default(),
         }
     }
 }
