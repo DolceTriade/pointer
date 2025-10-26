@@ -249,6 +249,31 @@ fn collect_references(
         "identifier" | "type_identifier" | "field_identifier" | "metavariable" => {
             record_reference_node(node, source, references, namespace_stack, defined_nodes);
         }
+        "macro_invocation" => {
+            if let Some(macro_name) = node.child_by_field_name("macro") {
+                record_reference_node(
+                    &macro_name,
+                    source,
+                    references,
+                    namespace_stack,
+                    defined_nodes,
+                );
+            }
+            if let Some(arguments) = node.child_by_field_name("arguments") {
+                let mut cursor = arguments.walk();
+                for child in arguments.children(&mut cursor) {
+                    if child.kind() == "identifier" {
+                        record_reference_node(
+                            &child,
+                            source,
+                            references,
+                            namespace_stack,
+                            defined_nodes,
+                        );
+                    }
+                }
+            }
+        }
         _ => {}
     }
 

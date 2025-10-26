@@ -187,6 +187,21 @@ fn collect_references(
         "identifier" | "field_identifier" | "type_identifier" | "scoped_identifier" => {
             record_reference_node(node, source, references, namespace_stack, defined_nodes);
         }
+        "preproc_def" | "preproc_function_def" => {
+            if let Some(name_node) = node
+                .child_by_field_name("name")
+                .or_else(|| node.named_child(0))
+            {
+                record_definition_node(
+                    &name_node,
+                    source,
+                    references,
+                    namespace_stack,
+                    "definition",
+                    defined_nodes,
+                );
+            }
+        }
         _ => {}
     }
 
