@@ -144,7 +144,7 @@ impl QueryParser {
             "f" => Ok(Filter::File(value)), // alias for file
             "lang" | "l" => Ok(Filter::Lang(value)),
             "branch" | "b" => Ok(Filter::Branch(value)),
-            "regex" => Ok(Filter::Regex(value)),
+            "regex" => Ok(Filter::Regex(preprocess_regex_pattern(&value)?)),
             "case" => match value.as_str() {
                 "yes" => Ok(Filter::CaseSensitive(CaseSensitivity::Yes)),
                 "no" => Ok(Filter::CaseSensitive(CaseSensitivity::No)),
@@ -306,6 +306,89 @@ impl QueryParser {
             Ok(QueryNode::And(expressions))
         }
     }
+}
+
+fn preprocess_regex_pattern(raw: &str) -> Result<String, ParseError> {
+    let mut decoded = String::with_capacity(raw.len());
+    let mut chars = raw.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.next() {
+                Some('n') => decoded.push('\n'),
+                Some('r') => decoded.push('\r'),
+                Some('t') => decoded.push('\t'),
+                Some('\\') => decoded.push('\\'),
+                Some(other) => {
+                    decoded.push('\\');
+                    decoded.push(other);
+                }
+                None => {
+                    return Err(ParseError::InvalidFilter(
+                        "regex has an incomplete escape sequence".to_string(),
+                    ));
+                }
+            }
+        } else {
+            decoded.push(ch);
+        }
+    }
+
+    if decoded.contains('\n') || decoded.contains('\r') {
+        return Err(ParseError::InvalidFilter(
+            "regex cannot contain newline escapes".to_string(),
+        ));
+    }
+
+    let (normalized, start_anchored, end_anchored) = normalize_line_anchors(&decoded);
+    let prefix = if start_anchored { "" } else { "(.*)" };
+    let suffix = if end_anchored { "" } else { "(.*)" };
+    Ok(format!(
+        "(?:\n|^){prefix}{core}{suffix}(\n|$)",
+        prefix = prefix,
+        core = normalized,
+        suffix = suffix
+    ))
+}
+
+fn normalize_line_anchors(pattern: &str) -> (String, bool, bool) {
+    let mut result = String::with_capacity(pattern.len());
+    let mut characters = pattern.chars();
+    let mut escaped = false;
+    let mut in_char_class = false;
+    let mut start_anchored = false;
+    let mut end_anchored = false;
+
+    while let Some(ch) = characters.next() {
+        if escaped {
+            result.push(ch);
+            escaped = false;
+            continue;
+        }
+
+        match ch {
+            '\\' => {
+                result.push('\\');
+                escaped = true;
+            }
+            '[' => {
+                in_char_class = true;
+                result.push(ch);
+            }
+            ']' => {
+                in_char_class = false;
+                result.push(ch);
+            }
+            '^' if !in_char_class => {
+                start_anchored = true;
+            }
+            '$' if !in_char_class => {
+                end_anchored = true;
+            }
+            _ => result.push(ch),
+        }
+    }
+
+    (result, start_anchored, end_anchored)
 }
 
 // Simple tokenizer that handles quoted strings and basic tokens
@@ -877,6 +960,56 @@ mod tests {
     #[test]
     fn test_tokenize_quotes() {
         let tokens = tokenize_query("content:\"hello world\" repo:myrepo");
-        assert_eq!(tokens, vec!["content:\"hello world\"", "repo:myrepo"]);
+        assert_eq!(tokens, vec!["content:hello world", "repo:myrepo"]);
+    }
+
+    #[test]
+    fn preprocess_regex_basic_pattern() {
+        let pattern = preprocess_regex_pattern("void").expect("should preprocess");
+        assert_eq!(pattern, "(?:\n|^)(.*)void(.*)(\n|$)");
+    }
+
+    #[test]
+    fn preprocess_regex_with_tab_escape() {
+        let pattern = preprocess_regex_pattern("\\tfoo").expect("should preprocess");
+        assert_eq!(pattern, "(?:\n|^)(.*)\tfoo(.*)(\n|$)");
+    }
+
+    #[test]
+    fn preprocess_regex_rejects_newline_escape() {
+        match preprocess_regex_pattern("\\nfoo") {
+            Err(ParseError::InvalidFilter(msg)) => {
+                assert!(msg.contains("newline"), "unexpected message: {}", msg);
+            }
+            other => panic!("expected newline error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn preprocess_regex_incomplete_escape() {
+        match preprocess_regex_pattern("\\") {
+            Err(ParseError::InvalidFilter(msg)) => {
+                assert!(msg.contains("incomplete"), "unexpected message: {}", msg);
+            }
+            other => panic!("expected incomplete escape error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn preprocess_regex_preserves_line_anchors() {
+        let pattern = preprocess_regex_pattern("^foo$").expect("should preprocess");
+        assert_eq!(pattern, "(?:\n|^)foo(\n|$)");
+    }
+
+    #[test]
+    fn preprocess_regex_start_anchor_only() {
+        let pattern = preprocess_regex_pattern("^foo").expect("should preprocess");
+        assert_eq!(pattern, "(?:\n|^)foo(.*)(\n|$)");
+    }
+
+    #[test]
+    fn preprocess_regex_end_anchor_only() {
+        let pattern = preprocess_regex_pattern("foo$").expect("should preprocess");
+        assert_eq!(pattern, "(?:\n|^)(.*)foo(\n|$)");
     }
 }
