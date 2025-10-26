@@ -745,6 +745,25 @@ ORDER BY idx
             qb.push(" AND f.file_path ~* ").push_bind(regex);
         }
 
+        if !request.include_paths.is_empty() {
+            qb.push(
+                " AND EXISTS (
+                    SELECT 1
+                    FROM unnest(",
+            )
+            .push_bind(&request.include_paths)
+            .push(
+                ") AS include_path(value)
+                    WHERE
+                        f.file_path = include_path.value
+                        OR (
+                            RIGHT(include_path.value, 1) = '/'
+                            AND f.file_path LIKE include_path.value || '%'
+                        )
+                )",
+            );
+        }
+
         if !request.excluded_paths.is_empty() {
             qb.push(
                 " AND NOT EXISTS (

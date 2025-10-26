@@ -134,6 +134,8 @@ struct SearchRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     path_regex: Option<&'a str>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    include_paths: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     excluded_paths: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     path_hint: Option<&'a str>,
@@ -262,6 +264,7 @@ fn run_query(args: QueryArgs) -> Result<()> {
         commit_sha: args.commit_sha.as_deref(),
         path: args.path.as_deref(),
         path_regex: args.path_regex.as_deref(),
+        include_paths: Vec::new(),
         excluded_paths: Vec::new(),
         path_hint: None,
         include_references: if args.include_references {

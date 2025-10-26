@@ -5,7 +5,7 @@ use crate::db::{
     models::{FileReference, SymbolResult},
 };
 use leptos::either::EitherOf4;
-use leptos::html::{Code, Div};
+use leptos::html::{Code, Details, Div};
 use leptos::{either::Either, prelude::*};
 use leptos_router::components::A;
 use leptos_router::hooks::{use_location, use_params};
@@ -44,6 +44,7 @@ pub enum SymbolSearchScope {
     Repository,
     Directory,
     File,
+    Custom,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -54,6 +55,8 @@ pub struct SymbolInsightsParams {
     pub symbol: String,
     pub language: Option<String>,
     pub scope: SymbolSearchScope,
+    #[serde(default)]
+    pub include_paths: Vec<String>,
     #[serde(default)]
     pub excluded_paths: Vec<String>,
 }
@@ -104,6 +107,7 @@ impl SymbolSearchScope {
             SymbolSearchScope::Repository => "repository",
             SymbolSearchScope::Directory => "directory",
             SymbolSearchScope::File => "file",
+            SymbolSearchScope::Custom => "custom",
         }
     }
 
@@ -112,6 +116,7 @@ impl SymbolSearchScope {
             SymbolSearchScope::Repository => "Current repository",
             SymbolSearchScope::Directory => "Current directory",
             SymbolSearchScope::File => "Current file",
+            SymbolSearchScope::Custom => "Custom filter",
         }
     }
 
@@ -119,6 +124,7 @@ impl SymbolSearchScope {
         match value {
             "directory" => SymbolSearchScope::Directory,
             "file" => SymbolSearchScope::File,
+            "custom" => SymbolSearchScope::Custom,
             _ => SymbolSearchScope::Repository,
         }
     }
@@ -270,6 +276,7 @@ pub async fn fetch_symbol_insights(
         path: None,
         path_regex: None,
         path_hint: None,
+        include_paths: params.include_paths.clone(),
         excluded_paths: params.excluded_paths.clone(),
         include_references: Some(true),
         limit: Some(50),
@@ -294,10 +301,15 @@ pub async fn fetch_symbol_insights(
             let filter = file_hint.clone();
             (filter.clone(), filter)
         }
+        SymbolSearchScope::Custom => (None, dir_hint.clone().or(file_hint.clone())),
     };
 
     request.path = path_filter;
     request.path_hint = path_hint;
+    if !request.include_paths.is_empty() {
+        request.include_paths.sort();
+        request.include_paths.dedup();
+    }
     if !request.excluded_paths.is_empty() {
         request.excluded_paths.sort();
         request.excluded_paths.dedup();
@@ -979,51 +991,136 @@ fn FileContent(
 }
 
 #[component]
-fn ExcludePathActions(path: String, excluded_paths: RwSignal<Vec<String>>) -> impl IntoView {
+fn PathFilterActions(
+    path: String,
+    included_paths: RwSignal<Vec<String>>,
+    excluded_paths: RwSignal<Vec<String>>,
+) -> impl IntoView {
     let file_path = path.clone();
     let directory_path = directory_prefix(&path);
+    let menu_ref = NodeRef::<Details>::new();
 
     view! {
-        <div class="flex flex-wrap gap-2">
-            <button
-                class="text-xs rounded-full border border-gray-300 dark:border-gray-600 px-2 py-1 text-gray-600 hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-700"
-                on:click={
-                    let excluded_paths = excluded_paths.clone();
-                    let value = file_path.clone();
-                    move |ev: leptos::ev::MouseEvent| {
-                        ev.stop_propagation();
-                        let candidate = value.clone();
-                        excluded_paths.update(|paths| {
-                            if !paths.iter().any(|existing| existing == &candidate) {
-                                paths.push(candidate.clone());
-                            }
-                        });
-                    }
-                }
-            >
-                "Exclude file"
-            </button>
-            {directory_path.map(|dir| {
-                let excluded_paths = excluded_paths.clone();
-                let dir_value = dir.clone();
-                view! {
-                    <button
-                        class="text-xs rounded-full border border-gray-300 dark:border-gray-600 px-2 py-1 text-gray-600 hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-700"
-                        on:click=move |ev: leptos::ev::MouseEvent| {
-                            ev.stop_propagation();
-                            let candidate = dir_value.clone();
-                            excluded_paths.update(|paths| {
-                                if !paths.iter().any(|existing| existing == &candidate) {
-                                    paths.push(candidate.clone());
+        <details class="relative inline-block" node_ref=menu_ref>
+            <summary class="text-xs rounded-full border border-gray-300 dark:border-gray-600 px-2 py-1 text-gray-600 hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-700 cursor-pointer select-none">
+                "Path options"
+            </summary>
+            <div class="absolute right-0 z-10 mt-1 w-44 rounded-md border border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-800 shadow-lg">
+                <ul class="py-1 text-xs text-gray-700 dark:text-gray-200">
+                    <li>
+                        <button
+                            class="w-full px-3 py-2 text-left hover:bg-gray-100 dark:hover:bg-gray-700"
+                            on:click={
+                                let included_paths = included_paths.clone();
+                                let value = file_path.clone();
+                                let menu_ref = menu_ref.clone();
+                                move |ev: leptos::ev::MouseEvent| {
+                                    ev.prevent_default();
+                                    ev.stop_propagation();
+                                    let candidate = value.clone();
+                                    included_paths
+                                        .update(|paths| {
+                                            if !paths.iter().any(|existing| existing == &candidate) {
+                                                paths.push(candidate.clone());
+                                            }
+                                        });
+                                    if let Some(menu) = menu_ref.get_untracked() {
+                                        menu.set_open(false);
+                                    }
                                 }
-                            });
-                        }
-                    >
-                        "Exclude directory"
-                    </button>
-                }
-            })}
-        </div>
+                            }
+                        >
+                            "Include file"
+                        </button>
+                    </li>
+                    {directory_path
+                        .clone()
+                        .map(|dir| {
+                            let included_paths = included_paths.clone();
+                            let dir_value = dir.clone();
+                            let menu_ref = menu_ref.clone();
+                            view! {
+                                <li>
+                                    <button
+                                        class="w-full px-3 py-2 text-left hover:bg-gray-100 dark:hover:bg-gray-700"
+                                        on:click=move |ev: leptos::ev::MouseEvent| {
+                                            ev.prevent_default();
+                                            ev.stop_propagation();
+                                            let candidate = dir_value.clone();
+                                            included_paths
+                                                .update(|paths| {
+                                                    if !paths.iter().any(|existing| existing == &candidate) {
+                                                        paths.push(candidate.clone());
+                                                    }
+                                                });
+                                            if let Some(menu) = menu_ref.get_untracked() {
+                                                menu.set_open(false);
+                                            }
+                                        }
+                                    >
+                                        "Include directory"
+                                    </button>
+                                </li>
+                            }
+                        })}
+                    <li>
+                        <button
+                            class="w-full px-3 py-2 text-left hover:bg-gray-100 dark:hover:bg-gray-700"
+                            on:click={
+                                let excluded_paths = excluded_paths.clone();
+                                let value = file_path.clone();
+                                let menu_ref = menu_ref.clone();
+                                move |ev: leptos::ev::MouseEvent| {
+                                    ev.prevent_default();
+                                    ev.stop_propagation();
+                                    let candidate = value.clone();
+                                    excluded_paths
+                                        .update(|paths| {
+                                            if !paths.iter().any(|existing| existing == &candidate) {
+                                                paths.push(candidate.clone());
+                                            }
+                                        });
+                                    if let Some(menu) = menu_ref.get_untracked() {
+                                        menu.set_open(false);
+                                    }
+                                }
+                            }
+                        >
+                            "Exclude file"
+                        </button>
+                    </li>
+                    {directory_path
+                        .map(|dir| {
+                            let excluded_paths = excluded_paths.clone();
+                            let dir_value = dir.clone();
+                            let menu_ref = menu_ref.clone();
+                            view! {
+                                <li>
+                                    <button
+                                        class="w-full px-3 py-2 text-left hover:bg-gray-100 dark:hover:bg-gray-700"
+                                        on:click=move |ev: leptos::ev::MouseEvent| {
+                                            ev.prevent_default();
+                                            ev.stop_propagation();
+                                            let candidate = dir_value.clone();
+                                            excluded_paths
+                                                .update(|paths| {
+                                                    if !paths.iter().any(|existing| existing == &candidate) {
+                                                        paths.push(candidate.clone());
+                                                    }
+                                                });
+                                            if let Some(menu) = menu_ref.get_untracked() {
+                                                menu.set_open(false);
+                                            }
+                                        }
+                                    >
+                                        "Exclude directory"
+                                    </button>
+                                </li>
+                            }
+                        })}
+                </ul>
+            </div>
+        </details>
     }
 }
 
@@ -1034,11 +1131,13 @@ fn CodeIntelPanel(
     path: Signal<Option<String>>,
     selected_symbol: RwSignal<Option<String>>,
     language: RwSignal<Option<String>>,
+    included_paths: RwSignal<Vec<String>>,
     excluded_paths: RwSignal<Vec<String>>,
 ) -> impl IntoView {
     let scope: RwSignal<SymbolSearchScope> = RwSignal::new(SymbolSearchScope::Repository);
     let language_filter = RwSignal::new(language.get_untracked());
     let manual_language_override = RwSignal::new(false);
+    let manual_path_input = RwSignal::new(String::new());
 
     Effect::new(move |_| {
         selected_symbol.get();
@@ -1047,9 +1146,11 @@ fn CodeIntelPanel(
     });
 
     Effect::new({
+        let included_paths = included_paths.clone();
         let excluded_paths = excluded_paths.clone();
         move |_| {
             if selected_symbol.get().is_none() {
+                included_paths.set(Vec::new());
                 excluded_paths.set(Vec::new());
             }
         }
@@ -1062,6 +1163,7 @@ fn CodeIntelPanel(
         }
     });
 
+    let included_paths_for_resource = included_paths.clone();
     let excluded_paths_for_resource = excluded_paths.clone();
     let insights_resource = Resource::new(
         move || {
@@ -1072,10 +1174,11 @@ fn CodeIntelPanel(
                 path.get(),
                 scope.get(),
                 language_filter.get(),
+                included_paths_for_resource.get(),
                 excluded_paths_for_resource.get(),
             )
         },
-        |(symbol_opt, repo, branch, path, scope, language, excluded_paths)| async move {
+        |(symbol_opt, repo, branch, path, scope, language, include_paths, excluded_paths)| async move {
             if let Some(symbol) = symbol_opt {
                 fetch_symbol_insights(SymbolInsightsParams {
                     repo,
@@ -1084,6 +1187,7 @@ fn CodeIntelPanel(
                     symbol,
                     language,
                     scope,
+                    include_paths,
                     excluded_paths,
                 })
                 .await
@@ -1160,6 +1264,7 @@ fn CodeIntelPanel(
                                 {SymbolSearchScope::Directory.label()}
                             </option>
                             <option value="file">{SymbolSearchScope::File.label()}</option>
+                            <option value="custom">{SymbolSearchScope::Custom.label()}</option>
                         </select>
                     </div>
                     <div class="flex flex-col gap-1">
@@ -1207,47 +1312,179 @@ fn CodeIntelPanel(
                                 })
                         }}
                     </div>
-                    {move || {
-                        let paths = excluded_paths.get();
-                        if paths.is_empty() {
-                            Either::Left(view! { <></> })
-                        } else {
-                            let excluded_paths = excluded_paths.clone();
-                            Either::Right(view! {
-                                <div class="flex flex-wrap items-center gap-2 text-xs">
-                                    <span class="text-gray-500 dark:text-gray-400 uppercase tracking-wide">
-                                        "Excludes"
-                                    </span>
-                                    <For
-                                        each=move || excluded_paths.get()
-                                        key=|path| path.clone()
-                                        children=move |path| {
-                                            let signal = excluded_paths.clone();
-                                            let display = path.clone();
-                                            view! {
-                                                <span class="inline-flex items-center gap-1 rounded-full bg-gray-200 dark:bg-gray-700/70 px-2 py-1 font-mono">
-                                                    <span class="truncate max-w-[10rem]" title=display.clone()>{display.clone()}</span>
-                                                    <button
-                                                        class="text-xs text-gray-600 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white"
-                                                        on:click=move |ev| {
-                                                            ev.stop_propagation();
-                                                            let value = display.clone();
-                                                            signal.update(|paths| {
-                                                                if let Some(pos) = paths.iter().position(|p| p == &value) {
-                                                                    paths.remove(pos);
-                                                                }
-                                                            });
-                                                        }
-                                                        aria-label="Remove excluded path"
-                                                    >
-                                                        "×"
-                                                    </button>
-                                                </span>
+                    <Show
+                        when=move || matches!(scope.get(), SymbolSearchScope::Custom)
+                        fallback=move || view! { <></> }
+                    >
+                        <div class="flex flex-col gap-2">
+                            <label class="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                                "Path filters"
+                            </label>
+                            <input
+                                class="input input-sm input-bordered bg-white dark:bg-gray-800"
+                                placeholder="e.g. components/light/ or components/light/domain.py"
+                                prop:value=move || manual_path_input.get()
+                                on:input=move |ev| manual_path_input.set(event_target_value(&ev))
+                            />
+                            <div class="flex gap-2">
+                                <button
+                                    class="text-xs rounded-full border border-gray-300 dark:border-gray-600 px-2 py-1 text-gray-600 hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-700"
+                                    on:click={
+                                        let manual_path_input = manual_path_input.clone();
+                                        let included_paths = included_paths.clone();
+                                        move |ev: leptos::ev::MouseEvent| {
+                                            ev.prevent_default();
+                                            let value = manual_path_input.get();
+                                            let trimmed = value.trim();
+                                            if trimmed.is_empty() {
+                                                return;
                                             }
+                                            let candidate = trimmed.to_string();
+                                            manual_path_input.set(String::new());
+                                            included_paths
+                                                .update(|paths| {
+                                                    if !paths.iter().any(|existing| existing == &candidate) {
+                                                        paths.push(candidate.clone());
+                                                    }
+                                                });
                                         }
-                                    />
-                                </div>
-                            })
+                                    }
+                                >
+                                    "Add include"
+                                </button>
+                                <button
+                                    class="text-xs rounded-full border border-gray-300 dark:border-gray-600 px-2 py-1 text-gray-600 hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-700"
+                                    on:click={
+                                        let manual_path_input = manual_path_input.clone();
+                                        let excluded_paths = excluded_paths.clone();
+                                        move |ev: leptos::ev::MouseEvent| {
+                                            ev.prevent_default();
+                                            let value = manual_path_input.get();
+                                            let trimmed = value.trim();
+                                            if trimmed.is_empty() {
+                                                return;
+                                            }
+                                            let candidate = trimmed.to_string();
+                                            manual_path_input.set(String::new());
+                                            excluded_paths
+                                                .update(|paths| {
+                                                    if !paths.iter().any(|existing| existing == &candidate) {
+                                                        paths.push(candidate.clone());
+                                                    }
+                                                });
+                                        }
+                                    }
+                                >
+                                    "Add exclude"
+                                </button>
+                            </div>
+                            <p class="text-[11px] text-gray-500 dark:text-gray-400">
+                                "Add a trailing '/' to match an entire directory."
+                            </p>
+                        </div>
+                    </Show>
+                    {move || {
+                        if matches!(scope.get(), SymbolSearchScope::Custom) {
+                            let paths = included_paths.get();
+                            if paths.is_empty() {
+                                Either::Left(view! { <></> })
+                            } else {
+                                let included_paths = included_paths.clone();
+                                Either::Right(
+                                    view! {
+                                        <div class="flex flex-wrap items-center gap-2 text-xs">
+                                            <span class="text-gray-500 dark:text-gray-400 uppercase tracking-wide">
+                                                "Includes"
+                                            </span>
+                                            <For
+                                                each=move || included_paths.get()
+                                                key=|path| path.clone()
+                                                children=move |path| {
+                                                    let signal = included_paths.clone();
+                                                    let display = path.clone();
+                                                    view! {
+                                                        <span class="inline-flex items-center gap-1 rounded-full bg-green-200/70 dark:bg-green-900/40 px-2 py-1 font-mono">
+                                                            <span class="truncate max-w-[10rem]" title=display.clone()>
+                                                                {display.clone()}
+                                                            </span>
+                                                            <button
+                                                                class="text-xs text-gray-600 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white"
+                                                                on:click=move |ev| {
+                                                                    ev.stop_propagation();
+                                                                    let value = display.clone();
+                                                                    signal
+                                                                        .update(|paths| {
+                                                                            if let Some(pos) = paths.iter().position(|p| p == &value) {
+                                                                                paths.remove(pos);
+                                                                            }
+                                                                        });
+                                                                }
+                                                                aria-label="Remove included path"
+                                                            >
+                                                                "×"
+                                                            </button>
+                                                        </span>
+                                                    }
+                                                }
+                                            />
+                                        </div>
+                                    },
+                                )
+                            }
+                        } else {
+                            Either::Left(view! { <></> })
+                        }
+                    }}
+                    {move || {
+                        if matches!(scope.get(), SymbolSearchScope::Custom) {
+                            let paths = excluded_paths.get();
+                            if paths.is_empty() {
+                                Either::Left(view! { <></> })
+                            } else {
+                                let excluded_paths = excluded_paths.clone();
+                                Either::Right(
+                                    view! {
+                                        <div class="flex flex-wrap items-center gap-2 text-xs">
+                                            <span class="text-gray-500 dark:text-gray-400 uppercase tracking-wide">
+                                                "Excludes"
+                                            </span>
+                                            <For
+                                                each=move || excluded_paths.get()
+                                                key=|path| path.clone()
+                                                children=move |path| {
+                                                    let signal = excluded_paths.clone();
+                                                    let display = path.clone();
+                                                    view! {
+                                                        <span class="inline-flex items-center gap-1 rounded-full bg-gray-200 dark:bg-gray-700/70 px-2 py-1 font-mono">
+                                                            <span class="truncate max-w-[10rem]" title=display.clone()>
+                                                                {display.clone()}
+                                                            </span>
+                                                            <button
+                                                                class="text-xs text-gray-600 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white"
+                                                                on:click=move |ev| {
+                                                                    ev.stop_propagation();
+                                                                    let value = display.clone();
+                                                                    signal
+                                                                        .update(|paths| {
+                                                                            if let Some(pos) = paths.iter().position(|p| p == &value) {
+                                                                                paths.remove(pos);
+                                                                            }
+                                                                        });
+                                                                }
+                                                                aria-label="Remove excluded path"
+                                                            >
+                                                                "×"
+                                                            </button>
+                                                        </span>
+                                                    }
+                                                }
+                                            />
+                                        </div>
+                                    },
+                                )
+                            }
+                        } else {
+                            Either::Left(view! { <></> })
                         }
                     }}
                 </div>
@@ -1318,7 +1555,8 @@ fn CodeIntelPanel(
                                                                 let reference_count = references.len();
                                                                 let definition_repo = definition.repository.clone();
                                                                 let definition_file_path = definition.file_path.clone();
-                                                                let definition_file_path_for_label = definition_file_path.clone();
+                                                                let definition_file_path_for_label = definition_file_path
+                                                                    .clone();
                                                                 let grouped_references = {
                                                                     let mut groups: Vec<
                                                                         (String, String, String, Vec<SymbolReferenceWithSnippet>),
@@ -1375,13 +1613,14 @@ fn CodeIntelPanel(
                                                                                         format!(
                                                                                             "{}:{}",
                                                                                             definition_file_path_for_label.clone(),
-                                                                                            line
+                                                                                            line,
                                                                                         )
                                                                                     })
                                                                                     .unwrap_or_else(|| definition_file_path_for_label.clone())}
                                                                             </A>
-                                                                            <ExcludePathActions
+                                                                            <PathFilterActions
                                                                                 path=definition_file_path.clone()
+                                                                                included_paths=included_paths.clone()
                                                                                 excluded_paths=excluded_paths.clone()
                                                                             />
                                                                         </div>
@@ -1452,17 +1691,18 @@ fn CodeIntelPanel(
                                                                                                                 {entries
                                                                                                                     .into_iter()
                                                                                                                     .map(|entry| {
-                                                                                                                       let reference = entry.reference;
-                                                                                                                       let line_number = reference.line.max(1);
-                                                                                                                       let reference_link = format!(
-                                                                                                                           "/repo/{}/tree/{}/{}#L{}",
-                                                                                                                           reference.repository,
-                                                                                                                           reference.commit_sha,
-                                                                                                                           reference.file_path,
-                                                                                                                           line_number,
-                                                                                                                       );
+                                                                                                                        let reference = entry.reference;
+                                                                                                                        let line_number = reference.line.max(1);
+                                                                                                                        let reference_link = format!(
+                                                                                                                            "/repo/{}/tree/{}/{}#L{}",
+                                                                                                                            reference.repository,
+                                                                                                                            reference.commit_sha,
+                                                                                                                            reference.file_path,
+                                                                                                                            line_number,
+                                                                                                                        );
                                                                                                                         let reference_file_path = reference.file_path.clone();
-                                                                                                                        let reference_file_path_for_label = reference_file_path.clone();
+                                                                                                                        let reference_file_path_for_label = reference_file_path
+                                                                                                                            .clone();
                                                                                                                         let reference_file_path = reference.file_path.clone();
                                                                                                                         view! {
                                                                                                                             <div class="rounded border border-gray-200 dark:border-gray-700 transition-colors overflow-hidden">
@@ -1482,8 +1722,9 @@ fn CodeIntelPanel(
                                                                                                                                             )}
                                                                                                                                         </p>
                                                                                                                                     </div>
-                                                                                                                                    <ExcludePathActions
+                                                                                                                                    <PathFilterActions
                                                                                                                                         path=reference_file_path.clone()
+                                                                                                                                        included_paths=included_paths.clone()
                                                                                                                                         excluded_paths=excluded_paths.clone()
                                                                                                                                     />
                                                                                                                                 </div>
@@ -1616,6 +1857,7 @@ pub fn FileViewer() -> impl IntoView {
     let expanded_dirs = RwSignal::new(HashSet::<String>::new());
     let selected_symbol = RwSignal::new(None::<String>);
     let file_language = RwSignal::new(None::<String>);
+    let included_paths = RwSignal::new(Vec::<String>::new());
     let excluded_paths = RwSignal::new(Vec::<String>::new());
 
     Effect::new(move |_| {
@@ -1624,11 +1866,13 @@ pub fn FileViewer() -> impl IntoView {
                 FileViewerData::File { language, .. } => {
                     file_language.set(language.clone());
                     selected_symbol.set(None);
+                    included_paths.set(Vec::new());
                     excluded_paths.set(Vec::new());
                 }
                 _ => {
                     file_language.set(None);
                     selected_symbol.set(None);
+                    included_paths.set(Vec::new());
                     excluded_paths.set(Vec::new());
                 }
             }
@@ -1803,6 +2047,7 @@ pub fn FileViewer() -> impl IntoView {
                             path=path.into()
                             selected_symbol=selected_symbol
                             language=file_language.into()
+                            included_paths=included_paths
                             excluded_paths=excluded_paths
                         />
                     </div>

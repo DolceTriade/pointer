@@ -62,6 +62,8 @@ pub struct SearchRequest {
     pub path_regex: Option<String>,
     pub path_hint: Option<String>,
     #[serde(default)]
+    pub include_paths: Vec<String>,
+    #[serde(default)]
     pub excluded_paths: Vec<String>,
     pub include_references: Option<bool>,
     pub limit: Option<i64>,
