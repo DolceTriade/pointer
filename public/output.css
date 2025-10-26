@@ -1842,6 +1842,17 @@
       backface-visibility: visible;
     }
   }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border-width: 0;
+  }
   .avatar {
     position: relative;
     display: inline-flex;
@@ -2939,6 +2950,9 @@
   .max-w-\[10rem\] {
     max-width: 10rem;
   }
+  .max-w-\[12rem\] {
+    max-width: 12rem;
+  }
   .max-w-full {
     max-width: 100%;
   }
@@ -3025,6 +3039,9 @@
   }
   .resize {
     resize: both;
+  }
+  .list-none {
+    list-style-type: none;
   }
   .grid-cols-1 {
     grid-template-columns: repeat(1, minmax(0, 1fr));
@@ -3127,6 +3144,9 @@
   }
   .overflow-hidden {
     overflow: hidden;
+  }
+  .overflow-visible {
+    overflow: visible;
   }
   .overflow-x-auto {
     overflow-x: auto;
@@ -3407,8 +3427,14 @@
   .break-all {
     word-break: break-all;
   }
+  .text-ellipsis {
+    text-overflow: ellipsis;
+  }
   .whitespace-nowrap {
     white-space: nowrap;
+  }
+  .whitespace-pre {
+    white-space: pre;
   }
   .whitespace-pre-wrap {
     white-space: pre-wrap;
@@ -3757,6 +3783,11 @@
       opacity: 50%;
     }
   }
+  .md\:max-w-\[14rem\] {
+    @media (width >= 48rem) {
+      max-width: 14rem;
+    }
+  }
   .md\:grid-cols-2 {
     @media (width >= 48rem) {
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -3770,6 +3801,11 @@
   .lg\:grid-cols-3 {
     @media (width >= 64rem) {
       grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+  }
+  .xl\:max-w-\[18rem\] {
+    @media (width >= 80rem) {
+      max-width: 18rem;
     }
   }
   .dark\:border-gray-600 {

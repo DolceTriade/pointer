@@ -1001,9 +1001,14 @@ fn PathFilterActions(
     let menu_ref = NodeRef::<Details>::new();
 
     view! {
-        <details class="relative inline-block" node_ref=menu_ref>
-            <summary class="text-xs rounded-full border border-gray-300 dark:border-gray-600 px-2 py-1 text-gray-600 hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-700 cursor-pointer select-none">
-                "Path options"
+        <details class="relative inline-flex items-center" node_ref=menu_ref>
+            <summary
+                class="inline-flex items-center justify-center w-6 h-6 rounded-full border border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 cursor-pointer select-none flex-shrink-0"
+                style="list-style: none;"
+                title="Path options"
+            >
+                <span aria-hidden="true">{"▼"}</span>
+                <span class="sr-only">Path options</span>
             </summary>
             <div class="absolute right-0 z-10 mt-1 w-44 rounded-md border border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-800 shadow-lg">
                 <ul class="py-1 text-xs text-gray-700 dark:text-gray-200">
@@ -1216,7 +1221,7 @@ fn CodeIntelPanel(
     });
 
     view! {
-        <aside class="w-80 flex-shrink-0 bg-white dark:bg-gray-800 rounded-lg shadow border border-gray-200 dark:border-gray-700 p-4 sticky top-20 max-h-[calc(100vh-6rem)] overflow-hidden">
+        <aside class="w-80 flex-shrink-0 bg-white dark:bg-gray-800 rounded-lg shadow border border-gray-200 dark:border-gray-700 p-4 sticky top-20 max-h-[calc(100vh-6rem)] overflow-visible">
             <h2 class="text-xl font-semibold mb-4 text-gray-800 dark:text-gray-200">
                 "Code Intelligence"
             </h2>
@@ -1574,6 +1579,9 @@ fn CodeIntelPanel(
                                                                     .language
                                                                     .clone()
                                                                     .unwrap_or_else(|| "unknown".to_string());
+                                                                let definition_file_path = definition.file_path.clone();
+                                                                let definition_file_path_for_label = definition_file_path
+                                                                    .clone();
                                                                 let (definition_line, definition_link) = if let Some(
                                                                     line,
                                                                 ) = definition.line
@@ -1595,11 +1603,19 @@ fn CodeIntelPanel(
                                                                     );
                                                                     (None, link)
                                                                 };
+                                                                let display_path = definition_line
+                                                                    .map(|line| {
+                                                                        format!(
+                                                                            "{}:{}",
+                                                                            definition_file_path_for_label.clone(),
+                                                                            line,
+                                                                        )
+                                                                    })
+                                                                    .unwrap_or_else(|| definition_file_path_for_label.clone());
+                                                                let display_title = display_path.clone();
+                                                                let display_text = display_path.clone();
                                                                 let reference_count = references.len();
                                                                 let definition_repo = definition.repository.clone();
-                                                                let definition_file_path = definition.file_path.clone();
-                                                                let definition_file_path_for_label = definition_file_path
-                                                                    .clone();
                                                                 let grouped_references = {
                                                                     let mut groups: Vec<
                                                                         (String, String, String, Vec<SymbolReferenceWithSnippet>),
@@ -1646,20 +1662,15 @@ fn CodeIntelPanel(
                                                                                     </div>
                                                                                 }
                                                                             })}
-                                                                        <div class="mt-2 flex flex-wrap items-center gap-2">
+                                                                        <div class="mt-2 flex items-center gap-2 min-w-0">
                                                                             <A
                                                                                 href=definition_link
-                                                                                attr:class="text-sm text-blue-600 dark:text-blue-400 hover:underline truncate font-mono"
+                                                                                attr:class="text-sm text-blue-600 dark:text-blue-400 hover:underline font-mono"
+                                                                                attr:title=display_title.clone()
                                                                             >
-                                                                                {definition_line
-                                                                                    .map(|line| {
-                                                                                        format!(
-                                                                                            "{}:{}",
-                                                                                            definition_file_path_for_label.clone(),
-                                                                                            line,
-                                                                                        )
-                                                                                    })
-                                                                                    .unwrap_or_else(|| definition_file_path_for_label.clone())}
+                                                                                <span class="inline-flex max-w-[10rem] md:max-w-[14rem] xl:max-w-[18rem] text-ellipsis overflow-hidden whitespace-nowrap">
+                                                                                    {display_text}
+                                                                                </span>
                                                                             </A>
                                                                             <PathFilterActions
                                                                                 path=definition_file_path.clone()
@@ -1719,12 +1730,17 @@ fn CodeIntelPanel(
                                                                                                     } else {
                                                                                                         format!("{repo_name}/{file_path}")
                                                                                                     };
+                                                                                                    let summary_label_title = summary_label.clone();
+                                                                                                    let summary_label_text = summary_label.clone();
 
                                                                                                     view! {
                                                                                                         <details class="border border-gray-200 dark:border-gray-700 rounded">
                                                                                                             <summary class="flex items-center justify-between gap-2 px-3 py-2 cursor-pointer select-none hover:bg-gray-100 dark:hover:bg-gray-700 rounded">
-                                                                                                                <span class="min-w-0 truncate text-sm text-blue-600 dark:text-blue-400">
-                                                                                                                    {summary_label}
+                                                                                                                <span
+                                                                                                                    class="min-w-0 text-sm text-blue-600 dark:text-blue-400 text-ellipsis overflow-hidden whitespace-nowrap"
+                                                                                                                    title=summary_label_title
+                                                                                                                >
+                                                                                                                    {summary_label_text}
                                                                                                                 </span>
                                                                                                                 <span class="text-xs text-gray-500 dark:text-gray-400">
                                                                                                                     {reference_label}
@@ -1744,18 +1760,20 @@ fn CodeIntelPanel(
                                                                                                                             line_number,
                                                                                                                         );
                                                                                                                         let reference_file_path = reference.file_path.clone();
-                                                                                                                        let reference_file_path_for_label = reference_file_path
-                                                                                                                            .clone();
-                                                                                                                        let reference_file_path = reference.file_path.clone();
+                                                                                                                        let reference_label = reference_file_path.clone();
+                                                                                                                        let reference_title = reference_label.clone();
                                                                                                                         view! {
                                                                                                                             <div class="rounded border border-gray-200 dark:border-gray-700 transition-colors overflow-hidden">
                                                                                                                                 <div class="flex items-center justify-between gap-2 px-3 py-2">
                                                                                                                                     <div class="min-w-0">
                                                                                                                                         <A
                                                                                                                                             href=reference_link.clone()
-                                                                                                                                            attr:class="text-sm text-blue-600 dark:text-blue-400 hover:underline truncate block"
+                                                                                                                                            attr:class="text-sm text-blue-600 dark:text-blue-400 hover:underline block"
+                                                                                                                                            attr:title=reference_title.clone()
                                                                                                                                         >
-                                                                                                                                            {reference_file_path_for_label.clone()}
+                                                                                                                                            <span class="block text-ellipsis overflow-hidden whitespace-nowrap max-w-[12rem]">
+                                                                                                                                                {reference_label.clone()}
+                                                                                                                                            </span>
                                                                                                                                         </A>
                                                                                                                                         <p class="text-xs text-gray-500 dark:text-gray-400">
                                                                                                                                             {format!(
