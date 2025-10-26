@@ -1861,7 +1861,33 @@ pub fn FileViewer() -> impl IntoView {
     let excluded_paths = RwSignal::new(Vec::<String>::new());
 
     Effect::new(move |_| {
-        if let Some(Ok(fv)) = data_resource.read().as_ref() {
+        let state = data_resource.read();
+        let state_ref = state.as_ref();
+
+        let repo_name = repo();
+        let branch_name = branch();
+        let path_value = path().unwrap_or_default();
+
+        let context_label = if path_value.is_empty() {
+            format!("{}@{}", repo_name, branch_name)
+        } else {
+            format!("{}@{}:{}", repo_name, branch_name, path_value)
+        };
+
+        let title = match state_ref {
+            Some(Ok(FileViewerData::File { .. })) => format!("{context_label} · Pointer"),
+            Some(Ok(FileViewerData::Binary { .. })) => {
+                format!("Binary · {context_label} · Pointer")
+            }
+            Some(Ok(FileViewerData::Directory { .. })) => {
+                format!("Directory · {context_label} · Pointer")
+            }
+            Some(Err(_)) => format!("Error loading {context_label} · Pointer"),
+            None => format!("Loading {context_label} · Pointer"),
+        };
+        document().set_title(&title);
+
+        if let Some(Ok(fv)) = state_ref {
             match fv {
                 FileViewerData::File { language, .. } => {
                     file_language.set(language.clone());
