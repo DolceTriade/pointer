@@ -1138,12 +1138,17 @@ fn CodeIntelPanel(
     let language_filter = RwSignal::new(language.get_untracked());
     let manual_language_override = RwSignal::new(false);
     let manual_path_input = RwSignal::new(String::new());
+    let snippet_filter = RwSignal::new(String::new());
 
-    Effect::new(move |_| {
-        selected_symbol.get();
-        manual_language_override.set(false);
-        language_filter.set(language.get_untracked());
-    });
+    {
+        let snippet_filter = snippet_filter.clone();
+        Effect::new(move |_| {
+            selected_symbol.get();
+            manual_language_override.set(false);
+            language_filter.set(language.get_untracked());
+            snippet_filter.set(String::new());
+        });
+    }
 
     Effect::new({
         let included_paths = included_paths.clone();
@@ -1311,6 +1316,18 @@ fn CodeIntelPanel(
                                     }
                                 })
                         }}
+                    </div>
+                    <div class="flex flex-col gap-1">
+                        <label class="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                            "Filter snippets"
+                        </label>
+                        <input
+                            class="input input-sm input-bordered bg-white dark:bg-gray-800"
+                            type="text"
+                            placeholder="Find text in snippets"
+                            prop:value=move || snippet_filter.get()
+                            on:input=move |ev| snippet_filter.set(event_target_value(&ev))
+                        />
                     </div>
                     <Show
                         when=move || matches!(scope.get(), SymbolSearchScope::Custom)
@@ -1507,15 +1524,41 @@ fn CodeIntelPanel(
                             }
                         }>
                             {move || {
+                                let filter_text = snippet_filter.get();
+                                let needle = filter_text.to_lowercase();
                                 insights_resource
                                     .get()
                                     .map(|result| match result {
                                         Ok(Some(data)) => {
                                             let SymbolInsightsResponse { commit, matches, .. } = data;
+                                            let matches: Vec<_> = if needle.is_empty() {
+                                                matches
+                                            } else {
+                                                matches
+                                                    .into_iter()
+                                                    .filter_map(|mut symbol_match| {
+                                                        symbol_match
+                                                            .references
+                                                            .retain(|reference| {
+                                                                snippet_matches_filter(reference, &needle)
+                                                            });
+                                                        if symbol_match.references.is_empty() {
+                                                            None
+                                                        } else {
+                                                            Some(symbol_match)
+                                                        }
+                                                    })
+                                                    .collect()
+                                            };
                                             if matches.is_empty() {
+                                                let message = if filter_text.is_empty() {
+                                                    "No indexed symbols matched this selection.".to_string()
+                                                } else {
+                                                    "No snippets matched the local filter.".to_string()
+                                                };
                                                 view! {
                                                     <p class="text-sm text-gray-500 dark:text-gray-400">
-                                                        "No indexed symbols matched this selection."
+                                                        {message}
                                                     </p>
                                                 }
                                                     .into_any()
@@ -1807,6 +1850,22 @@ fn CodeIntelPanel(
             </div>
         </aside>
     }
+}
+
+fn snippet_matches_filter(reference: &SymbolReferenceWithSnippet, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    reference
+        .snippet
+        .as_ref()
+        .map(|snippet| {
+            snippet
+                .lines
+                .iter()
+                .any(|line| line.to_lowercase().contains(needle))
+        })
+        .unwrap_or(false)
 }
 
 #[component]
