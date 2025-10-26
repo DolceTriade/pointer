@@ -54,6 +54,29 @@ pub struct SymbolInsightsParams {
     pub symbol: String,
     pub language: Option<String>,
     pub scope: SymbolSearchScope,
+    #[serde(default)]
+    pub excluded_paths: Vec<String>,
+}
+
+fn directory_prefix(path: &str) -> Option<String> {
+    let trimmed = path.trim_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+    let dir = if path.ends_with('/') {
+        trimmed.to_string()
+    } else {
+        trimmed
+            .rsplit_once('/')
+            .map(|(dir, _)| dir.to_string())
+            .unwrap_or_default()
+    };
+
+    if dir.is_empty() {
+        None
+    } else {
+        Some(format!("{dir}/"))
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -247,30 +270,10 @@ pub async fn fetch_symbol_insights(
         path: None,
         path_regex: None,
         path_hint: None,
+        excluded_paths: params.excluded_paths.clone(),
         include_references: Some(true),
         limit: Some(50),
     };
-
-    fn directory_prefix(path: &str) -> Option<String> {
-        let trimmed = path.trim_matches('/');
-        if trimmed.is_empty() {
-            return None;
-        }
-        let dir = if path.ends_with('/') {
-            trimmed.to_string()
-        } else {
-            trimmed
-                .rsplit_once('/')
-                .map(|(dir, _)| dir.to_string())
-                .unwrap_or_default()
-        };
-
-        if dir.is_empty() {
-            None
-        } else {
-            Some(format!("{dir}/"))
-        }
-    }
 
     let dir_hint = params.path.as_deref().and_then(directory_prefix);
 
@@ -295,6 +298,10 @@ pub async fn fetch_symbol_insights(
 
     request.path = path_filter;
     request.path_hint = path_hint;
+    if !request.excluded_paths.is_empty() {
+        request.excluded_paths.sort();
+        request.excluded_paths.dedup();
+    }
 
     let search_response = db
         .search_symbols(request)
@@ -972,12 +979,62 @@ fn FileContent(
 }
 
 #[component]
+fn ExcludePathActions(path: String, excluded_paths: RwSignal<Vec<String>>) -> impl IntoView {
+    let file_path = path.clone();
+    let directory_path = directory_prefix(&path);
+
+    view! {
+        <div class="flex flex-wrap gap-2">
+            <button
+                class="text-xs rounded-full border border-gray-300 dark:border-gray-600 px-2 py-1 text-gray-600 hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-700"
+                on:click={
+                    let excluded_paths = excluded_paths.clone();
+                    let value = file_path.clone();
+                    move |ev: leptos::ev::MouseEvent| {
+                        ev.stop_propagation();
+                        let candidate = value.clone();
+                        excluded_paths.update(|paths| {
+                            if !paths.iter().any(|existing| existing == &candidate) {
+                                paths.push(candidate.clone());
+                            }
+                        });
+                    }
+                }
+            >
+                "Exclude file"
+            </button>
+            {directory_path.map(|dir| {
+                let excluded_paths = excluded_paths.clone();
+                let dir_value = dir.clone();
+                view! {
+                    <button
+                        class="text-xs rounded-full border border-gray-300 dark:border-gray-600 px-2 py-1 text-gray-600 hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-700"
+                        on:click=move |ev: leptos::ev::MouseEvent| {
+                            ev.stop_propagation();
+                            let candidate = dir_value.clone();
+                            excluded_paths.update(|paths| {
+                                if !paths.iter().any(|existing| existing == &candidate) {
+                                    paths.push(candidate.clone());
+                                }
+                            });
+                        }
+                    >
+                        "Exclude directory"
+                    </button>
+                }
+            })}
+        </div>
+    }
+}
+
+#[component]
 fn CodeIntelPanel(
     repo: Signal<String>,
     branch: Signal<String>,
     path: Signal<Option<String>>,
     selected_symbol: RwSignal<Option<String>>,
     language: RwSignal<Option<String>>,
+    excluded_paths: RwSignal<Vec<String>>,
 ) -> impl IntoView {
     let scope: RwSignal<SymbolSearchScope> = RwSignal::new(SymbolSearchScope::Repository);
     let language_filter = RwSignal::new(language.get_untracked());
@@ -989,6 +1046,15 @@ fn CodeIntelPanel(
         language_filter.set(language.get_untracked());
     });
 
+    Effect::new({
+        let excluded_paths = excluded_paths.clone();
+        move |_| {
+            if selected_symbol.get().is_none() {
+                excluded_paths.set(Vec::new());
+            }
+        }
+    });
+
     Effect::new(move |_| {
         let lang = language.read();
         if !manual_language_override.get() {
@@ -996,6 +1062,7 @@ fn CodeIntelPanel(
         }
     });
 
+    let excluded_paths_for_resource = excluded_paths.clone();
     let insights_resource = Resource::new(
         move || {
             (
@@ -1005,9 +1072,10 @@ fn CodeIntelPanel(
                 path.get(),
                 scope.get(),
                 language_filter.get(),
+                excluded_paths_for_resource.get(),
             )
         },
-        |(symbol_opt, repo, branch, path, scope, language)| async move {
+        |(symbol_opt, repo, branch, path, scope, language, excluded_paths)| async move {
             if let Some(symbol) = symbol_opt {
                 fetch_symbol_insights(SymbolInsightsParams {
                     repo,
@@ -1016,6 +1084,7 @@ fn CodeIntelPanel(
                     symbol,
                     language,
                     scope,
+                    excluded_paths,
                 })
                 .await
                 .map(Some)
@@ -1138,6 +1207,49 @@ fn CodeIntelPanel(
                                 })
                         }}
                     </div>
+                    {move || {
+                        let paths = excluded_paths.get();
+                        if paths.is_empty() {
+                            Either::Left(view! { <></> })
+                        } else {
+                            let excluded_paths = excluded_paths.clone();
+                            Either::Right(view! {
+                                <div class="flex flex-wrap items-center gap-2 text-xs">
+                                    <span class="text-gray-500 dark:text-gray-400 uppercase tracking-wide">
+                                        "Excludes"
+                                    </span>
+                                    <For
+                                        each=move || excluded_paths.get()
+                                        key=|path| path.clone()
+                                        children=move |path| {
+                                            let signal = excluded_paths.clone();
+                                            let display = path.clone();
+                                            view! {
+                                                <span class="inline-flex items-center gap-1 rounded-full bg-gray-200 dark:bg-gray-700/70 px-2 py-1 font-mono">
+                                                    <span class="truncate max-w-[10rem]" title=display.clone()>{display.clone()}</span>
+                                                    <button
+                                                        class="text-xs text-gray-600 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white"
+                                                        on:click=move |ev| {
+                                                            ev.stop_propagation();
+                                                            let value = display.clone();
+                                                            signal.update(|paths| {
+                                                                if let Some(pos) = paths.iter().position(|p| p == &value) {
+                                                                    paths.remove(pos);
+                                                                }
+                                                            });
+                                                        }
+                                                        aria-label="Remove excluded path"
+                                                    >
+                                                        "×"
+                                                    </button>
+                                                </span>
+                                            }
+                                        }
+                                    />
+                                </div>
+                            })
+                        }
+                    }}
                 </div>
                 <div class="mt-6">
                     <Show
@@ -1205,6 +1317,8 @@ fn CodeIntelPanel(
                                                                 };
                                                                 let reference_count = references.len();
                                                                 let definition_repo = definition.repository.clone();
+                                                                let definition_file_path = definition.file_path.clone();
+                                                                let definition_file_path_for_label = definition_file_path.clone();
                                                                 let grouped_references = {
                                                                     let mut groups: Vec<
                                                                         (String, String, String, Vec<SymbolReferenceWithSnippet>),
@@ -1229,6 +1343,7 @@ fn CodeIntelPanel(
                                                                     }
                                                                     groups
                                                                 };
+                                                                let definition_file_path = definition.file_path.clone();
 
                                                                 view! {
                                                                     <div class="rounded border border-gray-200 dark:border-gray-700 p-3">
@@ -1250,14 +1365,26 @@ fn CodeIntelPanel(
                                                                                     </div>
                                                                                 }
                                                                             })}
-                                                                        <A
-                                                                            href=definition_link
-                                                                            attr:class="block mt-2 text-sm text-blue-600 dark:text-blue-400 hover:underline truncate"
-                                                                        >
-                                                                            {definition_line
-                                                                                .map(|line| format!("{}:{}", definition.file_path, line))
-                                                                                .unwrap_or_else(|| definition.file_path.clone())}
-                                                                        </A>
+                                                                        <div class="mt-2 flex flex-wrap items-center gap-2">
+                                                                            <A
+                                                                                href=definition_link
+                                                                                attr:class="text-sm text-blue-600 dark:text-blue-400 hover:underline truncate font-mono"
+                                                                            >
+                                                                                {definition_line
+                                                                                    .map(|line| {
+                                                                                        format!(
+                                                                                            "{}:{}",
+                                                                                            definition_file_path_for_label.clone(),
+                                                                                            line
+                                                                                        )
+                                                                                    })
+                                                                                    .unwrap_or_else(|| definition_file_path_for_label.clone())}
+                                                                            </A>
+                                                                            <ExcludePathActions
+                                                                                path=definition_file_path.clone()
+                                                                                excluded_paths=excluded_paths.clone()
+                                                                            />
+                                                                        </div>
                                                                         {definition_line
                                                                             .map(|line| {
                                                                                 view! {
@@ -1325,25 +1452,28 @@ fn CodeIntelPanel(
                                                                                                                 {entries
                                                                                                                     .into_iter()
                                                                                                                     .map(|entry| {
-                                                                                                                        let reference = entry.reference;
-                                                                                                                        let line_number = reference.line.max(1);
-                                                                                                                        let reference_link = format!(
-                                                                                                                            "/repo/{}/tree/{}/{}#L{}",
-                                                                                                                            reference.repository,
-                                                                                                                            reference.commit_sha,
-                                                                                                                            reference.file_path,
-                                                                                                                            line_number,
-                                                                                                                        );
+                                                                                                                       let reference = entry.reference;
+                                                                                                                       let line_number = reference.line.max(1);
+                                                                                                                       let reference_link = format!(
+                                                                                                                           "/repo/{}/tree/{}/{}#L{}",
+                                                                                                                           reference.repository,
+                                                                                                                           reference.commit_sha,
+                                                                                                                           reference.file_path,
+                                                                                                                           line_number,
+                                                                                                                       );
+                                                                                                                        let reference_file_path = reference.file_path.clone();
+                                                                                                                        let reference_file_path_for_label = reference_file_path.clone();
+                                                                                                                        let reference_file_path = reference.file_path.clone();
                                                                                                                         view! {
-                                                                                                                            <A
-                                                                                                                                href=reference_link
-                                                                                                                                attr:class="block rounded border border-gray-200 dark:border-gray-700 hover:border-blue-400 dark:hover:border-blue-400/60 transition-colors overflow-x-none"
-                                                                                                                            >
+                                                                                                                            <div class="rounded border border-gray-200 dark:border-gray-700 transition-colors overflow-hidden">
                                                                                                                                 <div class="flex items-center justify-between gap-2 px-3 py-2">
                                                                                                                                     <div class="min-w-0">
-                                                                                                                                        <p class="text-sm text-blue-600 dark:text-blue-400 truncate">
-                                                                                                                                            {reference.file_path.clone()}
-                                                                                                                                        </p>
+                                                                                                                                        <A
+                                                                                                                                            href=reference_link.clone()
+                                                                                                                                            attr:class="text-sm text-blue-600 dark:text-blue-400 hover:underline truncate block"
+                                                                                                                                        >
+                                                                                                                                            {reference_file_path_for_label.clone()}
+                                                                                                                                        </A>
                                                                                                                                         <p class="text-xs text-gray-500 dark:text-gray-400">
                                                                                                                                             {format!(
                                                                                                                                                 "Line {}  •  Column {}",
@@ -1352,6 +1482,10 @@ fn CodeIntelPanel(
                                                                                                                                             )}
                                                                                                                                         </p>
                                                                                                                                     </div>
+                                                                                                                                    <ExcludePathActions
+                                                                                                                                        path=reference_file_path.clone()
+                                                                                                                                        excluded_paths=excluded_paths.clone()
+                                                                                                                                    />
                                                                                                                                 </div>
                                                                                                                                 {entry
                                                                                                                                     .snippet
@@ -1385,7 +1519,7 @@ fn CodeIntelPanel(
                                                                                                                                             </div>
                                                                                                                                         }
                                                                                                                                     })}
-                                                                                                                            </A>
+                                                                                                                            </div>
                                                                                                                         }
                                                                                                                     })
                                                                                                                     .collect_view()}
@@ -1482,6 +1616,7 @@ pub fn FileViewer() -> impl IntoView {
     let expanded_dirs = RwSignal::new(HashSet::<String>::new());
     let selected_symbol = RwSignal::new(None::<String>);
     let file_language = RwSignal::new(None::<String>);
+    let excluded_paths = RwSignal::new(Vec::<String>::new());
 
     Effect::new(move |_| {
         if let Some(Ok(fv)) = data_resource.read().as_ref() {
@@ -1489,10 +1624,12 @@ pub fn FileViewer() -> impl IntoView {
                 FileViewerData::File { language, .. } => {
                     file_language.set(language.clone());
                     selected_symbol.set(None);
+                    excluded_paths.set(Vec::new());
                 }
                 _ => {
                     file_language.set(None);
                     selected_symbol.set(None);
+                    excluded_paths.set(Vec::new());
                 }
             }
         }
@@ -1666,6 +1803,7 @@ pub fn FileViewer() -> impl IntoView {
                             path=path.into()
                             selected_symbol=selected_symbol
                             language=file_language.into()
+                            excluded_paths=excluded_paths
                         />
                     </div>
                 </div>

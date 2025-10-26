@@ -745,6 +745,25 @@ ORDER BY idx
             qb.push(" AND f.file_path ~* ").push_bind(regex);
         }
 
+        if !request.excluded_paths.is_empty() {
+            qb.push(
+                " AND NOT EXISTS (
+                    SELECT 1
+                    FROM unnest(",
+            )
+            .push_bind(&request.excluded_paths)
+            .push(
+                ") AS excluded_path(value)
+                    WHERE
+                        f.file_path = excluded_path.value
+                        OR (
+                            RIGHT(excluded_path.value, 1) = '/'
+                            AND f.file_path LIKE excluded_path.value || '%'
+                        )
+                )",
+            );
+        }
+
         qb.push(
             " ORDER BY \
                  s.id, \

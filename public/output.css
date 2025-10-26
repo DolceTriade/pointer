@@ -2915,6 +2915,9 @@
   .max-w-6xl {
     max-width: var(--container-6xl);
   }
+  .max-w-\[10rem\] {
+    max-width: 10rem;
+  }
   .max-w-full {
     max-width: 100%;
   }
@@ -3640,6 +3643,13 @@
       }
     }
   }
+  .hover\:text-gray-900 {
+    &:hover {
+      @media (hover: hover) {
+        color: var(--color-gray-900);
+      }
+    }
+  }
   .hover\:text-sky-300 {
     &:hover {
       @media (hover: hover) {
@@ -3720,6 +3730,11 @@
       grid-template-columns: repeat(3, minmax(0, 1fr));
     }
   }
+  .dark\:border-gray-600 {
+    &:where(.dark, .dark *) {
+      border-color: var(--color-gray-600);
+    }
+  }
   .dark\:border-gray-700 {
     &:where(.dark, .dark *) {
       border-color: var(--color-gray-700);
@@ -3752,6 +3767,14 @@
   .dark\:bg-gray-700 {
     &:where(.dark, .dark *) {
       background-color: var(--color-gray-700);
+    }
+  }
+  .dark\:bg-gray-700\/70 {
+    &:where(.dark, .dark *) {
+      background-color: color-mix(in srgb, oklch(37.3% 0.034 259.733) 70%, transparent);
+      @supports (color: color-mix(in lab, red, red)) {
+        background-color: color-mix(in oklab, var(--color-gray-700) 70%, transparent);
+      }
     }
   }
   .dark\:bg-gray-800 {
@@ -3846,6 +3869,15 @@
       &:hover {
         @media (hover: hover) {
           background-color: var(--color-gray-700);
+        }
+      }
+    }
+  }
+  .dark\:hover\:text-white {
+    &:where(.dark, .dark *) {
+      &:hover {
+        @media (hover: hover) {
+          color: var(--color-white);
         }
       }
     }
