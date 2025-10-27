@@ -1,7 +1,7 @@
+use chrono::{DateTime, Duration, Utc};
 use std::collections::{HashMap, HashSet};
 use std::io::{Seek, SeekFrom, Write};
 use std::net::SocketAddr;
-use chrono::{DateTime, Utc, Duration};
 
 use anyhow::{Context, Result};
 use axum::{
@@ -768,15 +768,18 @@ struct PruneBranchResponse {
 }
 
 // Function to check if a commit is the latest on any branch
-async fn is_latest_commit_on_any_branch(pool: &PgPool, repository: &str, commit_sha: &str) -> Result<bool> {
-    let result: Option<(String,)> = sqlx::query_as(
-        "SELECT commit_sha FROM branches WHERE repository = $1 AND commit_sha = $2"
-    )
-    .bind(repository)
-    .bind(commit_sha)
-    .fetch_optional(pool)
-    .await
-    .map_err(ApiErrorKind::from)?;
+async fn is_latest_commit_on_any_branch(
+    pool: &PgPool,
+    repository: &str,
+    commit_sha: &str,
+) -> Result<bool> {
+    let result: Option<(String,)> =
+        sqlx::query_as("SELECT commit_sha FROM branches WHERE repository = $1 AND commit_sha = $2")
+            .bind(repository)
+            .bind(commit_sha)
+            .fetch_optional(pool)
+            .await
+            .map_err(ApiErrorKind::from)?;
 
     Ok(result.is_some())
 }
@@ -786,12 +789,14 @@ async fn prune_commit_handler(
     State(state): State<AppState>,
     Json(payload): Json<PruneCommitRequest>,
 ) -> ApiResult<Json<PruneCommitResponse>> {
-    let is_latest = is_latest_commit_on_any_branch(&state.pool, &payload.repository, &payload.commit_sha).await?;
-    
+    let is_latest =
+        is_latest_commit_on_any_branch(&state.pool, &payload.repository, &payload.commit_sha)
+            .await?;
+
     if is_latest {
         return Err(AppError::new(
             StatusCode::BAD_REQUEST,
-            "Cannot prune commit that is the latest on a branch. Update the branch first."
+            "Cannot prune commit that is the latest on a branch. Update the branch first.",
         ));
     }
 
@@ -815,7 +820,7 @@ async fn prune_commit_data(pool: &PgPool, repository: &str, commit_sha: &str) ->
 
     // Get all content hashes associated with this commit from the files table
     let content_hashes: Vec<(String,)> = sqlx::query_as(
-        "SELECT DISTINCT content_hash FROM files WHERE repository = $1 AND commit_sha = $2"
+        "SELECT DISTINCT content_hash FROM files WHERE repository = $1 AND commit_sha = $2",
     )
     .bind(repository)
     .bind(commit_sha)
@@ -824,14 +829,13 @@ async fn prune_commit_data(pool: &PgPool, repository: &str, commit_sha: &str) ->
     .map_err(ApiErrorKind::from)?;
 
     // Count files to be deleted
-    let files_deleted_result = sqlx::query(
-        "DELETE FROM files WHERE repository = $1 AND commit_sha = $2"
-    )
-    .bind(repository)
-    .bind(commit_sha)
-    .execute(&mut *tx)
-    .await
-    .map_err(ApiErrorKind::from)?;
+    let files_deleted_result =
+        sqlx::query("DELETE FROM files WHERE repository = $1 AND commit_sha = $2")
+            .bind(repository)
+            .bind(commit_sha)
+            .execute(&mut *tx)
+            .await
+            .map_err(ApiErrorKind::from)?;
 
     let files_deleted = files_deleted_result.rows_affected();
 
@@ -846,13 +850,16 @@ async fn prune_commit_data(pool: &PgPool, repository: &str, commit_sha: &str) ->
 
     // Delete unreferenced content blobs
     if !unreferenced_content_hashes.is_empty() {
-        let hashes_to_delete: Vec<&str> = unreferenced_content_hashes.iter().map(|(h,)| h.as_str()).collect();
-        
+        let hashes_to_delete: Vec<&str> = unreferenced_content_hashes
+            .iter()
+            .map(|(h,)| h.as_str())
+            .collect();
+
         // Delete from symbol_references through symbols table
         sqlx::query(
             "DELETE FROM symbol_references WHERE symbol_id IN (
                 SELECT id FROM symbols WHERE content_hash = ANY($1)
-            )"
+            )",
         )
         .bind(&hashes_to_delete)
         .execute(&mut *tx)
@@ -860,38 +867,32 @@ async fn prune_commit_data(pool: &PgPool, repository: &str, commit_sha: &str) ->
         .map_err(ApiErrorKind::from)?;
 
         // Delete from symbols
-        sqlx::query(
-            "DELETE FROM symbols WHERE content_hash = ANY($1)"
-        )
-        .bind(&hashes_to_delete)
-        .execute(&mut *tx)
-        .await
-        .map_err(ApiErrorKind::from)?;
+        sqlx::query("DELETE FROM symbols WHERE content_hash = ANY($1)")
+            .bind(&hashes_to_delete)
+            .execute(&mut *tx)
+            .await
+            .map_err(ApiErrorKind::from)?;
 
         // Delete from content_blob_chunks
-        sqlx::query(
-            "DELETE FROM content_blob_chunks WHERE content_hash = ANY($1)"
-        )
-        .bind(&hashes_to_delete)
-        .execute(&mut *tx)
-        .await
-        .map_err(ApiErrorKind::from)?;
+        sqlx::query("DELETE FROM content_blob_chunks WHERE content_hash = ANY($1)")
+            .bind(&hashes_to_delete)
+            .execute(&mut *tx)
+            .await
+            .map_err(ApiErrorKind::from)?;
 
         // Delete from content_blobs
-        sqlx::query(
-            "DELETE FROM content_blobs WHERE hash = ANY($1)"
-        )
-        .bind(&hashes_to_delete)
-        .execute(&mut *tx)
-        .await
-        .map_err(ApiErrorKind::from)?;
+        sqlx::query("DELETE FROM content_blobs WHERE hash = ANY($1)")
+            .bind(&hashes_to_delete)
+            .execute(&mut *tx)
+            .await
+            .map_err(ApiErrorKind::from)?;
     }
 
     // Check if any chunks are no longer referenced by any content blobs
     let remaining_content_hashes: Vec<(String,)> = sqlx::query_as(
         "SELECT DISTINCT content_hash FROM content_blob_chunks WHERE content_hash IN (
             SELECT hash FROM content_blobs
-        )"
+        )",
     )
     .fetch_all(&mut *tx)
     .await
@@ -899,13 +900,21 @@ async fn prune_commit_data(pool: &PgPool, repository: &str, commit_sha: &str) ->
 
     // Find chunks that are only referenced by the content hashes we're deleting
     // This is a complex query to find chunks that are ONLY referenced by content hashes being deleted
-    let all_chunks_result = sqlx::query_as::<_, (String,)>("SELECT chunk_hash FROM content_blob_chunks WHERE content_hash = ANY($1)")
-        .bind(&remaining_content_hashes.iter().map(|(h,)| h.as_str()).collect::<Vec<_>>())
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(ApiErrorKind::from)?;
+    let all_chunks_result = sqlx::query_as::<_, (String,)>(
+        "SELECT chunk_hash FROM content_blob_chunks WHERE content_hash = ANY($1)",
+    )
+    .bind(
+        &remaining_content_hashes
+            .iter()
+            .map(|(h,)| h.as_str())
+            .collect::<Vec<_>>(),
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(ApiErrorKind::from)?;
 
-    let remaining_chunk_hashes: HashSet<String> = all_chunks_result.into_iter().map(|(h,)| h).collect();
+    let remaining_chunk_hashes: HashSet<String> =
+        all_chunks_result.into_iter().map(|(h,)| h).collect();
 
     // Delete only those chunks that are not referenced by any remaining content blobs
     // For now, we'll keep this simpler and not actually delete chunks that might be shared
@@ -923,14 +932,13 @@ async fn prune_branch_handler(
     Json(payload): Json<PruneBranchRequest>,
 ) -> ApiResult<Json<PruneBranchResponse>> {
     // Get the latest commit for this branch
-    let latest_commit_opt: Option<(String,)> = sqlx::query_as(
-        "SELECT commit_sha FROM branches WHERE repository = $1 AND branch = $2"
-    )
-    .bind(&payload.repository)
-    .bind(&payload.branch)
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(ApiErrorKind::from)?;
+    let latest_commit_opt: Option<(String,)> =
+        sqlx::query_as("SELECT commit_sha FROM branches WHERE repository = $1 AND branch = $2")
+            .bind(&payload.repository)
+            .bind(&payload.branch)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(ApiErrorKind::from)?;
 
     let latest_commit = match latest_commit_opt {
         Some((commit,)) => commit,
@@ -946,7 +954,7 @@ async fn prune_branch_handler(
 
     // Get all commits for this repository and branch (except the latest)
     let commits_to_prune: Vec<(String,)> = sqlx::query_as(
-        "SELECT DISTINCT commit_sha FROM files WHERE repository = $1 AND commit_sha != $2"
+        "SELECT DISTINCT commit_sha FROM files WHERE repository = $1 AND commit_sha != $2",
     )
     .bind(&payload.repository)
     .bind(&latest_commit)
@@ -965,7 +973,10 @@ async fn prune_branch_handler(
         repository: payload.repository,
         branch: payload.branch,
         pruned: true,
-        message: format!("Pruned {} commits from branch (kept latest commit {})", pruned_count, latest_commit),
+        message: format!(
+            "Pruned {} commits from branch (kept latest commit {})",
+            pruned_count, latest_commit
+        ),
     }))
 }
 
@@ -993,7 +1004,7 @@ async fn apply_retention_policy_handler(
     Json(payload): Json<RetentionPolicyConfig>,
 ) -> ApiResult<Json<RetentionPolicyResponse>> {
     apply_retention_policy(&state.pool, &payload).await?;
-    
+
     Ok(Json(RetentionPolicyResponse {
         repository: payload.repository,
         message: "Retention policy applied successfully".to_string(),
@@ -1003,25 +1014,23 @@ async fn apply_retention_policy_handler(
 // Main retention policy function
 async fn apply_retention_policy(pool: &PgPool, config: &RetentionPolicyConfig) -> Result<()> {
     // Get all commits for this repository from the files table
-    let all_commits: Vec<String> = sqlx::query_scalar(
-        "SELECT DISTINCT commit_sha FROM files WHERE repository = $1"
-    )
-    .bind(&config.repository)
-    .fetch_all(pool)
-    .await
-    .map_err(ApiErrorKind::from)?;
+    let all_commits: Vec<String> =
+        sqlx::query_scalar("SELECT DISTINCT commit_sha FROM files WHERE repository = $1")
+            .bind(&config.repository)
+            .fetch_all(pool)
+            .await
+            .map_err(ApiErrorKind::from)?;
 
     let mut commits_to_keep = HashSet::new();
 
     // Always keep the latest commit on each branch
     if config.keep_latest {
-        let latest_branch_commits: Vec<(String,)> = sqlx::query_as(
-            "SELECT commit_sha FROM branches WHERE repository = $1"
-        )
-        .bind(&config.repository)
-        .fetch_all(pool)
-        .await
-        .map_err(ApiErrorKind::from)?;
+        let latest_branch_commits: Vec<(String,)> =
+            sqlx::query_as("SELECT commit_sha FROM branches WHERE repository = $1")
+                .bind(&config.repository)
+                .fetch_all(pool)
+                .await
+                .map_err(ApiErrorKind::from)?;
 
         for (commit_sha,) in latest_branch_commits {
             commits_to_keep.insert(commit_sha);
@@ -1041,7 +1050,7 @@ async fn apply_retention_policy(pool: &PgPool, config: &RetentionPolicyConfig) -
              LEFT JOIN branches b ON f.commit_sha = b.commit_sha AND f.repository = b.repository
              WHERE f.repository = $1
              ORDER BY b.indexed_at DESC NULLS LAST, f.commit_sha
-             LIMIT $2"
+             LIMIT $2",
         )
         .bind(&config.repository)
         .bind(max_commits)
@@ -1079,18 +1088,22 @@ async fn create_snapshot_handler(
     // For now, we'll return an error indicating this feature requires schema changes
     Err(AppError::new(
         StatusCode::NOT_IMPLEMENTED,
-        "Snapshot creation requires a dedicated database table. Schema changes needed for persistent snapshots."
+        "Snapshot creation requires a dedicated database table. Schema changes needed for persistent snapshots.",
     ))
 }
 
 // Function to automatically create snapshots based on time intervals
 // This function is now a placeholder since we don't have a snapshots table
 // In a real implementation, you would need to create a snapshots table to persist this information
-async fn auto_create_snapshots(_pool: &PgPool, _repository: &str, _interval_days: i32) -> Result<()> {
+async fn auto_create_snapshots(
+    _pool: &PgPool,
+    _repository: &str,
+    _interval_days: i32,
+) -> Result<()> {
     // For now, we're not persisting snapshots without a dedicated table
     // This is a limitation of the approach without schema changes
     // In a production implementation, schema changes would be necessary for full functionality
-    
+
     // In the meantime, we could implement a basic time-based retention policy
     // that only keeps commits from certain time periods without persistent marking
     Ok(())

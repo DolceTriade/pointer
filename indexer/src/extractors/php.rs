@@ -155,6 +155,80 @@ fn collect_references(
                 );
             }
         }
+        "const_declaration" => {
+            let mut cursor = node.walk();
+            for child in node.children_by_field_name("declarator", &mut cursor) {
+                if let Some(name_node) = child.child_by_field_name("name") {
+                    record_definition_node(
+                        &name_node,
+                        source,
+                        references,
+                        current_namespace,
+                        "definition",
+                        defined_nodes,
+                        defined_variables,
+                    );
+                }
+            }
+        }
+        // Capture function calls - these are references to functions
+        "function_call_expression" => {
+            if let Some(callee) = node.child_by_field_name("function") {
+                if callee.kind() != "member_access_expression"
+                    && callee.kind() != "scoped_call_expression"
+                {
+                    record_reference_node(
+                        &callee,
+                        source,
+                        references,
+                        current_namespace,
+                        defined_nodes,
+                    );
+                }
+            }
+        }
+        // Capture method calls
+        "member_call_expression" => {
+            if let Some(method) = node.child_by_field_name("method") {
+                record_reference_node(
+                    &method,
+                    source,
+                    references,
+                    current_namespace,
+                    defined_nodes,
+                );
+            }
+        }
+        // Capture scoped calls (static method calls, class constants)
+        "scoped_call_expression" => {
+            if let Some(name) = node.child_by_field_name("name") {
+                record_reference_node(&name, source, references, current_namespace, defined_nodes);
+            }
+        }
+        // Capture class constant access
+        "member_access_expression" => {
+            if let Some(name) = node.child_by_field_name("member") {
+                record_reference_node(&name, source, references, current_namespace, defined_nodes);
+            }
+        }
+
+        // Capture class properties (fields)
+        "property_declaration" => {
+            let mut cursor = node.walk();
+            for child in node.children_by_field_name("property", &mut cursor) {
+                if let Some(name_node) = child.child_by_field_name("name") {
+                    record_definition_node(
+                        &name_node,
+                        source,
+                        references,
+                        current_namespace,
+                        "definition",
+                        defined_nodes,
+                        defined_variables,
+                    );
+                }
+            }
+        }
         "identifier" | "variable_name" | "name" => {
             record_reference_node(node, source, references, current_namespace, defined_nodes);
         }
@@ -279,13 +353,12 @@ mod tests {
 
     #[test]
     fn extracts_php_identifiers() {
-        let source = r#"`
-<?php
+        let source = r#"<?php
 namespace MyNamespace;
 
 class MyClass {
     private $property;
-    
+
     public function myMethod($param) {
         $local = $param + 1;
         return $local;
@@ -378,5 +451,146 @@ $test = helperFunction(5);
                 key
             );
         }
+    }
+
+    #[test]
+    fn extracts_php_function_calls() {
+        let source = r#"<?php
+namespace Test;
+
+function test_function($param) {
+    return $param;
+}
+
+$result = test_function("hello");
+$another = test_function($result);
+"#;
+
+        let extraction = extract(source);
+        let references = extraction.references;
+
+        // Check that function calls are captured as references
+        let has_test_function_ref = references
+            .iter()
+            .any(|r| r.name == "test_function" && r.kind.as_deref() == Some("reference"));
+        assert!(
+            has_test_function_ref,
+            "Should capture function call as reference"
+        );
+    }
+
+    #[test]
+    fn extracts_php_class_properties() {
+        let source = r#"<?php
+namespace Test;
+
+class TestClass {
+    public $myProperty;
+
+    public function testMethod() {
+        $this->myProperty = 'value';
+    }
+}
+"#;
+
+        let extraction = extract(source);
+        let references = extraction.references;
+
+        // Check that properties are captured as both definitions and references
+        let has_property_def = references
+            .iter()
+            .any(|r| r.name == "myProperty" && r.kind.as_deref() == Some("definition"));
+        let has_property_ref = references
+            .iter()
+            .any(|r| r.name == "myProperty" && r.kind.as_deref() == Some("reference"));
+
+        assert!(has_property_def, "Should capture property definition");
+        assert!(has_property_ref, "Should capture property reference");
+    }
+
+    #[test]
+    fn extracts_php_static_members() {
+        let source = r#"<?php
+namespace Test;
+
+class TestClass {
+    public static $staticProp = 'value';
+    public static function staticMethod() {
+        return self::$staticProp;
+    }
+}
+
+$result = TestClass::$staticProp;
+TestClass::staticMethod();
+"#;
+
+        let extraction = extract(source);
+        let references = extraction.references;
+
+        // Check that static properties and methods are captured
+        let has_static_prop_ref = references.iter().any(|r| r.name == "staticProp");
+        let has_static_method_ref = references.iter().any(|r| r.name == "staticMethod");
+
+        assert!(
+            has_static_prop_ref,
+            "Should capture static property reference"
+        );
+        assert!(
+            has_static_method_ref,
+            "Should capture static method reference"
+        );
+    }
+
+    #[test]
+    fn extracts_php_traditional_constructs() {
+        let source = r#"<?php
+namespace Test;
+
+interface TestInterface {
+    public function interfaceMethod();
+}
+
+trait TestTrait {
+    public function traitMethod() {
+        return "trait";
+    }
+}
+
+class BaseClass {
+    public function baseMethod() {}
+}
+
+class TestClass extends BaseClass implements TestInterface {
+    use TestTrait;
+
+    public function interfaceMethod() {
+        $this->baseMethod();
+        $this->traitMethod();
+    }
+}
+"#;
+
+        let extraction = extract(source);
+        let references = extraction.references;
+
+        // Check that class relationships (extends, implements, use) create references
+        let has_base_method_ref = references.iter().any(|r| r.name == "baseMethod");
+        let has_trait_method_ref = references.iter().any(|r| r.name == "traitMethod");
+        let has_interface_method_def = references
+            .iter()
+            .any(|r| r.name == "interfaceMethod" && r.kind.as_deref() == Some("definition"));
+
+        assert!(
+            has_base_method_ref,
+            "Should capture inherited method reference"
+        );
+        assert!(
+            has_trait_method_ref,
+            "Should capture trait method reference"
+        );
+        assert!(
+            has_interface_method_def,
+            "Should capture interface method definition"
+        );
     }
 }
