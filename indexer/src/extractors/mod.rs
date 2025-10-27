@@ -1,10 +1,13 @@
 mod c;
 mod cpp;
+mod glsl;
 mod go;
 mod java;
 mod javascript;
+mod lua;
 mod nix;
 mod objective_c;
+mod php;
 mod protobuf;
 mod python;
 mod rust;
@@ -47,13 +50,16 @@ pub struct CppIndexer;
 pub struct GoIndexer;
 pub struct JavaIndexer;
 pub struct JavaScriptIndexer;
+pub struct LuaIndexer;
 pub struct NixIndexer;
 pub struct ObjectiveCIndexer;
+pub struct PhpIndexer;
 pub struct ProtobufIndexer;
 pub struct PythonIndexer;
 pub struct RustIndexer;
 pub struct SwiftIndexer;
 pub struct TypeScriptIndexer;
+pub struct GlslIndexer;
 
 impl LanguageIndexer for CIndexer {
     fn index(&self, source: &str, _namespace_hint: Option<&str>) -> Extraction {
@@ -85,9 +91,27 @@ impl LanguageIndexer for JavaScriptIndexer {
     }
 }
 
+impl LanguageIndexer for LuaIndexer {
+    fn index(&self, source: &str, _namespace_hint: Option<&str>) -> Extraction {
+        lua::extract(source)
+    }
+}
+
 impl LanguageIndexer for NixIndexer {
     fn index(&self, source: &str, _namespace_hint: Option<&str>) -> Extraction {
         nix::extract(source)
+    }
+}
+
+impl LanguageIndexer for PhpIndexer {
+    fn index(&self, source: &str, _namespace_hint: Option<&str>) -> Extraction {
+        php::extract(source)
+    }
+}
+
+impl LanguageIndexer for GlslIndexer {
+    fn index(&self, source: &str, _namespace_hint: Option<&str>) -> Extraction {
+        glsl::extract(source)
     }
 }
 
@@ -135,13 +159,16 @@ pub fn extract(language: &str, source: &str, namespace_hint: Option<&str>) -> Ex
         "go" => GoIndexer.index(source, namespace_hint),
         "js" | "javascript" => JavaScriptIndexer.index(source, namespace_hint),
         "java" | "jvm" => JavaIndexer.index(source, namespace_hint),
+        "lua" => LuaIndexer.index(source, namespace_hint),
         "nix" => NixIndexer.index(source, namespace_hint),
         "objc" | "objective-c" | "objectivec" => ObjectiveCIndexer.index(source, namespace_hint),
+        "php" => PhpIndexer.index(source, namespace_hint),
         "proto" | "protobuf" => ProtobufIndexer.index(source, namespace_hint),
         "py" | "python" => PythonIndexer.index(source, namespace_hint),
         "rust" => RustIndexer.index(source, namespace_hint),
         "swift" => SwiftIndexer.index(source, namespace_hint),
         "ts" | "typescript" => TypeScriptIndexer.index(source, namespace_hint),
+        "glsl" => GlslIndexer.index(source, namespace_hint),
         _ => Extraction::default(),
     }
 }

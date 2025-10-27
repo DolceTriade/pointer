@@ -99,6 +99,10 @@ pub fn infer_language(path: &Path) -> Option<&'static str> {
         Some(ref ext) if ext == "nix" => Some("nix"),
         Some(ref ext) if ext == "proto" => Some("proto"),
         Some(ref ext) if ext == "swift" => Some("swift"),
+        Some(ref ext) if matches!(ext.as_str(), "lua") => Some("lua"),
+        Some(ref ext) if matches!(ext.as_str(), "glsl" | "frag" | "vert" | "geom" | "comp") => {
+            Some("glsl")
+        }
         _ => None,
     }
 }
