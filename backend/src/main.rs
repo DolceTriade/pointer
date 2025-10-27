@@ -1,5 +1,4 @@
-use chrono::{DateTime, Duration, Utc};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::io::{Seek, SeekFrom, Write};
 use std::net::SocketAddr;
 
@@ -190,7 +189,6 @@ async fn main() -> Result<()> {
         .route("/api/v1/prune/commit", post(prune_commit_handler))
         .route("/api/v1/prune/branch", post(prune_branch_handler))
         .route("/api/v1/prune/policy", post(apply_retention_policy_handler))
-        .route("/api/v1/prune/snapshot", post(create_snapshot_handler))
         .route("/healthz", get(health_check))
         .with_state(state)
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024));
@@ -772,7 +770,7 @@ async fn is_latest_commit_on_any_branch(
     pool: &PgPool,
     repository: &str,
     commit_sha: &str,
-) -> Result<bool> {
+) -> std::result::Result<bool, ApiErrorKind> {
     let result: Option<(String,)> =
         sqlx::query_as("SELECT commit_sha FROM branches WHERE repository = $1 AND commit_sha = $2")
             .bind(repository)
@@ -815,7 +813,11 @@ async fn prune_commit_handler(
 }
 
 // Function to actually remove all data associated with a commit
-async fn prune_commit_data(pool: &PgPool, repository: &str, commit_sha: &str) -> Result<bool> {
+async fn prune_commit_data(
+    pool: &PgPool,
+    repository: &str,
+    commit_sha: &str,
+) -> std::result::Result<bool, ApiErrorKind> {
     let mut tx = pool.begin().await.map_err(ApiErrorKind::from)?;
 
     // Get all content hashes associated with this commit from the files table
@@ -838,6 +840,11 @@ async fn prune_commit_data(pool: &PgPool, repository: &str, commit_sha: &str) ->
             .map_err(ApiErrorKind::from)?;
 
     let files_deleted = files_deleted_result.rows_affected();
+
+    if files_deleted == 0 {
+        tx.commit().await.map_err(ApiErrorKind::from)?;
+        return Ok(false);
+    }
 
     // Get content hashes that are no longer referenced by any files
     let unreferenced_content_hashes: Vec<(String,)> = sqlx::query_as(
@@ -888,38 +895,11 @@ async fn prune_commit_data(pool: &PgPool, repository: &str, commit_sha: &str) ->
             .map_err(ApiErrorKind::from)?;
     }
 
-    // Check if any chunks are no longer referenced by any content blobs
-    let remaining_content_hashes: Vec<(String,)> = sqlx::query_as(
-        "SELECT DISTINCT content_hash FROM content_blob_chunks WHERE content_hash IN (
-            SELECT hash FROM content_blobs
-        )",
-    )
-    .fetch_all(&mut *tx)
-    .await
-    .map_err(ApiErrorKind::from)?;
-
-    // Find chunks that are only referenced by the content hashes we're deleting
-    // This is a complex query to find chunks that are ONLY referenced by content hashes being deleted
-    let all_chunks_result = sqlx::query_as::<_, (String,)>(
-        "SELECT chunk_hash FROM content_blob_chunks WHERE content_hash = ANY($1)",
-    )
-    .bind(
-        &remaining_content_hashes
-            .iter()
-            .map(|(h,)| h.as_str())
-            .collect::<Vec<_>>(),
-    )
-    .fetch_all(&mut *tx)
-    .await
-    .map_err(ApiErrorKind::from)?;
-
-    let remaining_chunk_hashes: HashSet<String> =
-        all_chunks_result.into_iter().map(|(h,)| h).collect();
-
-    // Delete only those chunks that are not referenced by any remaining content blobs
-    // For now, we'll keep this simpler and not actually delete chunks that might be shared
-    // In a real implementation, we'd need to be more sophisticated about chunk deletion
-    // to avoid breaking references to chunks that are used by commits we're not pruning
+    // Delete chunks with a ref_count of 0
+    sqlx::query("DELETE FROM chunks WHERE ref_count = 0")
+        .execute(&mut *tx)
+        .await
+        .map_err(ApiErrorKind::from)?;
 
     tx.commit().await.map_err(ApiErrorKind::from)?;
 
@@ -985,8 +965,7 @@ async fn prune_branch_handler(
 struct RetentionPolicyConfig {
     repository: String,
     keep_latest: bool,
-    keep_snapshots: bool,
-    snapshot_interval_days: Option<i32>,
+
     max_commits_to_keep: Option<i32>,
 }
 
@@ -996,7 +975,7 @@ struct RetentionPolicyResponse {
     message: String,
 }
 
-// We'll remove the snapshot creation functionality since it requires schema changes
+
 
 // Function to identify commits to keep based on retention policy
 async fn apply_retention_policy_handler(
@@ -1012,7 +991,10 @@ async fn apply_retention_policy_handler(
 }
 
 // Main retention policy function
-async fn apply_retention_policy(pool: &PgPool, config: &RetentionPolicyConfig) -> Result<()> {
+async fn apply_retention_policy(
+    pool: &PgPool,
+    config: &RetentionPolicyConfig,
+) -> std::result::Result<(), ApiErrorKind> {
     // Get all commits for this repository from the files table
     let all_commits: Vec<String> =
         sqlx::query_scalar("SELECT DISTINCT commit_sha FROM files WHERE repository = $1")
@@ -1037,15 +1019,14 @@ async fn apply_retention_policy(pool: &PgPool, config: &RetentionPolicyConfig) -
         }
     }
 
-    // For now, without persistent snapshots, we can only support basic retention
-    // based on max_commits_to_keep. We'll skip snapshot functionality entirely.
+
 
     // Keep recent commits based on max_commits_to_keep
     if let Some(max_commits) = config.max_commits_to_keep {
         // Get commits ordered by branch indexing time (most recent first)
         // This approach uses the branches table to order commits by recency
         let recent_commits: Vec<String> = sqlx::query_scalar(
-            "SELECT DISTINCT f.commit_sha 
+            "SELECT DISTINCT f.commit_sha
              FROM files f
              LEFT JOIN branches b ON f.commit_sha = b.commit_sha AND f.repository = b.repository
              WHERE f.repository = $1
@@ -1074,38 +1055,6 @@ async fn apply_retention_policy(pool: &PgPool, config: &RetentionPolicyConfig) -
         prune_commit_data(pool, &config.repository, &commit_sha).await?;
     }
 
-    Ok(())
-}
-
-// Create a snapshot (manually mark a commit to be preserved)
-// This function is now a placeholder since we don't have a snapshots table
-// In a real implementation, you would need to create a snapshots table to persist this information
-async fn create_snapshot_handler(
-    State(_state): State<AppState>,
-    Json(payload): Json<CreateSnapshotRequest>,
-) -> ApiResult<Json<CreateSnapshotResponse>> {
-    // Without a persistent snapshots table, this functionality is limited
-    // For now, we'll return an error indicating this feature requires schema changes
-    Err(AppError::new(
-        StatusCode::NOT_IMPLEMENTED,
-        "Snapshot creation requires a dedicated database table. Schema changes needed for persistent snapshots.",
-    ))
-}
-
-// Function to automatically create snapshots based on time intervals
-// This function is now a placeholder since we don't have a snapshots table
-// In a real implementation, you would need to create a snapshots table to persist this information
-async fn auto_create_snapshots(
-    _pool: &PgPool,
-    _repository: &str,
-    _interval_days: i32,
-) -> Result<()> {
-    // For now, we're not persisting snapshots without a dedicated table
-    // This is a limitation of the approach without schema changes
-    // In a production implementation, schema changes would be necessary for full functionality
-
-    // In the meantime, we could implement a basic time-based retention policy
-    // that only keeps commits from certain time periods without persistent marking
     Ok(())
 }
 
