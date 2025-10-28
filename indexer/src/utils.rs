@@ -103,6 +103,7 @@ pub fn infer_language(path: &Path) -> Option<&'static str> {
         Some(ref ext) if matches!(ext.as_str(), "glsl" | "frag" | "vert" | "geom" | "comp") => {
             Some("glsl")
         }
+        Some(ref ext) if ext == "php" => Some("php"),
         _ => None,
     }
 }
