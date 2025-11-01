@@ -1435,16 +1435,6 @@ fn CodeIntelPanel(
     );
 
     let insights_scroll_container = NodeRef::<Div>::new();
-    Effect::new({
-        let container = insights_scroll_container.clone();
-        move |_| {
-            // track updates to the resource so we reset scroll when content changes
-            let _ = insights_resource.get();
-            if let Some(node) = container.get_untracked() {
-                node.set_scroll_top(0);
-            }
-        }
-    });
 
     view! {
         <aside class="w-80 flex-shrink-0 bg-white dark:bg-gray-800 rounded-lg shadow border border-gray-200 dark:border-gray-700 p-4 sticky top-20 max-h-[calc(100vh-6rem)] overflow-visible">
@@ -1755,12 +1745,19 @@ fn CodeIntelPanel(
                             }
                         }>
                             {move || {
+                                if selected_symbol.get().is_none() {
+                                    return None;
+                                }
+
                                 let filter_text = snippet_filter.get();
                                 let needle = filter_text.to_lowercase();
                                 insights_resource
                                     .get()
                                     .map(|result| match result {
                                         Ok(Some(data)) => {
+                                            if let Some(node) = insights_scroll_container.get_untracked() {
+                                                node.set_scroll_top(0);
+                                            }
                                             let SymbolInsightsResponse { commit, matches, .. } = data;
                                             let matches: Vec<_> = if needle.is_empty() {
                                                 matches
