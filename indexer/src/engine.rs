@@ -1,11 +1,14 @@
-use std::collections::HashSet;
 use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::collections::HashSet;
 
 use anyhow::{Context, Result};
-use ignore::WalkBuilder;
+use crossbeam_channel::bounded;
+use ignore::{WalkBuilder, WalkState};
+use rayon::iter::ParallelBridge;
 use rayon::prelude::*;
 use tracing::{debug, trace, warn};
 
@@ -13,7 +16,7 @@ use crate::chunk_store::ChunkStore;
 use crate::config::IndexerConfig;
 use crate::extractors::{self, ExtractedSymbol};
 use crate::models::{
-    BranchHead, ChunkMapping, ContentBlob, FilePointer, IndexArtifacts, IndexReport,
+    BranchHead, ChunkMapping, ContentBlob, FilePointer, IndexArtifacts, RecordWriter,
     ReferenceRecord, SymbolRecord,
 };
 use crate::utils;
@@ -37,158 +40,207 @@ impl Indexer {
             .git_exclude(true)
             .hidden(false)
             .ignore(true)
-            .build();
+            .build_parallel();
 
-        let mut work_items = Vec::new();
+        let scratch_dir = self
+            .config
+            .output_dir
+            .join(".pointer-scratch");
+        fs::create_dir_all(&scratch_dir).with_context(|| {
+            format!(
+                "failed to create scratch directory {}",
+                scratch_dir.display()
+            )
+        })?;
 
-        for entry in walker {
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(err) => {
-                    warn!(error = %err, "failed to read directory entry");
-                    continue;
-                }
-            };
+        let (tx, rx) = bounded::<FileEntry>(1024);
+        let walker_thread = {
+            let tx = tx.clone();
+            let repo_root = self.config.repo_path.clone();
+            thread::spawn(move || {
+                walker.run(|| {
+                    let tx = tx.clone();
+                    let repo_root = repo_root.clone();
+                    Box::new(move |entry| {
+                        match entry {
+                            Ok(entry) => {
+                                if !entry
+                                    .file_type()
+                                    .map(|ft| ft.is_file())
+                                    .unwrap_or(false)
+                                {
+                                    trace!(path = %entry.path().display(), "skipping non-file entry");
+                                    return WalkState::Continue;
+                                }
 
-            if !entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
-                trace!(path = %entry.path().display(), "skipping non-file entry");
-                continue;
-            }
+                                let absolute_path = entry.path().to_path_buf();
+                                let relative_path =
+                                    match utils::ensure_relative(&absolute_path, &repo_root) {
+                                        Ok(path) => path,
+                                        Err(err) => {
+                                            warn!(
+                                                error = %err,
+                                                path = %absolute_path.display(),
+                                                "skipping file outside repo root"
+                                            );
+                                            return WalkState::Continue;
+                                        }
+                                    };
 
-            let absolute_path = entry.path().to_path_buf();
-            let relative_path = match utils::ensure_relative(&absolute_path, &self.config.repo_path)
-            {
-                Ok(path) => path,
-                Err(err) => {
-                    warn!(
-                        error = %err,
-                        path = %absolute_path.display(),
-                        "skipping file outside repo root"
-                    );
-                    continue;
-                }
-            };
+                                if should_skip(&relative_path) {
+                                    trace!(path = %relative_path.display(), "skipping filtered file");
+                                    return WalkState::Continue;
+                                }
 
-            if should_skip(&relative_path) {
-                trace!(path = %relative_path.display(), "skipping filtered file");
-                continue;
-            }
+                                if tx
+                                    .send(FileEntry {
+                                        absolute: absolute_path,
+                                        relative: relative_path,
+                                    })
+                                    .is_err()
+                                {
+                                    return WalkState::Quit;
+                                }
+                            }
+                            Err(err) => {
+                                warn!(error = %err, "failed to read directory entry");
+                            }
+                        }
+                        WalkState::Continue
+                    })
+                });
+            })
+        };
+        drop(tx);
 
-            work_items.push(FileEntry {
-                absolute: absolute_path,
-                relative: relative_path,
-            });
-        }
-
-        let chunk_store = Arc::new(Mutex::new(ChunkStore::new()?));
-        let content_blobs = Arc::new(Mutex::new(Vec::new()));
-        let file_pointers = Arc::new(Mutex::new(Vec::new()));
-        let symbol_records = Arc::new(Mutex::new(Vec::new()));
-        let reference_records = Arc::new(Mutex::new(Vec::new()));
-        let chunk_mappings = Arc::new(Mutex::new(Vec::new()));
+        let chunk_store = Arc::new(Mutex::new(ChunkStore::new_in(&scratch_dir)?));
         let seen_hashes = Arc::new(Mutex::new(HashSet::new()));
+        let content_blobs_writer = RecordWriter::<ContentBlob>::new_in(&scratch_dir)?;
+        let file_pointers_writer = RecordWriter::<FilePointer>::new_in(&scratch_dir)?;
+        let symbol_records_writer = RecordWriter::<SymbolRecord>::new_in(&scratch_dir)?;
+        let reference_records_writer = RecordWriter::<ReferenceRecord>::new_in(&scratch_dir)?;
+        let chunk_mappings_writer = RecordWriter::<ChunkMapping>::new_in(&scratch_dir)?;
 
         let config = self.config.clone();
 
-        work_items
-            .par_iter()
-            .for_each(|entry| match process_file(&config, entry) {
-                Ok(file_artifacts) => {
-                    let FileArtifacts {
-                        content_blob,
-                        file_pointer,
-                        symbol_records: file_symbols,
-                        reference_records: file_references,
-                        chunk_mappings: file_chunk_mappings,
-                        chunk_writes,
-                    } = file_artifacts;
+        rx.into_iter()
+            .par_bridge()
+            .for_each({
+                let chunk_store = chunk_store.clone();
+                let seen_hashes = seen_hashes.clone();
+                let content_blobs_writer = content_blobs_writer.clone();
+                let file_pointers_writer = file_pointers_writer.clone();
+                let symbol_records_writer = symbol_records_writer.clone();
+                let reference_records_writer = reference_records_writer.clone();
+                let chunk_mappings_writer = chunk_mappings_writer.clone();
+                let config = config.clone();
 
-                    let content_hash = file_pointer.content_hash.clone();
+                move |entry| match process_file(&config, &entry) {
+                    Ok(file_artifacts) => {
+                        let FileArtifacts {
+                            content_blob,
+                            file_pointer,
+                            symbol_records: file_symbols,
+                            reference_records: file_references,
+                            chunk_mappings: file_chunk_mappings,
+                            chunk_writes,
+                        } = file_artifacts;
 
-                    file_pointers
-                        .lock()
-                        .expect("file pointers mutex poisoned")
-                        .push(file_pointer);
+                        let content_hash = file_pointer.content_hash.clone();
 
-                    symbol_records
-                        .lock()
-                        .expect("symbol records mutex poisoned")
-                        .extend(file_symbols);
+                        if let Err(err) = file_pointers_writer.append(&file_pointer) {
+                            warn!(error = %err, "failed to record file pointer");
+                        }
 
-                    reference_records
-                        .lock()
-                        .expect("reference records mutex poisoned")
-                        .extend(file_references);
+                        let is_new_content = {
+                            let mut seen =
+                                seen_hashes.lock().expect("seen hashes mutex poisoned");
+                            seen.insert(content_hash.clone())
+                        };
 
-                    let is_new_content = {
-                        let mut seen = seen_hashes.lock().expect("seen hashes mutex poisoned");
-                        seen.insert(content_hash.clone())
-                    };
+                        if is_new_content {
+                            if let Err(err) = content_blobs_writer.append(&content_blob) {
+                                warn!(error = %err, %content_hash, "failed to record content blob");
+                            }
 
-                    if is_new_content {
-                        content_blobs
-                            .lock()
-                            .expect("content blobs mutex poisoned")
-                            .push(content_blob);
+                            for mapping in &file_chunk_mappings {
+                                if let Err(err) = chunk_mappings_writer.append(mapping) {
+                                    warn!(
+                                        error = %err,
+                                        %content_hash,
+                                        "failed to record chunk mapping"
+                                    );
+                                }
+                            }
 
-                        chunk_mappings
-                            .lock()
-                            .expect("chunk mappings mutex poisoned")
-                            .extend(file_chunk_mappings);
+                            for symbol in &file_symbols {
+                                if let Err(err) = symbol_records_writer.append(symbol) {
+                                    warn!(
+                                        error = %err,
+                                        %content_hash,
+                                        "failed to record symbol"
+                                    );
+                                }
+                            }
 
-                        let mut store = chunk_store.lock().expect("chunk store mutex poisoned");
-                        for chunk in chunk_writes {
-                            if let Err(err) = store.insert(chunk.hash, chunk.text_content) {
-                                warn!(%content_hash, error = %err, "failed to insert chunk");
+                            for reference in &file_references {
+                                if let Err(err) = reference_records_writer.append(reference) {
+                                    warn!(
+                                        error = %err,
+                                        %content_hash,
+                                        "failed to record reference"
+                                    );
+                                }
+                            }
+
+                            let mut store =
+                                chunk_store.lock().expect("chunk store mutex poisoned");
+                            for chunk in chunk_writes {
+                                if let Err(err) = store.insert(chunk.hash, chunk.text_content) {
+                                    warn!(%content_hash, error = %err, "failed to insert chunk");
+                                }
                             }
                         }
                     }
-                }
-                Err(err) => {
-                    warn!(error = %err, "failed to process file");
+                    Err(err) => {
+                        warn!(error = %err, "failed to process file");
+                    }
                 }
             });
+
+        walker_thread
+            .join()
+            .expect("file walker thread panicked");
 
         let chunk_store = Arc::try_unwrap(chunk_store)
             .expect("chunk store still has outstanding references")
             .into_inner()
             .expect("chunk store mutex poisoned");
-        let content_blobs = Arc::try_unwrap(content_blobs)
-            .expect("content blobs still have outstanding references")
-            .into_inner()
-            .expect("content blobs mutex poisoned");
-        let file_pointers = Arc::try_unwrap(file_pointers)
-            .expect("file pointers still have outstanding references")
-            .into_inner()
-            .expect("file pointers mutex poisoned");
-        let symbol_records = Arc::try_unwrap(symbol_records)
-            .expect("symbol records still have outstanding references")
-            .into_inner()
-            .expect("symbol records mutex poisoned");
-        let reference_records = Arc::try_unwrap(reference_records)
-            .expect("reference records still have outstanding references")
-            .into_inner()
-            .expect("reference records mutex poisoned");
-        let chunk_mappings = Arc::try_unwrap(chunk_mappings)
-            .expect("chunk mappings still have outstanding references")
-            .into_inner()
-            .expect("chunk mappings mutex poisoned");
+        let content_blobs = content_blobs_writer.into_store()?;
+        let file_pointers = file_pointers_writer.into_store()?;
+        let symbol_records = symbol_records_writer.into_store()?;
+        let reference_records = reference_records_writer.into_store()?;
+        let chunk_mappings = chunk_mappings_writer.into_store()?;
 
-        let mut report = IndexReport::default();
-        report.content_blobs = content_blobs;
-        report.file_pointers = file_pointers;
-        report.symbol_records = symbol_records;
-        report.reference_records = reference_records;
-
+        let mut branches = Vec::new();
         if let Some(branch) = &self.config.branch {
-            report.branches.push(BranchHead {
+            branches.push(BranchHead {
                 repository: self.config.repository.clone(),
                 branch: branch.clone(),
                 commit_sha: self.config.commit.clone(),
             });
         }
 
-        Ok(IndexArtifacts::new(report, chunk_store, chunk_mappings))
+        Ok(IndexArtifacts::new(
+            content_blobs,
+            symbol_records,
+            file_pointers,
+            reference_records,
+            chunk_mappings,
+            chunk_store,
+            branches,
+            scratch_dir,
+        ))
     }
 
     pub fn config(&self) -> &IndexerConfig {

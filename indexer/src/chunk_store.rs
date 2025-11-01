@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::Path;
 
 use anyhow::{Context, Result};
-use tempfile::NamedTempFile;
+use tempfile::{Builder, NamedTempFile};
 
 #[derive(Debug)]
 struct StoredChunk {
@@ -18,8 +19,11 @@ pub struct ChunkStore {
 }
 
 impl ChunkStore {
-    pub fn new() -> Result<Self> {
-        let file = NamedTempFile::new().context("failed to create temporary chunk store")?;
+    pub fn new_in(dir: &Path) -> Result<Self> {
+        let file = Builder::new()
+            .prefix("pointer-chunks")
+            .tempfile_in(dir)
+            .context("failed to create temporary chunk store")?;
         Ok(Self {
             file,
             index: HashMap::new(),

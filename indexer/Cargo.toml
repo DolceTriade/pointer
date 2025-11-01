@@ -37,6 +37,7 @@ rayon = "1.10"
 tree-sitter-lua = "0.2.0"
 tree-sitter-php = "0.24.2"
 tree-sitter-glsl = "0.2.0"
+crossbeam-channel = "0.5"
 
 [dev-dependencies]
 pretty_assertions = "1"

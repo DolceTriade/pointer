@@ -1,5 +1,7 @@
 use std::collections::HashSet;
+use std::fs;
 use std::io::{Seek, SeekFrom, Write};
+use std::path::PathBuf;
 use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
@@ -15,14 +17,15 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use clap::Parser;
 use futures::TryStreamExt;
 use pointer_indexer::models::{
-    BranchHead, ChunkMapping, ContentBlob, FilePointer, IndexReport, ReferenceRecord, SymbolRecord,
-    UniqueChunk,
+    BranchHead, ChunkMapping, ContentBlob, FilePointer, ReferenceRecord, SymbolRecord, UniqueChunk,
 };
-use serde::{Deserialize, Serialize};
+use serde::{de::IgnoredAny, Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Postgres, QueryBuilder, Transaction};
-use tempfile::tempfile;
+use tempfile::Builder;
 use thiserror::Error;
+use tokio::fs::File as TokioFile;
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, BufReader as TokioBufReader};
 use tokio::net::TcpListener;
 use tokio::signal;
 use tracing::info;
@@ -36,11 +39,14 @@ struct ServerConfig {
     bind: String,
     #[arg(long, env = "MAX_CONNECTIONS", default_value_t = 10)]
     max_connections: u32,
+    #[arg(long, env = "SCRATCH_DIR", default_value = ".pointer-backend-scratch")]
+    scratch_dir: PathBuf,
 }
 
 #[derive(Clone)]
 struct AppState {
     pool: PgPool,
+    scratch_dir: PathBuf,
 }
 
 #[derive(Debug, Error)]
@@ -143,6 +149,21 @@ struct UploadChunkRow {
     data: Vec<u8>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(tag = "section", content = "payload")]
+enum ManifestEnvelope {
+    #[serde(rename = "content_blob")]
+    ContentBlob(IgnoredAny),
+    #[serde(rename = "symbol_record")]
+    SymbolRecord(SymbolRecord),
+    #[serde(rename = "file_pointer")]
+    FilePointer(FilePointer),
+    #[serde(rename = "reference_record")]
+    ReferenceRecord(ReferenceRecord),
+    #[serde(rename = "branch_head")]
+    BranchHead(BranchHead),
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
@@ -157,6 +178,13 @@ async fn main() -> Result<()> {
         .parse()
         .with_context(|| format!("invalid bind address: {}", config.bind))?;
 
+    fs::create_dir_all(&config.scratch_dir).with_context(|| {
+        format!(
+            "failed to create scratch directory {}",
+            config.scratch_dir.display()
+        )
+    })?;
+
     let pool = PgPoolOptions::new()
         .max_connections(config.max_connections)
         .connect(&config.database_url)
@@ -168,7 +196,10 @@ async fn main() -> Result<()> {
         .await
         .context("database migration failed")?;
 
-    let state = AppState { pool };
+    let state = AppState {
+        pool,
+        scratch_dir: config.scratch_dir.clone(),
+    };
 
     let app = Router::new()
         // New ingestion routes
@@ -388,7 +419,10 @@ async fn manifest_finalize(
     .bind(&payload.upload_id)
     .fetch(&state.pool);
 
-    let mut temp_file = tempfile().map_err(ApiErrorKind::Compression)?;
+    let mut temp_file = Builder::new()
+        .prefix("pointer-backend-upload")
+        .tempfile_in(&state.scratch_dir)
+        .map_err(ApiErrorKind::Compression)?;
     let mut expected_total: Option<i32> = None;
     let mut seen_chunks: i32 = 0;
 
@@ -444,14 +478,28 @@ async fn manifest_finalize(
         .seek(SeekFrom::Start(0))
         .map_err(ApiErrorKind::Compression)?;
 
-    let report: IndexReport = if compressed {
+    let mut plain_file = Builder::new()
+        .prefix("pointer-backend-manifest")
+        .tempfile_in(&state.scratch_dir)
+        .map_err(ApiErrorKind::Compression)?;
+    if compressed {
         let mut decoder = Decoder::new(temp_file).map_err(ApiErrorKind::Compression)?;
-        serde_json::from_reader(&mut decoder).map_err(ApiErrorKind::Serde)?
+        std::io::copy(&mut decoder, &mut plain_file).map_err(ApiErrorKind::Compression)?;
     } else {
-        serde_json::from_reader(temp_file).map_err(ApiErrorKind::Serde)?
-    };
+        let mut source = temp_file;
+        std::io::copy(&mut source, &mut plain_file).map_err(ApiErrorKind::Compression)?;
+    }
 
-    ingest_report(&state.pool, report).await?;
+    plain_file
+        .seek(SeekFrom::Start(0))
+        .map_err(ApiErrorKind::Compression)?;
+
+    let std_file = plain_file
+        .as_file()
+        .try_clone()
+        .map_err(ApiErrorKind::Compression)?;
+    let reader = TokioBufReader::new(TokioFile::from_std(std_file));
+    ingest_manifest_stream(&state.pool, reader).await?;
 
     sqlx::query("DELETE FROM upload_chunks WHERE upload_id = $1")
         .bind(&payload.upload_id)
@@ -462,13 +510,72 @@ async fn manifest_finalize(
     Ok(StatusCode::CREATED)
 }
 
-async fn ingest_report(pool: &PgPool, report: IndexReport) -> Result<(), ApiErrorKind> {
+async fn ingest_manifest_stream<R>(pool: &PgPool, reader: R) -> Result<(), ApiErrorKind>
+where
+    R: AsyncBufRead + Unpin,
+{
     let mut tx = pool.begin().await.map_err(ApiErrorKind::from)?;
 
-    insert_file_pointers(&mut tx, &report.file_pointers).await?;
-    insert_symbol_records(&mut tx, &report.symbol_records).await?;
-    insert_reference_records(&mut tx, &report.reference_records).await?;
-    upsert_branch_heads(&mut tx, &report.branches).await?;
+    let mut lines = reader.lines();
+    let mut file_buffer: Vec<FilePointer> = Vec::with_capacity(INSERT_BATCH_SIZE);
+    let mut symbol_buffer: Vec<SymbolRecord> = Vec::with_capacity(INSERT_BATCH_SIZE);
+    let mut reference_buffer: Vec<ReferenceRecord> = Vec::with_capacity(INSERT_BATCH_SIZE);
+    let mut branches: Vec<BranchHead> = Vec::new();
+
+    while let Some(line) = lines
+        .next_line()
+        .await
+        .map_err(ApiErrorKind::Compression)?
+    {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let envelope: ManifestEnvelope =
+            serde_json::from_str(trimmed).map_err(ApiErrorKind::Serde)?;
+
+        match envelope {
+            ManifestEnvelope::ContentBlob(_) => {}
+            ManifestEnvelope::FilePointer(pointer) => {
+                file_buffer.push(pointer);
+                if file_buffer.len() >= INSERT_BATCH_SIZE {
+                    insert_file_pointers(&mut tx, &file_buffer).await?;
+                    file_buffer.clear();
+                }
+            }
+            ManifestEnvelope::SymbolRecord(symbol) => {
+                symbol_buffer.push(symbol);
+                if symbol_buffer.len() >= INSERT_BATCH_SIZE {
+                    insert_symbol_records(&mut tx, &symbol_buffer).await?;
+                    symbol_buffer.clear();
+                }
+            }
+            ManifestEnvelope::ReferenceRecord(reference) => {
+                reference_buffer.push(reference);
+                if reference_buffer.len() >= INSERT_BATCH_SIZE {
+                    insert_reference_records(&mut tx, &reference_buffer).await?;
+                    reference_buffer.clear();
+                }
+            }
+            ManifestEnvelope::BranchHead(branch) => {
+                branches.push(branch);
+            }
+        }
+    }
+
+    if !file_buffer.is_empty() {
+        insert_file_pointers(&mut tx, &file_buffer).await?;
+    }
+    if !symbol_buffer.is_empty() {
+        insert_symbol_records(&mut tx, &symbol_buffer).await?;
+    }
+    if !reference_buffer.is_empty() {
+        insert_reference_records(&mut tx, &reference_buffer).await?;
+    }
+    if !branches.is_empty() {
+        upsert_branch_heads(&mut tx, &branches).await?;
+    }
 
     tx.commit().await.map_err(ApiErrorKind::from)?;
 

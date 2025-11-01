@@ -234,12 +234,7 @@ fn run_index(args: IndexArgs) -> Result<()> {
         upload::upload_index(url, args.upload_api_key.as_deref(), &artifacts)?;
     }
 
-    info!(
-        repo = repository,
-        output = ?output_dir,
-        files = artifacts.report.file_pointers.len(),
-        "indexing complete"
-    );
+    info!(repo = repository, output = ?output_dir, files = artifacts.file_pointer_count(), "indexing complete");
 
     Ok(())
 }

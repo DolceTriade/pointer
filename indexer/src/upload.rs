@@ -8,12 +8,12 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use reqwest::blocking::{Client, Response};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
-use tempfile::tempfile;
+use tempfile::tempfile_in;
 use tracing::info;
 use uuid::Uuid;
 use zstd::stream::Encoder;
 
-use crate::models::{ChunkMapping, IndexArtifacts, IndexReport, UniqueChunk};
+use crate::models::{ChunkMapping, IndexArtifacts, UniqueChunk};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 const MANIFEST_CHUNK_SIZE: usize = 8 * 1024 * 1024; // 8 MiB
@@ -27,12 +27,7 @@ pub fn upload_index(url: &str, api_key: Option<&str>, artifacts: &IndexArtifacts
     let endpoints = Endpoints::new(url);
 
     // 1. Upload all content blob metadata
-    upload_content_blobs(
-        &client,
-        &endpoints,
-        api_key,
-        &artifacts.report.content_blobs,
-    )?;
+    upload_content_blobs(&client, &endpoints, api_key, artifacts)?;
 
     // 2. Check which unique chunks the server needs
     let chunk_hashes = artifacts.chunk_hashes().to_vec();
@@ -52,11 +47,11 @@ pub fn upload_index(url: &str, api_key: Option<&str>, artifacts: &IndexArtifacts
     }
 
     // 4. Upload the mappings for how chunks belong to files
-    upload_chunk_mappings(&client, &endpoints, api_key, &artifacts.chunk_mappings)?;
+    upload_chunk_mappings(&client, &endpoints, api_key, artifacts)?;
 
     // 5. Upload the final index manifest
     info!("uploading index report");
-    upload_manifest(&client, &endpoints, api_key, &artifacts.report)?;
+    upload_manifest(&client, &endpoints, api_key, artifacts)?;
     info!("index manifest uploaded");
 
     Ok(())
@@ -89,15 +84,26 @@ fn upload_content_blobs(
     client: &Client,
     endpoints: &Endpoints,
     api_key: Option<&str>,
-    blobs: &[crate::models::ContentBlob],
+    artifacts: &IndexArtifacts,
 ) -> Result<()> {
-    if blobs.is_empty() {
+    if artifacts.content_blob_count() == 0 {
         return Ok(());
     }
-    info!(count = blobs.len(), "uploading content blob metadata");
-    for batch in blobs.chunks(1000) {
+
+    info!(
+        count = artifacts.content_blob_count(),
+        "uploading content blob metadata"
+    );
+
+    let mut stream = artifacts.content_blobs_stream()?;
+    loop {
+        let batch = stream.next_batch(1000)?;
+        if batch.is_empty() {
+            break;
+        }
+
         let payload = ContentBlobUploadRequest {
-            blobs: batch.to_vec(),
+            blobs: batch,
         };
         post_json(client, &endpoints.blobs_upload, api_key, &payload)?;
     }
@@ -173,15 +179,26 @@ fn upload_chunk_mappings(
     client: &Client,
     endpoints: &Endpoints,
     api_key: Option<&str>,
-    mappings: &[ChunkMapping],
+    artifacts: &IndexArtifacts,
 ) -> Result<()> {
-    if mappings.is_empty() {
+    if artifacts.chunk_mapping_count() == 0 {
         return Ok(());
     }
-    info!(count = mappings.len(), "uploading chunk mappings");
-    for batch in mappings.chunks(1000) {
+
+    info!(
+        count = artifacts.chunk_mapping_count(),
+        "uploading chunk mappings"
+    );
+
+    let mut stream = artifacts.chunk_mappings_stream()?;
+    loop {
+        let batch = stream.next_batch(1000)?;
+        if batch.is_empty() {
+            break;
+        }
+
         let payload = ChunkMappingUploadRequest {
-            mappings: batch.to_vec(),
+            mappings: batch,
         };
         post_json(client, &endpoints.mappings_upload, api_key, &payload)?;
     }
@@ -193,13 +210,16 @@ fn upload_manifest(
     client: &Client,
     endpoints: &Endpoints,
     api_key: Option<&str>,
-    report: &IndexReport,
+    artifacts: &IndexArtifacts,
 ) -> Result<()> {
     let upload_id = Uuid::new_v4().to_string();
 
-    let temp_file = tempfile().context("failed to create temporary file for manifest")?;
+    let temp_file = tempfile_in(artifacts.scratch_dir())
+        .context("failed to create temporary file for manifest")?;
     let mut encoder = Encoder::new(temp_file, 0)?;
-    serde_json::to_writer(&mut encoder, report).context("failed to serialize index report")?;
+    artifacts
+        .write_manifest_ndjson(&mut encoder)
+        .context("failed to serialize index report")?;
     let mut file = encoder
         .finish()
         .context("failed to finalize manifest compression")?;
