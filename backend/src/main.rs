@@ -975,8 +975,6 @@ struct RetentionPolicyResponse {
     message: String,
 }
 
-
-
 // Function to identify commits to keep based on retention policy
 async fn apply_retention_policy_handler(
     State(state): State<AppState>,
@@ -1018,8 +1016,6 @@ async fn apply_retention_policy(
             commits_to_keep.insert(commit_sha);
         }
     }
-
-
 
     // Keep recent commits based on max_commits_to_keep
     if let Some(max_commits) = config.max_commits_to_keep {

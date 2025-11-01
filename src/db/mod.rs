@@ -158,6 +158,13 @@ pub trait Database: Clone + Send + Sync + 'static {
         repository: &str,
         query: RepoTreeQuery,
     ) -> Result<TreeResponse, DbError>;
+    async fn search_repo_paths(
+        &self,
+        repository: &str,
+        commit_sha: &str,
+        query: &str,
+        limit: i64,
+    ) -> Result<Vec<TreeEntry>, DbError>;
     async fn get_file_content(
         &self,
         repository: &str,

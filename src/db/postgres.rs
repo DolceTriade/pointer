@@ -350,6 +350,111 @@ impl Database for PostgresDb {
         })
     }
 
+    async fn search_repo_paths(
+        &self,
+        repository: &str,
+        commit_sha: &str,
+        query: &str,
+        limit: i64,
+    ) -> Result<Vec<TreeEntry>, DbError> {
+        if commit_sha.is_empty() {
+            return Err(DbError::Internal("missing commit parameter".to_string()));
+        }
+
+        let trimmed = query.trim();
+        if trimmed.is_empty() || limit <= 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut escaped = String::with_capacity(trimmed.len());
+        for ch in trimmed.chars() {
+            match ch {
+                '%' | '_' | '\\' => {
+                    escaped.push('\\');
+                    escaped.push(ch);
+                }
+                _ => escaped.push(ch),
+            }
+        }
+        let pattern = format!("%{escaped}%");
+        let fetch_limit = (limit.saturating_mul(5)).clamp(1, 200);
+
+        let rows: Vec<String> = sqlx::query_scalar(
+            "SELECT file_path
+             FROM files
+             WHERE repository = $1
+             AND commit_sha = $2
+             AND file_path ILIKE $3 ESCAPE '\\'
+             ORDER BY file_path
+             LIMIT $4",
+        )
+        .bind(repository)
+        .bind(commit_sha)
+        .bind(&pattern)
+        .bind(fetch_limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DbError::Database(e.to_string()))?;
+
+        if rows.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let query_lower = trimmed.to_ascii_lowercase();
+        let mut dir_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut file_paths: Vec<String> = Vec::new();
+        let mut seen_files: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        for path in rows {
+            let lower = path.to_ascii_lowercase();
+            if lower.contains(&query_lower) && seen_files.insert(path.clone()) {
+                file_paths.push(path.clone());
+            }
+
+            let mut segments: Vec<&str> = path.split('/').collect();
+            if segments.len() > 1 {
+                segments.pop();
+                while !segments.is_empty() {
+                    let dir = segments.join("/");
+                    if dir.to_ascii_lowercase().contains(&query_lower) {
+                        dir_set.insert(dir.clone());
+                    }
+                    segments.pop();
+                }
+            }
+        }
+
+        let mut directories: Vec<String> = dir_set.into_iter().collect();
+        directories.sort();
+
+        let mut entries = Vec::new();
+        for dir in directories {
+            let name = dir.rsplit('/').next().unwrap_or(&dir).to_string();
+            entries.push(TreeEntry {
+                name,
+                path: dir,
+                kind: "dir".to_string(),
+            });
+            if entries.len() as i64 >= limit {
+                return Ok(entries);
+            }
+        }
+
+        for path in file_paths {
+            let name = path.rsplit('/').next().unwrap_or(&path).to_string();
+            entries.push(TreeEntry {
+                name,
+                path,
+                kind: "file".to_string(),
+            });
+            if entries.len() as i64 >= limit {
+                break;
+            }
+        }
+
+        Ok(entries)
+    }
+
     async fn get_file_content(
         &self,
         repository: &str,
