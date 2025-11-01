@@ -1,10 +1,12 @@
 use std::collections::HashSet;
 use std::fs;
-use std::io::{Seek, SeekFrom, Write};
+use std::future::Future;
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::mem;
 use std::path::PathBuf;
 use std::net::SocketAddr;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, State},
@@ -15,13 +17,13 @@ use axum::{
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use clap::Parser;
-use futures::TryStreamExt;
+use futures::{stream::FuturesUnordered, StreamExt, TryStreamExt};
 use pointer_indexer::models::{
     BranchHead, ChunkMapping, ContentBlob, FilePointer, ReferenceRecord, SymbolRecord, UniqueChunk,
 };
 use serde::{de::IgnoredAny, Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
-use sqlx::{PgPool, Postgres, QueryBuilder, Transaction};
+use sqlx::{PgPool, QueryBuilder};
 use tempfile::Builder;
 use thiserror::Error;
 use tokio::fs::File as TokioFile;
@@ -142,6 +144,14 @@ struct ManifestFinalizePayload {
     compressed: Option<bool>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ManifestShardPayload {
+    section: String,
+    shard_index: Option<u64>,
+    data: String,
+    compressed: Option<bool>,
+}
+
 #[derive(sqlx::FromRow)]
 struct UploadChunkRow {
     chunk_index: i32,
@@ -211,6 +221,8 @@ async fn main() -> Result<()> {
         .route("/api/v1/index/chunks/need", post(chunks_need))
         .route("/api/v1/index/chunks/upload", post(chunks_upload))
         .route("/api/v1/index/mappings/upload", post(mappings_upload))
+        .route("/api/v1/manifest/shard", post(manifest_shard))
+        .route("/api/v1/index/manifest/shard", post(manifest_shard))
         // Manifest upload routes
         .route("/api/v1/manifest/chunk", post(manifest_chunk))
         .route("/api/v1/manifest/finalize", post(manifest_finalize))
@@ -405,6 +417,38 @@ async fn manifest_chunk(
     Ok(StatusCode::ACCEPTED)
 }
 
+async fn manifest_shard(
+    State(state): State<AppState>,
+    Json(payload): Json<ManifestShardPayload>,
+) -> ApiResult<StatusCode> {
+    let compressed = payload.compressed.unwrap_or(true);
+    let bytes = BASE64
+        .decode(payload.data.as_bytes())
+        .map_err(|err| AppError::new(StatusCode::BAD_REQUEST, format!("invalid base64 data: {err}")))?;
+
+    let data = if compressed {
+        let mut decoder =
+            Decoder::new(bytes.as_slice()).map_err(ApiErrorKind::Compression)?;
+        let mut out = Vec::new();
+        decoder
+            .read_to_end(&mut out)
+            .map_err(ApiErrorKind::Compression)?;
+        out
+    } else {
+        bytes
+    };
+
+    process_manifest_section(
+        &state.pool,
+        &payload.section,
+        payload.shard_index,
+        &data,
+    )
+    .await?;
+
+    Ok(StatusCode::ACCEPTED)
+}
+
 async fn manifest_finalize(
     State(state): State<AppState>,
     Json(payload): Json<ManifestFinalizePayload>,
@@ -510,12 +554,64 @@ async fn manifest_finalize(
     Ok(StatusCode::CREATED)
 }
 
+async fn process_manifest_section(
+    pool: &PgPool,
+    section: &str,
+    shard_index: Option<u64>,
+    data: &[u8],
+) -> Result<(), ApiErrorKind> {
+    match section {
+        "file_pointer" => process_file_pointer_data(pool, data).await?,
+        "symbol_record" => process_symbol_data(pool, data).await?,
+        "reference_record" => process_reference_data(pool, data).await?,
+        "branch_head" => process_branch_data(pool, data).await?,
+        other => {
+            return Err(ApiErrorKind::Internal(anyhow!(
+                "unknown manifest shard section: {}",
+                other
+            )));
+        }
+    }
+
+    if let Some(idx) = shard_index {
+        info!(section = section, shard = idx, "manifest shard ingested");
+    }
+
+    Ok(())
+}
+
+async fn process_file_pointer_data(pool: &PgPool, data: &[u8]) -> Result<(), ApiErrorKind> {
+    let chunks = chunk_records(data, |line| {
+        serde_json::from_slice::<FilePointer>(line).map_err(ApiErrorKind::Serde)
+    })?;
+    ingest_chunks(pool, chunks, insert_file_pointers_batch).await
+}
+
+async fn process_symbol_data(pool: &PgPool, data: &[u8]) -> Result<(), ApiErrorKind> {
+    let chunks = chunk_records(data, |line| {
+        serde_json::from_slice::<SymbolRecord>(line).map_err(ApiErrorKind::Serde)
+    })?;
+    ingest_chunks(pool, chunks, insert_symbol_records_batch).await
+}
+
+async fn process_reference_data(pool: &PgPool, data: &[u8]) -> Result<(), ApiErrorKind> {
+    let chunks = chunk_records(data, |line| {
+        serde_json::from_slice::<ReferenceRecord>(line).map_err(ApiErrorKind::Serde)
+    })?;
+    ingest_chunks(pool, chunks, insert_reference_records_batch).await
+}
+
+async fn process_branch_data(pool: &PgPool, data: &[u8]) -> Result<(), ApiErrorKind> {
+    let batches = chunk_records(data, |line| {
+        serde_json::from_slice::<BranchHead>(line).map_err(ApiErrorKind::Serde)
+    })?;
+    ingest_chunks(pool, batches, upsert_branch_heads_batch).await
+}
+
 async fn ingest_manifest_stream<R>(pool: &PgPool, reader: R) -> Result<(), ApiErrorKind>
 where
     R: AsyncBufRead + Unpin,
 {
-    let mut tx = pool.begin().await.map_err(ApiErrorKind::from)?;
-
     let mut lines = reader.lines();
     let mut file_buffer: Vec<FilePointer> = Vec::with_capacity(INSERT_BATCH_SIZE);
     let mut symbol_buffer: Vec<SymbolRecord> = Vec::with_capacity(INSERT_BATCH_SIZE);
@@ -540,22 +636,22 @@ where
             ManifestEnvelope::FilePointer(pointer) => {
                 file_buffer.push(pointer);
                 if file_buffer.len() >= INSERT_BATCH_SIZE {
-                    insert_file_pointers(&mut tx, &file_buffer).await?;
-                    file_buffer.clear();
+                    let chunk = mem::take(&mut file_buffer);
+                    ingest_chunks(pool, vec![chunk], insert_file_pointers_batch).await?;
                 }
             }
             ManifestEnvelope::SymbolRecord(symbol) => {
                 symbol_buffer.push(symbol);
                 if symbol_buffer.len() >= INSERT_BATCH_SIZE {
-                    insert_symbol_records(&mut tx, &symbol_buffer).await?;
-                    symbol_buffer.clear();
+                    let chunk = mem::take(&mut symbol_buffer);
+                    ingest_chunks(pool, vec![chunk], insert_symbol_records_batch).await?;
                 }
             }
             ManifestEnvelope::ReferenceRecord(reference) => {
                 reference_buffer.push(reference);
                 if reference_buffer.len() >= INSERT_BATCH_SIZE {
-                    insert_reference_records(&mut tx, &reference_buffer).await?;
-                    reference_buffer.clear();
+                    let chunk = mem::take(&mut reference_buffer);
+                    ingest_chunks(pool, vec![chunk], insert_reference_records_batch).await?;
                 }
             }
             ManifestEnvelope::BranchHead(branch) => {
@@ -565,268 +661,224 @@ where
     }
 
     if !file_buffer.is_empty() {
-        insert_file_pointers(&mut tx, &file_buffer).await?;
+        ingest_chunks(pool, vec![file_buffer], insert_file_pointers_batch).await?;
     }
     if !symbol_buffer.is_empty() {
-        insert_symbol_records(&mut tx, &symbol_buffer).await?;
+        ingest_chunks(pool, vec![symbol_buffer], insert_symbol_records_batch).await?;
     }
     if !reference_buffer.is_empty() {
-        insert_reference_records(&mut tx, &reference_buffer).await?;
+        ingest_chunks(pool, vec![reference_buffer], insert_reference_records_batch).await?;
     }
     if !branches.is_empty() {
-        upsert_branch_heads(&mut tx, &branches).await?;
+        ingest_chunks(pool, chunk_vec(branches), upsert_branch_heads_batch).await?;
     }
-
-    tx.commit().await.map_err(ApiErrorKind::from)?;
 
     Ok(())
 }
 
 const INSERT_BATCH_SIZE: usize = 1000;
+const MAX_PARALLEL_INGEST: usize = 4;
 
-#[derive(Hash, PartialEq, Eq)]
-struct FilePointerKey<'a> {
-    repository: &'a str,
-    commit_sha: &'a str,
-    file_path: &'a str,
-}
+fn chunk_records<T, F>(data: &[u8], mut parse: F) -> Result<Vec<Vec<T>>, ApiErrorKind>
+where
+    T: Send,
+    F: FnMut(&[u8]) -> Result<T, ApiErrorKind>,
+{
+    let mut chunks = Vec::new();
+    let mut buffer = Vec::with_capacity(INSERT_BATCH_SIZE);
 
-fn dedup_file_pointers<'a>(files: &'a [FilePointer]) -> Vec<&'a FilePointer> {
-    let mut seen = HashSet::with_capacity(files.len());
-    let mut deduped = Vec::with_capacity(files.len());
+    for line in data.split(|&b| b == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
 
-    for file in files {
-        if seen.insert(FilePointerKey {
-            repository: &file.repository,
-            commit_sha: &file.commit_sha,
-            file_path: &file.file_path,
-        }) {
-            deduped.push(file);
+        let record = parse(line)?;
+        buffer.push(record);
+
+        if buffer.len() >= INSERT_BATCH_SIZE {
+            chunks.push(mem::take(&mut buffer));
+            buffer = Vec::with_capacity(INSERT_BATCH_SIZE);
         }
     }
 
-    deduped
+    if !buffer.is_empty() {
+        chunks.push(buffer);
+    }
+
+    Ok(chunks)
 }
 
-#[derive(Hash, PartialEq, Eq)]
-struct SymbolKey<'a> {
-    content_hash: &'a str,
-    name: &'a str,
-}
+fn chunk_vec<T>(records: Vec<T>) -> Vec<Vec<T>> {
+    if records.is_empty() {
+        return Vec::new();
+    }
 
-fn dedup_symbol_records<'a>(symbols: &'a [SymbolRecord]) -> Vec<&'a SymbolRecord> {
-    let mut seen = HashSet::with_capacity(symbols.len());
-    let mut deduped = Vec::with_capacity(symbols.len());
+    let mut chunks = Vec::new();
+    let mut current = Vec::with_capacity(INSERT_BATCH_SIZE);
 
-    for symbol in symbols {
-        if seen.insert(SymbolKey {
-            content_hash: &symbol.content_hash,
-            name: &symbol.name,
-        }) {
-            deduped.push(symbol);
+    for record in records {
+        current.push(record);
+        if current.len() >= INSERT_BATCH_SIZE {
+            chunks.push(mem::take(&mut current));
+            current = Vec::with_capacity(INSERT_BATCH_SIZE);
         }
     }
 
-    deduped
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+
+    chunks
 }
 
-#[derive(Hash, PartialEq, Eq)]
-struct ReferenceKey<'a> {
-    content_hash: &'a str,
-    namespace: Option<&'a str>,
-    name: &'a str,
-    kind: Option<&'a str>,
-    line: usize,
-    column: usize,
-}
+async fn ingest_chunks<T, Fut>(
+    pool: &PgPool,
+    chunks: Vec<Vec<T>>,
+    make_task: impl Fn(PgPool, Vec<T>) -> Fut + Send + Sync,
+) -> Result<(), ApiErrorKind>
+where
+    T: Send + 'static,
+    Fut: Future<Output = Result<(), ApiErrorKind>> + Send + 'static,
+{
+    let mut futures = FuturesUnordered::new();
 
-fn dedup_reference_records<'a>(references: &'a [ReferenceRecord]) -> Vec<&'a ReferenceRecord> {
-    let mut seen = HashSet::with_capacity(references.len());
-    let mut deduped = Vec::with_capacity(references.len());
+    for chunk in chunks.into_iter() {
+        let pool_clone = pool.clone();
+        futures.push(tokio::spawn(make_task(pool_clone, chunk)));
 
-    for reference in references {
-        if seen.insert(ReferenceKey {
-            content_hash: &reference.content_hash,
-            namespace: reference.namespace.as_deref(),
-            name: &reference.name,
-            kind: reference.kind.as_deref(),
-            line: reference.line,
-            column: reference.column,
-        }) {
-            deduped.push(reference);
+        if futures.len() >= MAX_PARALLEL_INGEST {
+            if let Some(res) = futures.next().await {
+                res.map_err(|err| ApiErrorKind::Internal(anyhow!(err)))??;
+            }
         }
     }
 
-    deduped
-}
-
-#[derive(Hash, PartialEq, Eq)]
-struct BranchKey<'a> {
-    repository: &'a str,
-    branch: &'a str,
-}
-
-fn dedup_branch_heads<'a>(branches: &'a [BranchHead]) -> Vec<&'a BranchHead> {
-    let mut seen = HashSet::with_capacity(branches.len());
-    let mut deduped = Vec::with_capacity(branches.len());
-
-    for branch in branches {
-        if seen.insert(BranchKey {
-            repository: &branch.repository,
-            branch: &branch.branch,
-        }) {
-            deduped.push(branch);
-        }
-    }
-
-    deduped
-}
-
-async fn insert_file_pointers(
-    tx: &mut Transaction<'_, Postgres>,
-    files: &[FilePointer],
-) -> Result<(), ApiErrorKind> {
-    if files.is_empty() {
-        return Ok(());
-    }
-
-    let deduped = dedup_file_pointers(files);
-
-    for chunk in deduped.chunks(INSERT_BATCH_SIZE) {
-        let mut qb = QueryBuilder::new(
-            "INSERT INTO files (repository, commit_sha, file_path, content_hash) ",
-        );
-        qb.push_values(chunk.iter().copied(), |mut b, file| {
-            b.push_bind(&file.repository)
-                .push_bind(&file.commit_sha)
-                .push_bind(&file.file_path)
-                .push_bind(&file.content_hash);
-        });
-        qb.push(
-            " ON CONFLICT (repository, commit_sha, file_path) DO UPDATE SET content_hash = EXCLUDED.content_hash",
-        );
-
-        qb.build()
-            .execute(tx.as_mut())
-            .await
-            .map_err(ApiErrorKind::from)?;
+    while let Some(res) = futures.next().await {
+        res.map_err(|err| ApiErrorKind::Internal(anyhow!(err)))??;
     }
 
     Ok(())
 }
 
-async fn insert_symbol_records(
-    tx: &mut Transaction<'_, Postgres>,
-    symbols: &[SymbolRecord],
-) -> Result<(), ApiErrorKind> {
-    if symbols.is_empty() {
+async fn insert_file_pointers_batch(pool: PgPool, chunk: Vec<FilePointer>) -> Result<(), ApiErrorKind> {
+    if chunk.is_empty() {
         return Ok(());
     }
 
-    let deduped = dedup_symbol_records(symbols);
+    let mut qb = QueryBuilder::new("INSERT INTO files (repository, commit_sha, file_path, content_hash) ");
+    qb.push_values(chunk.iter(), |mut b, file| {
+        b.push_bind(&file.repository)
+            .push_bind(&file.commit_sha)
+            .push_bind(&file.file_path)
+            .push_bind(&file.content_hash);
+    });
+    qb.push(
+        " ON CONFLICT (repository, commit_sha, file_path) DO UPDATE SET content_hash = EXCLUDED.content_hash",
+    );
 
-    for chunk in deduped.chunks(INSERT_BATCH_SIZE) {
-        let mut qb = QueryBuilder::new("INSERT INTO symbols (content_hash, name) ");
-        qb.push_values(chunk.iter().copied(), |mut b, symbol| {
-            b.push_bind(&symbol.content_hash).push_bind(&symbol.name);
-        });
-        qb.push(" ON CONFLICT (content_hash, name) DO NOTHING");
-
-        qb.build()
-            .execute(tx.as_mut())
-            .await
-            .map_err(ApiErrorKind::from)?;
-    }
+    qb.build()
+        .execute(&pool)
+        .await
+        .map_err(ApiErrorKind::from)?;
 
     Ok(())
 }
 
-async fn insert_reference_records(
-    tx: &mut Transaction<'_, Postgres>,
-    references: &[ReferenceRecord],
-) -> Result<(), ApiErrorKind> {
-    if references.is_empty() {
+async fn insert_symbol_records_batch(pool: PgPool, chunk: Vec<SymbolRecord>) -> Result<(), ApiErrorKind> {
+    if chunk.is_empty() {
         return Ok(());
     }
 
-    let deduped = dedup_reference_records(references);
+    let mut qb = QueryBuilder::new("INSERT INTO symbols (content_hash, name) ");
+    qb.push_values(chunk.iter(), |mut b, symbol| {
+        b.push_bind(&symbol.content_hash).push_bind(&symbol.name);
+    });
+    qb.push(" ON CONFLICT (content_hash, name) DO NOTHING");
 
-    for chunk in deduped.chunks(INSERT_BATCH_SIZE) {
-        let mut namespaces: HashSet<&str> = HashSet::new();
-        for reference in chunk.iter().copied() {
-            let namespace = reference
-                .namespace
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .unwrap_or("");
-            namespaces.insert(namespace);
-        }
-
-        if !namespaces.is_empty() {
-            let mut ns_qb = QueryBuilder::new("INSERT INTO symbol_namespaces (namespace) ");
-            ns_qb.push_values(namespaces.iter(), |mut b, namespace| {
-                b.push_bind(*namespace);
-            });
-            ns_qb.push(" ON CONFLICT (namespace) DO NOTHING");
-
-            ns_qb
-                .build()
-                .execute(tx.as_mut())
-                .await
-                .map_err(ApiErrorKind::from)?;
-        }
-
-        let mut qb = QueryBuilder::new(
-            "WITH data (content_hash, namespace, name, kind, line_number, column_number) AS (",
-        );
-        qb.push_values(chunk.iter().copied(), |mut b, reference| {
-            let line: i32 = reference.line.try_into().unwrap_or(i32::MAX);
-            let column: i32 = reference.column.try_into().unwrap_or(i32::MAX);
-            let namespace = reference
-                .namespace
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .unwrap_or("");
-            b.push_bind(&reference.content_hash)
-                .push_bind(namespace)
-                .push_bind(&reference.name)
-                .push_bind(&reference.kind)
-                .push_bind(line)
-                .push_bind(column);
-        });
-        qb.push(
-            ") INSERT INTO symbol_references (symbol_id, namespace_id, kind, line_number, column_number) \
-                 SELECT s.id, sn.id, data.kind, data.line_number, data.column_number \
-                 FROM data \
-                 JOIN symbols s \
-                   ON s.content_hash = data.content_hash \
-                  AND s.name = data.name \
-                 JOIN symbol_namespaces sn \
-                   ON sn.namespace = data.namespace \
-                 ON CONFLICT (symbol_id, namespace_id, line_number, column_number, kind) DO NOTHING",
-        );
-
-        qb.build()
-            .execute(tx.as_mut())
-            .await
-            .map_err(ApiErrorKind::from)?;
-    }
+    qb.build()
+        .execute(&pool)
+        .await
+        .map_err(ApiErrorKind::from)?;
 
     Ok(())
 }
 
-async fn upsert_branch_heads(
-    tx: &mut Transaction<'_, Postgres>,
-    branches: &[BranchHead],
+async fn insert_reference_records_batch(
+    pool: PgPool,
+    chunk: Vec<ReferenceRecord>,
 ) -> Result<(), ApiErrorKind> {
-    if branches.is_empty() {
+    if chunk.is_empty() {
         return Ok(());
     }
 
-    let deduped = dedup_branch_heads(branches);
+    let mut namespaces: HashSet<String> = HashSet::new();
+    for reference in &chunk {
+        if let Some(ns) = reference.namespace.as_ref().filter(|s| !s.is_empty()) {
+            namespaces.insert(ns.clone());
+        } else {
+            namespaces.insert(String::new());
+        }
+    }
+
+    if !namespaces.is_empty() {
+        let mut ns_qb = QueryBuilder::new("INSERT INTO symbol_namespaces (namespace) ");
+        ns_qb.push_values(namespaces.iter(), |mut b, namespace| {
+            b.push_bind(namespace);
+        });
+        ns_qb.push(" ON CONFLICT (namespace) DO NOTHING");
+
+        ns_qb
+            .build()
+            .execute(&pool)
+            .await
+            .map_err(ApiErrorKind::from)?;
+    }
+
+    let mut qb = QueryBuilder::new(
+        "WITH data (content_hash, namespace, name, kind, line_number, column_number) AS (",
+    );
+    qb.push_values(chunk.iter(), |mut b, reference| {
+        let line: i32 = reference.line.try_into().unwrap_or(i32::MAX);
+        let column: i32 = reference.column.try_into().unwrap_or(i32::MAX);
+        let namespace = reference
+            .namespace
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("");
+        b.push_bind(&reference.content_hash)
+            .push_bind(namespace)
+            .push_bind(&reference.name)
+            .push_bind(&reference.kind)
+            .push_bind(line)
+            .push_bind(column);
+    });
+    qb.push(
+        ") INSERT INTO symbol_references (symbol_id, namespace_id, kind, line_number, column_number) \
+             SELECT s.id, sn.id, data.kind, data.line_number, data.column_number \
+             FROM data \
+             JOIN symbols s \
+               ON s.content_hash = data.content_hash \
+              AND s.name = data.name \
+             JOIN symbol_namespaces sn \
+               ON sn.namespace = data.namespace \
+             ON CONFLICT (symbol_id, namespace_id, line_number, column_number, kind) DO NOTHING",
+    );
+
+    qb.build()
+        .execute(&pool)
+        .await
+        .map_err(ApiErrorKind::from)?;
+
+    Ok(())
+}
+
+async fn upsert_branch_heads_batch(pool: PgPool, chunk: Vec<BranchHead>) -> Result<(), ApiErrorKind> {
+    if chunk.is_empty() {
+        return Ok(());
+    }
 
     let mut qb = QueryBuilder::new("INSERT INTO branches (repository, branch, commit_sha) ");
-    qb.push_values(deduped.into_iter(), |mut b, branch| {
+    qb.push_values(chunk.iter(), |mut b, branch| {
         b.push_bind(&branch.repository)
             .push_bind(&branch.branch)
             .push_bind(&branch.commit_sha);
@@ -837,7 +889,7 @@ async fn upsert_branch_heads(
     );
 
     qb.build()
-        .execute(tx.as_mut())
+        .execute(&pool)
         .await
         .map_err(ApiErrorKind::from)?;
 

@@ -1,22 +1,22 @@
 use std::collections::HashSet;
-use std::io::{Read, Seek, SeekFrom};
+use std::fs::File;
+use std::io::{BufRead, BufReader, Write};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
 use reqwest::blocking::{Client, Response};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
-use tempfile::tempfile_in;
 use tracing::info;
-use uuid::Uuid;
 use zstd::stream::Encoder;
 
 use crate::models::{ChunkMapping, IndexArtifacts, UniqueChunk};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
-const MANIFEST_CHUNK_SIZE: usize = 8 * 1024 * 1024; // 8 MiB
+const MANIFEST_SHARD_RECORD_LIMIT: usize = 50_000;
+const MANIFEST_SHARD_BYTE_LIMIT: usize = 4 * 1024 * 1024;
 
 pub fn upload_index(url: &str, api_key: Option<&str>, artifacts: &IndexArtifacts) -> Result<()> {
     let client = Client::builder()
@@ -49,10 +49,10 @@ pub fn upload_index(url: &str, api_key: Option<&str>, artifacts: &IndexArtifacts
     // 4. Upload the mappings for how chunks belong to files
     upload_chunk_mappings(&client, &endpoints, api_key, artifacts)?;
 
-    // 5. Upload the final index manifest
-    info!("uploading index report");
-    upload_manifest(&client, &endpoints, api_key, artifacts)?;
-    info!("index manifest uploaded");
+    // 5. Upload manifest shards per section
+    info!("uploading manifest shards");
+    upload_manifest_shards(&client, &endpoints, api_key, artifacts)?;
+    info!("manifest shards uploaded");
 
     Ok(())
 }
@@ -62,8 +62,7 @@ struct Endpoints {
     chunks_need: String,
     chunks_upload: String,
     mappings_upload: String,
-    manifest_chunk: String,
-    manifest_finalize: String,
+    manifest_shard: String,
 }
 
 impl Endpoints {
@@ -74,8 +73,7 @@ impl Endpoints {
             chunks_need: format!("{}/chunks/need", trimmed),
             chunks_upload: format!("{}/chunks/upload", trimmed),
             mappings_upload: format!("{}/mappings/upload", trimmed),
-            manifest_chunk: format!("{}/manifest/chunk", trimmed),
-            manifest_finalize: format!("{}/manifest/finalize", trimmed),
+            manifest_shard: format!("{}/manifest/shard", trimmed),
         }
     }
 }
@@ -206,80 +204,156 @@ fn upload_chunk_mappings(
     Ok(())
 }
 
-fn upload_manifest(
+fn upload_manifest_shards(
     client: &Client,
     endpoints: &Endpoints,
     api_key: Option<&str>,
     artifacts: &IndexArtifacts,
 ) -> Result<()> {
-    let upload_id = Uuid::new_v4().to_string();
+    upload_record_store_shards(
+        client,
+        endpoints,
+        api_key,
+        artifacts.file_pointers_path(),
+        "file_pointer",
+    )?;
 
-    let temp_file = tempfile_in(artifacts.scratch_dir())
-        .context("failed to create temporary file for manifest")?;
-    let mut encoder = Encoder::new(temp_file, 0)?;
-    artifacts
-        .write_manifest_ndjson(&mut encoder)
-        .context("failed to serialize index report")?;
-    let mut file = encoder
-        .finish()
-        .context("failed to finalize manifest compression")?;
+    upload_record_store_shards(
+        client,
+        endpoints,
+        api_key,
+        artifacts.symbol_records_path(),
+        "symbol_record",
+    )?;
 
-    let total_len = file
-        .seek(SeekFrom::End(0))
-        .context("failed to measure compressed manifest")?;
-    let chunk_size = MANIFEST_CHUNK_SIZE as u64;
-    let mut total_chunks = ((total_len + chunk_size.saturating_sub(1)) / chunk_size) as u32;
-    if total_chunks == 0 {
-        total_chunks = 1;
+    upload_record_store_shards(
+        client,
+        endpoints,
+        api_key,
+        artifacts.reference_records_path(),
+        "reference_record",
+    )?;
+
+    upload_branch_heads(client, endpoints, api_key, &artifacts.branches)?;
+
+    Ok(())
+}
+
+fn upload_record_store_shards(
+    client: &Client,
+    endpoints: &Endpoints,
+    api_key: Option<&str>,
+    path: &std::path::Path,
+    section: &str,
+) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
     }
-    file.seek(SeekFrom::Start(0))
-        .context("failed to rewind compressed manifest")?;
 
-    if total_len == 0 {
-        let payload = ManifestChunkRequest {
-            upload_id: upload_id.clone(),
-            chunk_index: 0,
-            total_chunks,
-            data: String::new(),
-        };
+    let file = File::open(path)
+        .with_context(|| format!("failed to open record store {}", path.display()))?;
+    let mut reader = BufReader::new(file);
+    let mut shard_buffer = Vec::with_capacity(MANIFEST_SHARD_BYTE_LIMIT + 1024);
+    let mut line = String::new();
+    let mut record_count: usize = 0;
+    let mut shard_index: u64 = 0;
 
-        post_json(client, &endpoints.manifest_chunk, api_key, &payload)?;
-        info!(chunk = 1, total = total_chunks, "uploaded manifest chunk");
-    } else {
-        let mut buffer = vec![0u8; MANIFEST_CHUNK_SIZE];
-        let mut chunk_index: u32 = 0;
-
-        loop {
-            let read = file
-                .read(&mut buffer)
-                .context("failed to read compressed manifest chunk")?;
-            if read == 0 {
-                break;
+    loop {
+        line.clear();
+        let read = reader
+            .read_line(&mut line)
+            .context("failed to read record shard line")?;
+        if read == 0 {
+            if !shard_buffer.is_empty() {
+                send_manifest_shard(
+                    client,
+                    endpoints,
+                    api_key,
+                    section,
+                    shard_index,
+                    &shard_buffer,
+                )?;
+                shard_buffer.clear();
             }
+            break;
+        }
 
-            let payload = ManifestChunkRequest {
-                upload_id: upload_id.clone(),
-                chunk_index,
-                total_chunks,
-                data: BASE64.encode(&buffer[..read]),
-            };
+        if line.trim().is_empty() {
+            continue;
+        }
 
-            post_json(client, &endpoints.manifest_chunk, api_key, &payload)?;
-            info!(
-                chunk = (chunk_index + 1),
-                total = total_chunks,
-                "uploaded manifest chunk"
-            );
+        shard_buffer.extend_from_slice(line.as_bytes());
+        record_count += 1;
 
-            chunk_index += 1;
+        if record_count >= MANIFEST_SHARD_RECORD_LIMIT
+            || shard_buffer.len() >= MANIFEST_SHARD_BYTE_LIMIT
+        {
+            send_manifest_shard(
+                client,
+                endpoints,
+                api_key,
+                section,
+                shard_index,
+                &shard_buffer,
+            )?;
+            shard_buffer.clear();
+            record_count = 0;
+            shard_index += 1;
         }
     }
 
-    let finalize = ManifestFinalizeRequest {
-        upload_id,
+    Ok(())
+}
+
+fn upload_branch_heads(
+    client: &Client,
+    endpoints: &Endpoints,
+    api_key: Option<&str>,
+    branches: &[crate::models::BranchHead],
+) -> Result<()> {
+    if branches.is_empty() {
+        return Ok(());
+    }
+
+    let mut buffer = Vec::with_capacity(branches.len() * 256);
+    for branch in branches {
+        serde_json::to_writer(&mut buffer, branch)
+            .context("failed to serialize branch head")?;
+        buffer.push(b'\n');
+    }
+
+    send_manifest_shard(client, endpoints, api_key, "branch_head", 0, &buffer)
+}
+
+fn send_manifest_shard(
+    client: &Client,
+    endpoints: &Endpoints,
+    api_key: Option<&str>,
+    section: &str,
+    shard_index: u64,
+    data: &[u8],
+) -> Result<()> {
+    if data.is_empty() {
+        return Ok(());
+    }
+
+    let mut encoder = Encoder::new(Vec::new(), 0)?;
+    encoder
+        .write_all(data)
+        .context("failed to compress manifest shard")?;
+    let compressed = encoder
+        .finish()
+        .context("failed to finalize manifest shard compression")?;
+
+    let payload = ManifestShardRequest {
+        section: section.to_string(),
+        shard_index,
         compressed: true,
+        data: BASE64.encode(compressed),
     };
-    post_json(client, &endpoints.manifest_finalize, api_key, &finalize)?;
+
+    post_json(client, &endpoints.manifest_shard, api_key, &payload)?;
+    info!(section = section, shard = shard_index, "uploaded manifest shard");
     Ok(())
 }
 
@@ -336,15 +410,9 @@ struct ChunkMappingUploadRequest {
 }
 
 #[derive(Serialize)]
-struct ManifestChunkRequest {
-    upload_id: String,
-    chunk_index: u32,
-    total_chunks: u32,
-    data: String,
-}
-
-#[derive(Serialize)]
-struct ManifestFinalizeRequest {
-    upload_id: String,
+struct ManifestShardRequest {
+    section: String,
+    shard_index: u64,
     compressed: bool,
+    data: String,
 }
