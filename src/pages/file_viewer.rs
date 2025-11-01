@@ -1129,10 +1129,64 @@ fn FileContent(
                 if let Some(window) = web_sys::window() {
                     if let Some(document) = window.document() {
                         let element: web_sys::Element = code_el.unchecked_into();
+
+                        // 1. Save selection
+                        let selection = window.get_selection().unwrap_throw().unwrap_throw();
+                        if selection.range_count() == 0 {
+                            return;
+                        }
+                        let range = selection.get_range_at(0).unwrap_throw();
+
+                        let start_marker = document
+                            .create_element("span")
+                            .unwrap_throw()
+                            .dyn_into::<web_sys::HtmlElement>()
+                            .unwrap_throw();
+                        start_marker.set_id("selection-start-marker");
+
+                        let end_marker = document
+                            .create_element("span")
+                            .unwrap_throw()
+                            .dyn_into::<web_sys::HtmlElement>()
+                            .unwrap_throw();
+                        end_marker.set_id("selection-end-marker");
+
+                        let end_range = range.clone_range();
+                        end_range.collapse_with_to_start(false);
+                        web_sys::Range::insert_node(&end_range, &end_marker).unwrap_throw();
+                        let start_range = range.clone_range();
+                        start_range.collapse_with_to_start(true);
+                        web_sys::Range::insert_node(&start_range, &start_marker).unwrap_throw();
+
+                        // 2. Clear existing highlights
                         clear_symbol_highlights(&document, &element);
+
+                        // 3. Apply new highlights
                         if let Some(symbol) = current_symbol {
                             if !symbol.is_empty() {
                                 apply_symbol_highlights(&document, &element, &symbol);
+                            }
+                        }
+
+                        // 4. Restore selection
+                        let start_node = document.get_element_by_id("selection-start-marker");
+                        let end_node = document.get_element_by_id("selection-end-marker");
+
+                        if let (Some(start_node), Some(end_node)) = (start_node, end_node) {
+                            if let Ok(new_range) = document.create_range() {
+                                let _ = new_range.set_start_after(&start_node);
+                                let _ = new_range.set_end_before(&end_node);
+
+                                let _ = selection.remove_all_ranges();
+                                let _ = selection.add_range(&new_range);
+
+                                // 5. Clean up markers
+                                if let Some(parent) = start_node.parent_node() {
+                                    let _ = parent.remove_child(&start_node);
+                                }
+                                if let Some(parent) = end_node.parent_node() {
+                                    let _ = parent.remove_child(&end_node);
+                                }
                             }
                         }
                     }
