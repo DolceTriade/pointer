@@ -34,8 +34,8 @@ where
     F: FnMut(&mut dyn Write) -> Result<()>,
 {
     let path = path.as_ref();
-    let file = File::create(path)
-        .with_context(|| format!("failed to create {}", path.display()))?;
+    let file =
+        File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
     let mut writer = BufWriter::new(file);
 
     writer

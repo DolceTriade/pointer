@@ -1,9 +1,9 @@
+use std::collections::HashSet;
 use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::collections::HashSet;
 
 use anyhow::{Context, Result};
 use crossbeam_channel::bounded;
@@ -42,10 +42,7 @@ impl Indexer {
             .ignore(true)
             .build_parallel();
 
-        let scratch_dir = self
-            .config
-            .output_dir
-            .join(".pointer-scratch");
+        let scratch_dir = self.config.output_dir.join(".pointer-scratch");
         fs::create_dir_all(&scratch_dir).with_context(|| {
             format!(
                 "failed to create scratch directory {}",
@@ -118,8 +115,7 @@ impl Indexer {
         let content_blobs_writer = RecordWriter::<ContentBlob>::new_in(&scratch_dir)?;
         let file_pointers_writer = RecordWriter::<FilePointer>::new_in(&scratch_dir)?;
         let symbol_records_writer = RecordWriter::<SymbolRecord>::new_in(&scratch_dir)?;
-        let symbol_namespaces_writer =
-            RecordWriter::<SymbolNamespaceRecord>::new_in(&scratch_dir)?;
+        let symbol_namespaces_writer = RecordWriter::<SymbolNamespaceRecord>::new_in(&scratch_dir)?;
         let reference_records_writer = RecordWriter::<ReferenceRecord>::new_in(&scratch_dir)?;
         let chunk_mappings_writer = RecordWriter::<ChunkMapping>::new_in(&scratch_dir)?;
         let seen_namespaces = Arc::new(Mutex::new(HashSet::new()));
@@ -228,9 +224,7 @@ impl Indexer {
                 }
             });
 
-        walker_thread
-            .join()
-            .expect("file walker thread panicked");
+        walker_thread.join().expect("file walker thread panicked");
 
         let chunk_store = Arc::try_unwrap(chunk_store)
             .expect("chunk store still has outstanding references")

@@ -3,10 +3,10 @@ use std::fs;
 use std::future::Future;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::mem;
-use std::path::PathBuf;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, State},
@@ -17,14 +17,14 @@ use axum::{
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use clap::Parser;
-use futures::{stream::FuturesUnordered, StreamExt, TryStreamExt};
+use futures::{StreamExt, TryStreamExt, stream::FuturesUnordered};
 use pointer_indexer::models::{
     BranchHead, ChunkMapping, ContentBlob, FilePointer, ReferenceRecord, SymbolNamespaceRecord,
     SymbolRecord, UniqueChunk,
 };
-use serde::{de::IgnoredAny, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::IgnoredAny};
 use sqlx::postgres::PgPoolOptions;
-use sqlx::{PgPool, QueryBuilder};
+use sqlx::{Acquire, PgPool, Postgres, QueryBuilder, Transaction};
 use tempfile::Builder;
 use thiserror::Error;
 use tokio::fs::File as TokioFile;
@@ -425,13 +425,15 @@ async fn manifest_shard(
     Json(payload): Json<ManifestShardPayload>,
 ) -> ApiResult<StatusCode> {
     let compressed = payload.compressed.unwrap_or(true);
-    let bytes = BASE64
-        .decode(payload.data.as_bytes())
-        .map_err(|err| AppError::new(StatusCode::BAD_REQUEST, format!("invalid base64 data: {err}")))?;
+    let bytes = BASE64.decode(payload.data.as_bytes()).map_err(|err| {
+        AppError::new(
+            StatusCode::BAD_REQUEST,
+            format!("invalid base64 data: {err}"),
+        )
+    })?;
 
     let data = if compressed {
-        let mut decoder =
-            Decoder::new(bytes.as_slice()).map_err(ApiErrorKind::Compression)?;
+        let mut decoder = Decoder::new(bytes.as_slice()).map_err(ApiErrorKind::Compression)?;
         let mut out = Vec::new();
         decoder
             .read_to_end(&mut out)
@@ -441,13 +443,7 @@ async fn manifest_shard(
         bytes
     };
 
-    process_manifest_section(
-        &state.pool,
-        &payload.section,
-        payload.shard_index,
-        &data,
-    )
-    .await?;
+    process_manifest_section(&state.pool, &payload.section, payload.shard_index, &data).await?;
 
     Ok(StatusCode::ACCEPTED)
 }
@@ -588,14 +584,26 @@ async fn process_file_pointer_data(pool: &PgPool, data: &[u8]) -> Result<(), Api
     let chunks = chunk_records(data, |line| {
         serde_json::from_slice::<FilePointer>(line).map_err(ApiErrorKind::Serde)
     })?;
-    ingest_chunks(pool, chunks, insert_file_pointers_batch, MAX_PARALLEL_INGEST).await
+    ingest_chunks(
+        pool,
+        chunks,
+        insert_file_pointers_batch,
+        MAX_PARALLEL_INGEST,
+    )
+    .await
 }
 
 async fn process_symbol_data(pool: &PgPool, data: &[u8]) -> Result<(), ApiErrorKind> {
     let chunks = chunk_records(data, |line| {
         serde_json::from_slice::<SymbolRecord>(line).map_err(ApiErrorKind::Serde)
     })?;
-    ingest_chunks(pool, chunks, insert_symbol_records_batch, MAX_PARALLEL_INGEST).await
+    ingest_chunks(
+        pool,
+        chunks,
+        insert_symbol_records_batch,
+        MAX_PARALLEL_INGEST,
+    )
+    .await
 }
 
 async fn process_symbol_namespace_data(pool: &PgPool, data: &[u8]) -> Result<(), ApiErrorKind> {
@@ -632,7 +640,13 @@ async fn process_branch_data(pool: &PgPool, data: &[u8]) -> Result<(), ApiErrorK
     let batches = chunk_records(data, |line| {
         serde_json::from_slice::<BranchHead>(line).map_err(ApiErrorKind::Serde)
     })?;
-    ingest_chunks(pool, batches, upsert_branch_heads_batch, MAX_PARALLEL_INGEST).await
+    ingest_chunks(
+        pool,
+        batches,
+        upsert_branch_heads_batch,
+        MAX_PARALLEL_INGEST,
+    )
+    .await
 }
 
 async fn ingest_manifest_stream<R>(pool: &PgPool, reader: R) -> Result<(), ApiErrorKind>
@@ -646,11 +660,7 @@ where
     let mut reference_buffer: Vec<ReferenceRecord> = Vec::with_capacity(INSERT_BATCH_SIZE);
     let mut branches: Vec<BranchHead> = Vec::new();
 
-    while let Some(line) = lines
-        .next_line()
-        .await
-        .map_err(ApiErrorKind::Compression)?
-    {
+    while let Some(line) = lines.next_line().await.map_err(ApiErrorKind::Compression)? {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -860,12 +870,16 @@ where
     Ok(())
 }
 
-async fn insert_file_pointers_batch(pool: PgPool, chunk: Vec<FilePointer>) -> Result<(), ApiErrorKind> {
+async fn insert_file_pointers_batch(
+    pool: PgPool,
+    chunk: Vec<FilePointer>,
+) -> Result<(), ApiErrorKind> {
     if chunk.is_empty() {
         return Ok(());
     }
 
-    let mut qb = QueryBuilder::new("INSERT INTO files (repository, commit_sha, file_path, content_hash) ");
+    let mut qb =
+        QueryBuilder::new("INSERT INTO files (repository, commit_sha, file_path, content_hash) ");
     qb.push_values(chunk.iter(), |mut b, file| {
         b.push_bind(&file.repository)
             .push_bind(&file.commit_sha)
@@ -884,7 +898,10 @@ async fn insert_file_pointers_batch(pool: PgPool, chunk: Vec<FilePointer>) -> Re
     Ok(())
 }
 
-async fn insert_symbol_records_batch(pool: PgPool, chunk: Vec<SymbolRecord>) -> Result<(), ApiErrorKind> {
+async fn insert_symbol_records_batch(
+    pool: PgPool,
+    chunk: Vec<SymbolRecord>,
+) -> Result<(), ApiErrorKind> {
     if chunk.is_empty() {
         return Ok(());
     }
@@ -903,7 +920,10 @@ async fn insert_symbol_records_batch(pool: PgPool, chunk: Vec<SymbolRecord>) -> 
     Ok(())
 }
 
-async fn insert_symbol_namespaces_batch(pool: PgPool, chunk: Vec<String>) -> Result<(), ApiErrorKind> {
+async fn insert_symbol_namespaces_batch(
+    pool: PgPool,
+    chunk: Vec<String>,
+) -> Result<(), ApiErrorKind> {
     if chunk.is_empty() {
         return Ok(());
     }
@@ -941,12 +961,12 @@ async fn insert_reference_records_batch(
         return Ok(());
     }
 
-    let mut conn = pool.acquire().await.map_err(ApiErrorKind::from)?;
-
-    sqlx::query("DROP TABLE IF EXISTS staging_symbol_references")
-        .execute(&mut *conn)
+    let mut conn = pool
+        .acquire()
         .await
-        .map_err(ApiErrorKind::from)?;
+        .map_err(|err| ApiErrorKind::from(err))?;
+    let mut tx: Transaction<'_, Postgres> =
+        conn.begin().await.map_err(|err| ApiErrorKind::from(err))?;
 
     sqlx::query(
         "CREATE TEMP TABLE staging_symbol_references (
@@ -956,11 +976,11 @@ async fn insert_reference_records_batch(
             kind TEXT,
             line_number INT,
             column_number INT
-        ) ON COMMIT DELETE ROWS",
+        ) ON COMMIT DROP",
     )
-    .execute(&mut *conn)
+    .execute(&mut *tx)
     .await
-    .map_err(ApiErrorKind::from)?;
+    .map_err(|err| ApiErrorKind::from(err))?;
 
     let mut staging_qb = QueryBuilder::new(
         "INSERT INTO staging_symbol_references (content_hash, namespace, name, kind, line_number, column_number) ",
@@ -968,10 +988,7 @@ async fn insert_reference_records_batch(
     staging_qb.push_values(chunk.iter(), |mut b, reference| {
         let line: i32 = reference.line.try_into().unwrap_or(i32::MAX);
         let column: i32 = reference.column.try_into().unwrap_or(i32::MAX);
-        let namespace = reference
-            .namespace
-            .as_deref()
-            .unwrap_or("");
+        let namespace = reference.namespace.as_deref().unwrap_or("");
         b.push_bind(&reference.content_hash)
             .push_bind(namespace)
             .push_bind(&reference.name)
@@ -981,9 +998,9 @@ async fn insert_reference_records_batch(
     });
     staging_qb
         .build()
-        .execute(&mut *conn)
+        .execute(&mut *tx)
         .await
-        .map_err(ApiErrorKind::from)?;
+        .map_err(|err| ApiErrorKind::from(err))?;
 
     sqlx::query(
         "INSERT INTO symbol_references (symbol_id, namespace_id, kind, line_number, column_number)
@@ -1000,15 +1017,19 @@ async fn insert_reference_records_batch(
            ON sn.namespace = data.namespace
          ON CONFLICT (symbol_id, namespace_id, line_number, column_number, kind) DO NOTHING",
     )
-    .execute(&mut *conn)
+    .execute(&mut *tx)
     .await
-    .inspect(|v|tracing::info!("INSERTED {v:#?} rows"))
-    .map_err(ApiErrorKind::from)?;
+    .map_err(|err| ApiErrorKind::from(err))?;
+
+    tx.commit().await.map_err(|err| ApiErrorKind::from(err))?;
 
     Ok(())
 }
 
-async fn upsert_branch_heads_batch(pool: PgPool, chunk: Vec<BranchHead>) -> Result<(), ApiErrorKind> {
+async fn upsert_branch_heads_batch(
+    pool: PgPool,
+    chunk: Vec<BranchHead>,
+) -> Result<(), ApiErrorKind> {
     if chunk.is_empty() {
         return Ok(());
     }

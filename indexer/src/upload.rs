@@ -4,13 +4,10 @@ use std::io::{BufRead, BufReader, Write};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
-use base64::engine::general_purpose::STANDARD as BASE64;
+use anyhow::{Context, Result, anyhow};
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use crossbeam_channel::bounded;
-use rayon::iter::ParallelBridge;
-use rayon::prelude::*;
-use rayon::ThreadPoolBuilder;
 use reqwest::blocking::{Client, Response};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
@@ -105,13 +102,21 @@ fn upload_content_blobs(
         "uploading content blob metadata"
     );
 
-    let api_key_owned = api_key.map(|s| s.to_string());
-    let api_key = api_key_owned.as_deref();
+    let api_key_owned = Arc::new(api_key.map(|s| s.to_string()));
     let endpoints = Arc::clone(endpoints);
+    let client = Arc::new(client.clone());
 
     let mut stream = artifacts.content_blobs_stream()?;
     let (tx, rx) =
         bounded::<Vec<crate::models::ContentBlob>>(UPLOAD_PARALLELISM.saturating_mul(2).max(1));
+
+    let worker_func = Arc::new(move |batch: Vec<crate::models::ContentBlob>| -> Result<()> {
+        let payload = ContentBlobUploadRequest { blobs: batch };
+        let api = api_key_owned.as_ref().as_ref().map(|s| s.as_str());
+        post_json(client.as_ref(), &endpoints.blobs_upload, api, &payload)?;
+        Ok(())
+    });
+    let workers = spawn_workers(rx, worker_func);
 
     loop {
         let batch = stream.next_batch(1000)?;
@@ -124,11 +129,7 @@ fn upload_content_blobs(
     }
     drop(tx);
 
-    parallel_consume(rx.into_iter(), move |batch| {
-        let payload = ContentBlobUploadRequest { blobs: batch };
-        post_json(client, &endpoints.blobs_upload, api_key, &payload)?;
-        Ok(())
-    })?;
+    workers.wait()?;
 
     info!("content blob metadata uploaded");
     Ok(())
@@ -178,12 +179,20 @@ fn upload_unique_chunks(
         count = needed_chunks.len(),
         "uploading unique chunk content"
     );
-    let api_key_owned = api_key.map(|s| s.to_string());
-    let api_key = api_key_owned.as_deref();
+    let api_key_owned = Arc::new(api_key.map(|s| s.to_string()));
     let endpoints = Arc::clone(endpoints);
+    let client = Arc::new(client.clone());
 
     let (tx, rx) =
         bounded::<Vec<UniqueChunk>>(UPLOAD_PARALLELISM.saturating_mul(2).max(1));
+
+    let worker_func = Arc::new(move |chunks: Vec<UniqueChunk>| -> Result<()> {
+        let payload = UniqueChunkUploadRequest { chunks };
+        let api = api_key_owned.as_ref().as_ref().map(|s| s.as_str());
+        post_json(client.as_ref(), &endpoints.chunks_upload, api, &payload)?;
+        Ok(())
+    });
+    let workers = spawn_workers(rx, worker_func);
     for batch in needed_chunks.chunks(100) {
         let mut chunks = Vec::with_capacity(batch.len());
         for hash in batch {
@@ -201,11 +210,7 @@ fn upload_unique_chunks(
     }
     drop(tx);
 
-    parallel_consume(rx.into_iter(), move |chunks| {
-        let payload = UniqueChunkUploadRequest { chunks };
-        post_json(client, &endpoints.chunks_upload, api_key, &payload)?;
-        Ok(())
-    })?;
+    workers.wait()?;
     info!("unique chunk content uploaded");
 
     Ok(())
@@ -226,13 +231,21 @@ fn upload_chunk_mappings(
         "uploading chunk mappings"
     );
 
-    let api_key_owned = api_key.map(|s| s.to_string());
-    let api_key = api_key_owned.as_deref();
+    let api_key_owned = Arc::new(api_key.map(|s| s.to_string()));
     let endpoints = Arc::clone(endpoints);
+    let client = Arc::new(client.clone());
 
     let mut stream = artifacts.chunk_mappings_stream()?;
     let (tx, rx) =
         bounded::<Vec<ChunkMapping>>(UPLOAD_PARALLELISM.saturating_mul(2).max(1));
+
+    let worker_func = Arc::new(move |mappings: Vec<ChunkMapping>| -> Result<()> {
+        let payload = ChunkMappingUploadRequest { mappings };
+        let api = api_key_owned.as_ref().as_ref().map(|s| s.as_str());
+        post_json(client.as_ref(), &endpoints.mappings_upload, api, &payload)?;
+        Ok(())
+    });
+    let workers = spawn_workers(rx, worker_func);
     loop {
         let batch = stream.next_batch(1000)?;
         if batch.is_empty() {
@@ -244,11 +257,7 @@ fn upload_chunk_mappings(
     }
     drop(tx);
 
-    parallel_consume(rx.into_iter(), move |mappings| {
-        let payload = ChunkMappingUploadRequest { mappings };
-        post_json(client, &endpoints.mappings_upload, api_key, &payload)?;
-        Ok(())
-    })?;
+    workers.wait()?;
     info!("chunk mappings uploaded");
     Ok(())
 }
@@ -316,12 +325,26 @@ fn upload_record_store_shards(
     let file = File::open(path)
         .with_context(|| format!("failed to open record store {}", path.display()))?;
     let mut reader = BufReader::new(file);
-    let api_key_owned = api_key.map(|s| s.to_string());
-    let api_key = api_key_owned.as_deref();
+    let api_key_owned = Arc::new(api_key.map(|s| s.to_string()));
     let endpoints = Arc::clone(endpoints);
+    let client = Arc::new(client.clone());
+    let section_owned = Arc::new(section.to_string());
 
-    let (tx, rx) =
-        bounded::<ManifestShard>(UPLOAD_PARALLELISM.saturating_mul(2).max(1));
+    let (tx, rx) = bounded::<ManifestShard>(UPLOAD_PARALLELISM.saturating_mul(2).max(1));
+    let worker_func = Arc::new(move |shard: ManifestShard| -> Result<()> {
+        let api = api_key_owned.as_ref().as_ref().map(|s| s.as_str());
+        send_manifest_shard(
+            client.as_ref(),
+            Arc::clone(&endpoints),
+            api,
+            section_owned.as_str(),
+            shard.index,
+            &shard.data,
+        )?;
+        Ok(())
+    });
+    let workers = spawn_workers(rx, worker_func);
+
     let mut line = String::new();
     let mut shard_index: u64 = 0;
     let mut eof = false;
@@ -330,8 +353,7 @@ fn upload_record_store_shards(
         let mut shard_data = Vec::with_capacity(MANIFEST_SHARD_BYTE_LIMIT + 1024);
         let mut records: usize = 0;
 
-        while records < MANIFEST_SHARD_RECORD_LIMIT
-            && shard_data.len() < MANIFEST_SHARD_BYTE_LIMIT
+        while records < MANIFEST_SHARD_RECORD_LIMIT && shard_data.len() < MANIFEST_SHARD_BYTE_LIMIT
         {
             line.clear();
             let read = reader
@@ -362,17 +384,7 @@ fn upload_record_store_shards(
 
     drop(tx);
 
-    parallel_consume(rx.into_iter(), move |shard| {
-        send_manifest_shard(
-            client,
-            Arc::clone(&endpoints),
-            api_key,
-            section,
-            shard.index,
-            &shard.data,
-        )?;
-        Ok(())
-    })?;
+    workers.wait()?;
 
     Ok(())
 }
@@ -389,12 +401,18 @@ fn upload_branch_heads(
 
     let mut buffer = Vec::with_capacity(branches.len() * 256);
     for branch in branches {
-        serde_json::to_writer(&mut buffer, branch)
-            .context("failed to serialize branch head")?;
+        serde_json::to_writer(&mut buffer, branch).context("failed to serialize branch head")?;
         buffer.push(b'\n');
     }
 
-    send_manifest_shard(client, Arc::clone(endpoints), api_key, "branch_head", 0, &buffer)
+    send_manifest_shard(
+        client,
+        Arc::clone(endpoints),
+        api_key,
+        "branch_head",
+        0,
+        &buffer,
+    )
 }
 
 fn send_manifest_shard(
@@ -425,7 +443,11 @@ fn send_manifest_shard(
     };
 
     post_json(client, &endpoints.manifest_shard, api_key, &payload)?;
-    info!(section = section, shard = shard_index, "uploaded manifest shard");
+    info!(
+        section = section,
+        shard = shard_index,
+        "uploaded manifest shard"
+    );
     Ok(())
 }
 
@@ -456,24 +478,59 @@ fn post_json<T: Serialize>(
     Ok(response)
 }
 
-fn parallel_consume<T, F>(rx: crossbeam_channel::IntoIter<T>, func: F) -> Result<()>
-where
-    T: Send,
-    F: Fn(T) -> Result<()> + Sync,
-{
-    if UPLOAD_PARALLELISM <= 1 {
-        for item in rx {
-            func(item)?;
+struct WorkerGroup {
+    handles: Vec<std::thread::JoinHandle<Result<()>>>,
+}
+
+impl WorkerGroup {
+    fn wait(self) -> Result<()> {
+        let mut first_err: Option<anyhow::Error> = None;
+        for handle in self.handles {
+            match handle.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    if first_err.is_none() {
+                        first_err = Some(err);
+                    }
+                }
+                Err(panic) => {
+                    if first_err.is_none() {
+                        first_err = Some(anyhow!("upload worker panicked: {:?}", panic));
+                    }
+                }
+            }
         }
-        return Ok(());
+
+        if let Some(err) = first_err {
+            Err(err)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn spawn_workers<T, F>(receiver: crossbeam_channel::Receiver<T>, func: Arc<F>) -> WorkerGroup
+where
+    T: Send + 'static,
+    F: Fn(T) -> Result<()> + Send + Sync + 'static,
+{
+    let worker_count = UPLOAD_PARALLELISM.max(1);
+    let mut handles = Vec::with_capacity(worker_count);
+
+    for _ in 0..worker_count {
+        let rx = receiver.clone();
+        let func = Arc::clone(&func);
+        handles.push(std::thread::spawn(move || -> Result<()> {
+            while let Ok(item) = rx.recv() {
+                func(item)?;
+            }
+            Ok(())
+        }));
     }
 
-    let pool = ThreadPoolBuilder::new()
-        .num_threads(UPLOAD_PARALLELISM)
-        .build()
-        .context("failed to build upload worker pool")?;
+    drop(receiver);
 
-    pool.install(|| rx.par_bridge().try_for_each(|item| func(item)))
+    WorkerGroup { handles }
 }
 
 #[derive(Serialize)]

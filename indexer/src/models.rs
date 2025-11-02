@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tempfile::{Builder, NamedTempFile, TempPath};
@@ -160,7 +160,10 @@ where
 
     fn finish(self) -> Result<RecordStore<T>> {
         let count = self.count.load(Ordering::Relaxed);
-        let mut state = self.state.into_inner().expect("record writer mutex poisoned");
+        let mut state = self
+            .state
+            .into_inner()
+            .expect("record writer mutex poisoned");
         state.flush()?;
         let path = state.file.into_temp_path();
         Ok(RecordStore {
@@ -198,7 +201,9 @@ where
     pub fn into_store(self) -> Result<RecordStore<T>> {
         match Arc::try_unwrap(self.inner) {
             Ok(inner) => inner.finish(),
-            Err(_) => Err(anyhow!("attempted to finish record writer with outstanding references")),
+            Err(_) => Err(anyhow!(
+                "attempted to finish record writer with outstanding references"
+            )),
         }
     }
 }
@@ -476,26 +481,20 @@ impl IndexArtifacts {
             Ok(())
         }
 
-        self.content_blobs.for_each_raw_line(|line| {
-            write_line(&mut writer, "content_blob", line)
-        })?;
-        self.file_pointers.for_each_raw_line(|line| {
-            write_line(&mut writer, "file_pointer", line)
-        })?;
-        self.symbol_records.for_each_raw_line(|line| {
-            write_line(&mut writer, "symbol_record", line)
-        })?;
-        self.symbol_namespaces.for_each_raw_line(|line| {
-            write_line(&mut writer, "symbol_namespace", line)
-        })?;
-        self.reference_records.for_each_raw_line(|line| {
-            write_line(&mut writer, "reference_record", line)
-        })?;
+        self.content_blobs
+            .for_each_raw_line(|line| write_line(&mut writer, "content_blob", line))?;
+        self.file_pointers
+            .for_each_raw_line(|line| write_line(&mut writer, "file_pointer", line))?;
+        self.symbol_records
+            .for_each_raw_line(|line| write_line(&mut writer, "symbol_record", line))?;
+        self.symbol_namespaces
+            .for_each_raw_line(|line| write_line(&mut writer, "symbol_namespace", line))?;
+        self.reference_records
+            .for_each_raw_line(|line| write_line(&mut writer, "reference_record", line))?;
 
         for branch in &self.branches {
             let mut buf = Vec::new();
-            serde_json::to_writer(&mut buf, branch)
-                .context("failed to serialize branch head")?;
+            serde_json::to_writer(&mut buf, branch).context("failed to serialize branch head")?;
             let payload =
                 String::from_utf8(buf).context("serialized branch head was not valid UTF-8")?;
             write_line(&mut writer, "branch_head", &payload)?;

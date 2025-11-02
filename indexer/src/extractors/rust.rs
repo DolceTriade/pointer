@@ -238,13 +238,7 @@ fn collect_references(root: &Node, source: &[u8], references: &mut Vec<Extracted
                 }
             }
             "identifier" | "type_identifier" | "field_identifier" | "metavariable" => {
-                record_reference_node(
-                    &node,
-                    source,
-                    references,
-                    &namespace_stack,
-                    &defined_nodes,
-                );
+                record_reference_node(&node, source, references, &namespace_stack, &defined_nodes);
             }
             "macro_invocation" => {
                 if let Some(macro_name) = node.child_by_field_name("macro") {
