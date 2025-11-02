@@ -42,6 +42,11 @@ pub struct ReferenceRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SymbolNamespaceRecord {
+    pub namespace: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FilePointer {
     pub repository: String,
     pub commit_sha: String,
@@ -325,6 +330,7 @@ where
 pub struct IndexArtifacts {
     content_blobs: RecordStore<ContentBlob>,
     symbol_records: RecordStore<SymbolRecord>,
+    symbol_namespaces: RecordStore<SymbolNamespaceRecord>,
     file_pointers: RecordStore<FilePointer>,
     reference_records: RecordStore<ReferenceRecord>,
     chunk_mappings: RecordStore<ChunkMapping>,
@@ -338,6 +344,7 @@ impl IndexArtifacts {
     pub(crate) fn new(
         content_blobs: RecordStore<ContentBlob>,
         symbol_records: RecordStore<SymbolRecord>,
+        symbol_namespaces: RecordStore<SymbolNamespaceRecord>,
         file_pointers: RecordStore<FilePointer>,
         reference_records: RecordStore<ReferenceRecord>,
         chunk_mappings: RecordStore<ChunkMapping>,
@@ -348,6 +355,7 @@ impl IndexArtifacts {
         Self {
             content_blobs,
             symbol_records,
+            symbol_namespaces,
             file_pointers,
             reference_records,
             chunk_mappings,
@@ -380,6 +388,10 @@ impl IndexArtifacts {
         self.symbol_records.stream()
     }
 
+    pub fn symbol_namespace_stream(&self) -> Result<RecordStream<SymbolNamespaceRecord>> {
+        self.symbol_namespaces.stream()
+    }
+
     pub fn file_pointers_stream(&self) -> Result<RecordStream<FilePointer>> {
         self.file_pointers.stream()
     }
@@ -394,6 +406,10 @@ impl IndexArtifacts {
 
     pub fn symbol_record_count(&self) -> usize {
         self.symbol_records.count()
+    }
+
+    pub fn symbol_namespace_count(&self) -> usize {
+        self.symbol_namespaces.count()
     }
 
     pub fn file_pointer_count(&self) -> usize {
@@ -418,6 +434,10 @@ impl IndexArtifacts {
 
     pub fn symbol_records_path(&self) -> &Path {
         self.symbol_records.path()
+    }
+
+    pub fn symbol_namespaces_path(&self) -> &Path {
+        self.symbol_namespaces.path()
     }
 
     pub fn file_pointers_path(&self) -> &Path {
@@ -459,11 +479,14 @@ impl IndexArtifacts {
         self.content_blobs.for_each_raw_line(|line| {
             write_line(&mut writer, "content_blob", line)
         })?;
+        self.file_pointers.for_each_raw_line(|line| {
+            write_line(&mut writer, "file_pointer", line)
+        })?;
         self.symbol_records.for_each_raw_line(|line| {
             write_line(&mut writer, "symbol_record", line)
         })?;
-        self.file_pointers.for_each_raw_line(|line| {
-            write_line(&mut writer, "file_pointer", line)
+        self.symbol_namespaces.for_each_raw_line(|line| {
+            write_line(&mut writer, "symbol_namespace", line)
         })?;
         self.reference_records.for_each_raw_line(|line| {
             write_line(&mut writer, "reference_record", line)
@@ -491,6 +514,12 @@ impl IndexArtifacts {
         self.symbol_records
             .write_json_array(&mut writer)
             .context("failed to write symbol records")
+    }
+
+    pub fn write_symbol_namespaces_array<W: Write>(&self, mut writer: W) -> Result<()> {
+        self.symbol_namespaces
+            .write_json_array(&mut writer)
+            .context("failed to write symbol namespaces")
     }
 
     pub fn write_file_pointers_array<W: Write>(&self, mut writer: W) -> Result<()> {

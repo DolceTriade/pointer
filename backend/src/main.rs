@@ -19,7 +19,8 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use clap::Parser;
 use futures::{stream::FuturesUnordered, StreamExt, TryStreamExt};
 use pointer_indexer::models::{
-    BranchHead, ChunkMapping, ContentBlob, FilePointer, ReferenceRecord, SymbolRecord, UniqueChunk,
+    BranchHead, ChunkMapping, ContentBlob, FilePointer, ReferenceRecord, SymbolNamespaceRecord,
+    SymbolRecord, UniqueChunk,
 };
 use serde::{de::IgnoredAny, Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
@@ -164,6 +165,8 @@ struct UploadChunkRow {
 enum ManifestEnvelope {
     #[serde(rename = "content_blob")]
     ContentBlob(IgnoredAny),
+    #[serde(rename = "symbol_namespace")]
+    SymbolNamespace(SymbolNamespaceRecord),
     #[serde(rename = "symbol_record")]
     SymbolRecord(SymbolRecord),
     #[serde(rename = "file_pointer")]
@@ -562,6 +565,7 @@ async fn process_manifest_section(
 ) -> Result<(), ApiErrorKind> {
     match section {
         "file_pointer" => process_file_pointer_data(pool, data).await?,
+        "symbol_namespace" => process_symbol_namespace_data(pool, data).await?,
         "symbol_record" => process_symbol_data(pool, data).await?,
         "reference_record" => process_reference_data(pool, data).await?,
         "branch_head" => process_branch_data(pool, data).await?,
@@ -594,46 +598,27 @@ async fn process_symbol_data(pool: &PgPool, data: &[u8]) -> Result<(), ApiErrorK
     ingest_chunks(pool, chunks, insert_symbol_records_batch, MAX_PARALLEL_INGEST).await
 }
 
+async fn process_symbol_namespace_data(pool: &PgPool, data: &[u8]) -> Result<(), ApiErrorKind> {
+    let raw_chunks = chunk_records(data, |line| {
+        serde_json::from_slice::<SymbolNamespaceRecord>(line).map_err(ApiErrorKind::Serde)
+    })?;
+    let string_chunks: Vec<Vec<String>> = raw_chunks
+        .into_iter()
+        .map(|chunk| chunk.into_iter().map(|record| record.namespace).collect())
+        .collect();
+    ingest_chunks(
+        pool,
+        string_chunks,
+        insert_symbol_namespaces_batch,
+        MAX_PARALLEL_INGEST,
+    )
+    .await
+}
+
 async fn process_reference_data(pool: &PgPool, data: &[u8]) -> Result<(), ApiErrorKind> {
-    let mut namespaces: HashSet<String> = HashSet::new();
-    let mut chunks: Vec<Vec<ReferenceRecord>> = Vec::new();
-    let mut current: Vec<ReferenceRecord> = Vec::with_capacity(INSERT_BATCH_SIZE);
-
-    for line in data.split(|&b| b == b'\n') {
-        if line.is_empty() {
-            continue;
-        }
-
-        let record: ReferenceRecord = serde_json::from_slice(line).map_err(ApiErrorKind::Serde)?;
-        if let Some(ns) = record.namespace.as_ref().filter(|s| !s.is_empty()) {
-            namespaces.insert(ns.clone());
-        } else {
-            namespaces.insert(String::new());
-        }
-
-        current.push(record);
-        if current.len() >= INSERT_BATCH_SIZE {
-            chunks.push(mem::take(&mut current));
-            current = Vec::with_capacity(INSERT_BATCH_SIZE);
-        }
-    }
-
-    if !current.is_empty() {
-        chunks.push(current);
-    }
-
-    if !namespaces.is_empty() {
-        let namespace_vec = namespaces.into_iter().collect::<Vec<_>>();
-        let namespace_chunks = chunk_vec(namespace_vec);
-        ingest_chunks(
-            pool,
-            namespace_chunks,
-            insert_symbol_namespaces_batch,
-            MAX_PARALLEL_INGEST,
-        )
-        .await?;
-    }
-
+    let chunks = chunk_records(data, |line| {
+        serde_json::from_slice::<ReferenceRecord>(line).map_err(ApiErrorKind::Serde)
+    })?;
     ingest_chunks(
         pool,
         chunks,
@@ -657,6 +642,7 @@ where
     let mut lines = reader.lines();
     let mut file_buffer: Vec<FilePointer> = Vec::with_capacity(INSERT_BATCH_SIZE);
     let mut symbol_buffer: Vec<SymbolRecord> = Vec::with_capacity(INSERT_BATCH_SIZE);
+    let mut namespace_buffer: Vec<SymbolNamespaceRecord> = Vec::with_capacity(INSERT_BATCH_SIZE);
     let mut reference_buffer: Vec<ReferenceRecord> = Vec::with_capacity(INSERT_BATCH_SIZE);
     let mut branches: Vec<BranchHead> = Vec::new();
 
@@ -675,6 +661,22 @@ where
 
         match envelope {
             ManifestEnvelope::ContentBlob(_) => {}
+            ManifestEnvelope::SymbolNamespace(namespace) => {
+                namespace_buffer.push(namespace);
+                if namespace_buffer.len() >= INSERT_BATCH_SIZE {
+                    let chunk = mem::take(&mut namespace_buffer)
+                        .into_iter()
+                        .map(|record| record.namespace)
+                        .collect::<Vec<_>>();
+                    ingest_chunks(
+                        pool,
+                        vec![chunk],
+                        insert_symbol_namespaces_batch,
+                        MAX_PARALLEL_INGEST,
+                    )
+                    .await?;
+                }
+            }
             ManifestEnvelope::FilePointer(pointer) => {
                 file_buffer.push(pointer);
                 if file_buffer.len() >= INSERT_BATCH_SIZE {
@@ -734,6 +736,19 @@ where
             pool,
             vec![symbol_buffer],
             insert_symbol_records_batch,
+            MAX_PARALLEL_INGEST,
+        )
+        .await?;
+    }
+    if !namespace_buffer.is_empty() {
+        let chunk = namespace_buffer
+            .into_iter()
+            .map(|record| record.namespace)
+            .collect::<Vec<_>>();
+        ingest_chunks(
+            pool,
+            vec![chunk],
+            insert_symbol_namespaces_batch,
             MAX_PARALLEL_INGEST,
         )
         .await?;
@@ -893,8 +908,19 @@ async fn insert_symbol_namespaces_batch(pool: PgPool, chunk: Vec<String>) -> Res
         return Ok(());
     }
 
+    let mut unique = HashSet::with_capacity(chunk.len());
+    let mut values = Vec::new();
+    for namespace in chunk {
+        if unique.insert(namespace.clone()) {
+            values.push(namespace);
+        }
+    }
+    if values.is_empty() {
+        return Ok(());
+    }
+
     let mut qb = QueryBuilder::new("INSERT INTO symbol_namespaces (namespace) ");
-    qb.push_values(chunk.iter(), |mut b, namespace| {
+    qb.push_values(values.iter(), |mut b, namespace| {
         b.push_bind(namespace);
     });
     qb.push(" ON CONFLICT (namespace) DO NOTHING");
@@ -915,16 +941,36 @@ async fn insert_reference_records_batch(
         return Ok(());
     }
 
-    let mut qb = QueryBuilder::new(
-        "WITH data (content_hash, namespace, name, kind, line_number, column_number) AS (",
+    let mut conn = pool.acquire().await.map_err(ApiErrorKind::from)?;
+
+    sqlx::query("DROP TABLE IF EXISTS staging_symbol_references")
+        .execute(&mut *conn)
+        .await
+        .map_err(ApiErrorKind::from)?;
+
+    sqlx::query(
+        "CREATE TEMP TABLE staging_symbol_references (
+            content_hash TEXT,
+            namespace TEXT,
+            name TEXT,
+            kind TEXT,
+            line_number INT,
+            column_number INT
+        ) ON COMMIT DELETE ROWS",
+    )
+    .execute(&mut *conn)
+    .await
+    .map_err(ApiErrorKind::from)?;
+
+    let mut staging_qb = QueryBuilder::new(
+        "INSERT INTO staging_symbol_references (content_hash, namespace, name, kind, line_number, column_number) ",
     );
-    qb.push_values(chunk.iter(), |mut b, reference| {
+    staging_qb.push_values(chunk.iter(), |mut b, reference| {
         let line: i32 = reference.line.try_into().unwrap_or(i32::MAX);
         let column: i32 = reference.column.try_into().unwrap_or(i32::MAX);
         let namespace = reference
             .namespace
             .as_deref()
-            .filter(|s| !s.is_empty())
             .unwrap_or("");
         b.push_bind(&reference.content_hash)
             .push_bind(namespace)
@@ -933,22 +979,30 @@ async fn insert_reference_records_batch(
             .push_bind(line)
             .push_bind(column);
     });
-    qb.push(
-        ") INSERT INTO symbol_references (symbol_id, namespace_id, kind, line_number, column_number) \
-             SELECT s.id, sn.id, data.kind, data.line_number, data.column_number \
-             FROM data \
-             JOIN symbols s \
-               ON s.content_hash = data.content_hash \
-              AND s.name = data.name \
-             JOIN symbol_namespaces sn \
-               ON sn.namespace = data.namespace \
-             ON CONFLICT (symbol_id, namespace_id, line_number, column_number, kind) DO NOTHING",
-    );
-
-    qb.build()
-        .execute(&pool)
+    staging_qb
+        .build()
+        .execute(&mut *conn)
         .await
         .map_err(ApiErrorKind::from)?;
+
+    sqlx::query(
+        "INSERT INTO symbol_references (symbol_id, namespace_id, kind, line_number, column_number)
+         SELECT s.id, sn.id, data.kind, data.line_number, data.column_number
+         FROM (
+             SELECT content_hash, namespace, name, kind, line_number, column_number
+             FROM staging_symbol_references
+             ORDER BY namespace, content_hash, name, line_number, column_number, kind
+         ) AS data
+         JOIN symbols s
+           ON s.content_hash = data.content_hash
+          AND s.name = data.name
+         JOIN symbol_namespaces sn
+           ON sn.namespace = data.namespace
+         ON CONFLICT (symbol_id, namespace_id, line_number, column_number, kind) DO NOTHING",
+    )
+    .execute(&mut *conn)
+    .await
+    .map_err(ApiErrorKind::from)?;
 
     Ok(())
 }

@@ -230,11 +230,25 @@ fn upload_manifest_shards(
         client,
         endpoints,
         api_key,
+        artifacts.symbol_namespaces_path(),
+        "symbol_namespace",
+    )?;
+
+    upload_record_store_shards(
+        client,
+        endpoints,
+        api_key,
         artifacts.reference_records_path(),
         "reference_record",
     )?;
 
     upload_branch_heads(client, endpoints, api_key, &artifacts.branches)?;
+
+    info!(
+        namespaces = artifacts.symbol_namespace_count(),
+        references = artifacts.reference_record_count(),
+        "manifest shards uploaded"
+    );
 
     Ok(())
 }

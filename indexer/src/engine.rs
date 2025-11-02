@@ -17,7 +17,7 @@ use crate::config::IndexerConfig;
 use crate::extractors::{self, ExtractedSymbol};
 use crate::models::{
     BranchHead, ChunkMapping, ContentBlob, FilePointer, IndexArtifacts, RecordWriter,
-    ReferenceRecord, SymbolRecord,
+    ReferenceRecord, SymbolNamespaceRecord, SymbolRecord,
 };
 use crate::utils;
 
@@ -118,8 +118,11 @@ impl Indexer {
         let content_blobs_writer = RecordWriter::<ContentBlob>::new_in(&scratch_dir)?;
         let file_pointers_writer = RecordWriter::<FilePointer>::new_in(&scratch_dir)?;
         let symbol_records_writer = RecordWriter::<SymbolRecord>::new_in(&scratch_dir)?;
+        let symbol_namespaces_writer =
+            RecordWriter::<SymbolNamespaceRecord>::new_in(&scratch_dir)?;
         let reference_records_writer = RecordWriter::<ReferenceRecord>::new_in(&scratch_dir)?;
         let chunk_mappings_writer = RecordWriter::<ChunkMapping>::new_in(&scratch_dir)?;
+        let seen_namespaces = Arc::new(Mutex::new(HashSet::new()));
 
         let config = self.config.clone();
 
@@ -131,8 +134,10 @@ impl Indexer {
                 let content_blobs_writer = content_blobs_writer.clone();
                 let file_pointers_writer = file_pointers_writer.clone();
                 let symbol_records_writer = symbol_records_writer.clone();
+                let symbol_namespaces_writer = symbol_namespaces_writer.clone();
                 let reference_records_writer = reference_records_writer.clone();
                 let chunk_mappings_writer = chunk_mappings_writer.clone();
+                let seen_namespaces = seen_namespaces.clone();
                 let config = config.clone();
 
                 move |entry| match process_file(&config, &entry) {
@@ -141,6 +146,7 @@ impl Indexer {
                             content_blob,
                             file_pointer,
                             symbol_records: file_symbols,
+                            symbol_namespaces: file_namespaces,
                             reference_records: file_references,
                             chunk_mappings: file_chunk_mappings,
                             chunk_writes,
@@ -183,6 +189,20 @@ impl Indexer {
                                 }
                             }
 
+                            for namespace in &file_namespaces {
+                                let ns = namespace.namespace.clone();
+                                let should_write = {
+                                    let mut guard =
+                                        seen_namespaces.lock().expect("namespace set mutex poisoned");
+                                    guard.insert(ns.clone())
+                                };
+                                if should_write {
+                                    if let Err(err) = symbol_namespaces_writer.append(namespace) {
+                                        warn!(error = %err, namespace = %ns, "failed to record namespace");
+                                    }
+                                }
+                            }
+
                             for reference in &file_references {
                                 if let Err(err) = reference_records_writer.append(reference) {
                                     warn!(
@@ -219,6 +239,7 @@ impl Indexer {
         let content_blobs = content_blobs_writer.into_store()?;
         let file_pointers = file_pointers_writer.into_store()?;
         let symbol_records = symbol_records_writer.into_store()?;
+        let symbol_namespaces = symbol_namespaces_writer.into_store()?;
         let reference_records = reference_records_writer.into_store()?;
         let chunk_mappings = chunk_mappings_writer.into_store()?;
 
@@ -234,6 +255,7 @@ impl Indexer {
         Ok(IndexArtifacts::new(
             content_blobs,
             symbol_records,
+            symbol_namespaces,
             file_pointers,
             reference_records,
             chunk_mappings,
@@ -262,6 +284,7 @@ struct FileArtifacts {
     content_blob: ContentBlob,
     file_pointer: FilePointer,
     symbol_records: Vec<SymbolRecord>,
+    symbol_namespaces: Vec<SymbolNamespaceRecord>,
     reference_records: Vec<ReferenceRecord>,
     chunk_mappings: Vec<ChunkMapping>,
     chunk_writes: Vec<ChunkWrite>,
@@ -363,7 +386,7 @@ fn process_file(config: &IndexerConfig, entry: &FileEntry) -> Result<FileArtifac
         content_hash: content_hash.clone(),
     };
 
-    let (symbol_records, reference_records) = match language {
+    let (symbol_records, reference_records, symbol_namespaces) = match language {
         Some(ref lang) => {
             let source = String::from_utf8_lossy(&bytes);
             let namespace_hint = utils::namespace_from_path(Some(lang), &entry.relative);
@@ -377,7 +400,7 @@ fn process_file(config: &IndexerConfig, entry: &FileEntry) -> Result<FileArtifac
                 })
                 .collect();
 
-            let references = extraction
+            let references: Vec<ReferenceRecord> = extraction
                 .references
                 .into_iter()
                 .map(|reference| {
@@ -399,15 +422,25 @@ fn process_file(config: &IndexerConfig, entry: &FileEntry) -> Result<FileArtifac
                 })
                 .collect();
 
-            (symbols, references)
+            let mut namespace_set = HashSet::new();
+            let mut namespaces = Vec::new();
+            for reference in &references {
+                let ns = reference.namespace.clone().unwrap_or_default();
+                if namespace_set.insert(ns.clone()) {
+                    namespaces.push(SymbolNamespaceRecord { namespace: ns });
+                }
+            }
+
+            (symbols, references, namespaces)
         }
-        None => (Vec::new(), Vec::new()),
+        None => (Vec::new(), Vec::new(), Vec::new()),
     };
 
     Ok(FileArtifacts {
         content_blob,
         file_pointer,
         symbol_records,
+        symbol_namespaces,
         reference_records,
         chunk_mappings,
         chunk_writes,

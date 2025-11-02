@@ -16,6 +16,9 @@ pub fn write_report(output_dir: &Path, artifacts: &IndexArtifacts) -> Result<()>
     write_array_file(output_dir.join("symbol_records.json"), |writer| {
         artifacts.write_symbol_records_array(writer)
     })?;
+    write_array_file(output_dir.join("symbol_namespaces.json"), |writer| {
+        artifacts.write_symbol_namespaces_array(writer)
+    })?;
     write_array_file(output_dir.join("file_pointers.json"), |writer| {
         artifacts.write_file_pointers_array(writer)
     })?;
