@@ -1002,6 +1002,7 @@ async fn insert_reference_records_batch(
     )
     .execute(&mut *conn)
     .await
+    .inspect(|v|tracing::info!("INSERTED {v:#?} rows"))
     .map_err(ApiErrorKind::from)?;
 
     Ok(())

@@ -1,11 +1,16 @@
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
+use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
+use crossbeam_channel::bounded;
+use rayon::iter::ParallelBridge;
+use rayon::prelude::*;
+use rayon::ThreadPoolBuilder;
 use reqwest::blocking::{Client, Response};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
@@ -17,6 +22,13 @@ use crate::models::{ChunkMapping, IndexArtifacts, UniqueChunk};
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 const MANIFEST_SHARD_RECORD_LIMIT: usize = 50_000;
 const MANIFEST_SHARD_BYTE_LIMIT: usize = 4 * 1024 * 1024;
+const UPLOAD_PARALLELISM: usize = 4;
+
+#[derive(Debug)]
+struct ManifestShard {
+    index: u64,
+    data: Vec<u8>,
+}
 
 pub fn upload_index(url: &str, api_key: Option<&str>, artifacts: &IndexArtifacts) -> Result<()> {
     let client = Client::builder()
@@ -24,7 +36,7 @@ pub fn upload_index(url: &str, api_key: Option<&str>, artifacts: &IndexArtifacts
         .build()
         .context("failed to build HTTP client")?;
 
-    let endpoints = Endpoints::new(url);
+    let endpoints = Arc::new(Endpoints::new(url));
 
     // 1. Upload all content blob metadata
     upload_content_blobs(&client, &endpoints, api_key, artifacts)?;
@@ -52,11 +64,11 @@ pub fn upload_index(url: &str, api_key: Option<&str>, artifacts: &IndexArtifacts
     // 5. Upload manifest shards per section
     info!("uploading manifest shards");
     upload_manifest_shards(&client, &endpoints, api_key, artifacts)?;
-    info!("manifest shards uploaded");
 
     Ok(())
 }
 
+#[derive(Clone)]
 struct Endpoints {
     blobs_upload: String,
     chunks_need: String,
@@ -80,7 +92,7 @@ impl Endpoints {
 
 fn upload_content_blobs(
     client: &Client,
-    endpoints: &Endpoints,
+    endpoints: &Arc<Endpoints>,
     api_key: Option<&str>,
     artifacts: &IndexArtifacts,
 ) -> Result<()> {
@@ -93,25 +105,38 @@ fn upload_content_blobs(
         "uploading content blob metadata"
     );
 
+    let api_key_owned = api_key.map(|s| s.to_string());
+    let api_key = api_key_owned.as_deref();
+    let endpoints = Arc::clone(endpoints);
+
     let mut stream = artifacts.content_blobs_stream()?;
+    let (tx, rx) =
+        bounded::<Vec<crate::models::ContentBlob>>(UPLOAD_PARALLELISM.saturating_mul(2).max(1));
+
     loop {
         let batch = stream.next_batch(1000)?;
         if batch.is_empty() {
             break;
         }
 
-        let payload = ContentBlobUploadRequest {
-            blobs: batch,
-        };
-        post_json(client, &endpoints.blobs_upload, api_key, &payload)?;
+        tx.send(batch)
+            .map_err(|_| anyhow!("content blob upload worker dropped"))?;
     }
+    drop(tx);
+
+    parallel_consume(rx.into_iter(), move |batch| {
+        let payload = ContentBlobUploadRequest { blobs: batch };
+        post_json(client, &endpoints.blobs_upload, api_key, &payload)?;
+        Ok(())
+    })?;
+
     info!("content blob metadata uploaded");
     Ok(())
 }
 
 fn request_needed_chunks(
     client: &Client,
-    endpoints: &Endpoints,
+    endpoints: &Arc<Endpoints>,
     api_key: Option<&str>,
     chunk_hashes: &[String],
 ) -> Result<HashSet<String>> {
@@ -134,7 +159,7 @@ fn request_needed_chunks(
 
 fn upload_unique_chunks(
     client: &Client,
-    endpoints: &Endpoints,
+    endpoints: &Arc<Endpoints>,
     api_key: Option<&str>,
     artifacts: &IndexArtifacts,
     needed_hashes: &HashSet<String>,
@@ -153,6 +178,12 @@ fn upload_unique_chunks(
         count = needed_chunks.len(),
         "uploading unique chunk content"
     );
+    let api_key_owned = api_key.map(|s| s.to_string());
+    let api_key = api_key_owned.as_deref();
+    let endpoints = Arc::clone(endpoints);
+
+    let (tx, rx) =
+        bounded::<Vec<UniqueChunk>>(UPLOAD_PARALLELISM.saturating_mul(2).max(1));
     for batch in needed_chunks.chunks(100) {
         let mut chunks = Vec::with_capacity(batch.len());
         for hash in batch {
@@ -165,9 +196,16 @@ fn upload_unique_chunks(
             });
         }
 
+        tx.send(chunks)
+            .map_err(|_| anyhow!("unique chunk upload worker dropped"))?;
+    }
+    drop(tx);
+
+    parallel_consume(rx.into_iter(), move |chunks| {
         let payload = UniqueChunkUploadRequest { chunks };
         post_json(client, &endpoints.chunks_upload, api_key, &payload)?;
-    }
+        Ok(())
+    })?;
     info!("unique chunk content uploaded");
 
     Ok(())
@@ -175,7 +213,7 @@ fn upload_unique_chunks(
 
 fn upload_chunk_mappings(
     client: &Client,
-    endpoints: &Endpoints,
+    endpoints: &Arc<Endpoints>,
     api_key: Option<&str>,
     artifacts: &IndexArtifacts,
 ) -> Result<()> {
@@ -188,25 +226,36 @@ fn upload_chunk_mappings(
         "uploading chunk mappings"
     );
 
+    let api_key_owned = api_key.map(|s| s.to_string());
+    let api_key = api_key_owned.as_deref();
+    let endpoints = Arc::clone(endpoints);
+
     let mut stream = artifacts.chunk_mappings_stream()?;
+    let (tx, rx) =
+        bounded::<Vec<ChunkMapping>>(UPLOAD_PARALLELISM.saturating_mul(2).max(1));
     loop {
         let batch = stream.next_batch(1000)?;
         if batch.is_empty() {
             break;
         }
 
-        let payload = ChunkMappingUploadRequest {
-            mappings: batch,
-        };
-        post_json(client, &endpoints.mappings_upload, api_key, &payload)?;
+        tx.send(batch)
+            .map_err(|_| anyhow!("chunk mapping upload worker dropped"))?;
     }
+    drop(tx);
+
+    parallel_consume(rx.into_iter(), move |mappings| {
+        let payload = ChunkMappingUploadRequest { mappings };
+        post_json(client, &endpoints.mappings_upload, api_key, &payload)?;
+        Ok(())
+    })?;
     info!("chunk mappings uploaded");
     Ok(())
 }
 
 fn upload_manifest_shards(
     client: &Client,
-    endpoints: &Endpoints,
+    endpoints: &Arc<Endpoints>,
     api_key: Option<&str>,
     artifacts: &IndexArtifacts,
 ) -> Result<()> {
@@ -255,7 +304,7 @@ fn upload_manifest_shards(
 
 fn upload_record_store_shards(
     client: &Client,
-    endpoints: &Endpoints,
+    endpoints: &Arc<Endpoints>,
     api_key: Option<&str>,
     path: &std::path::Path,
     section: &str,
@@ -267,61 +316,70 @@ fn upload_record_store_shards(
     let file = File::open(path)
         .with_context(|| format!("failed to open record store {}", path.display()))?;
     let mut reader = BufReader::new(file);
-    let mut shard_buffer = Vec::with_capacity(MANIFEST_SHARD_BYTE_LIMIT + 1024);
+    let api_key_owned = api_key.map(|s| s.to_string());
+    let api_key = api_key_owned.as_deref();
+    let endpoints = Arc::clone(endpoints);
+
+    let (tx, rx) =
+        bounded::<ManifestShard>(UPLOAD_PARALLELISM.saturating_mul(2).max(1));
     let mut line = String::new();
-    let mut record_count: usize = 0;
     let mut shard_index: u64 = 0;
+    let mut eof = false;
 
-    loop {
-        line.clear();
-        let read = reader
-            .read_line(&mut line)
-            .context("failed to read record shard line")?;
-        if read == 0 {
-            if !shard_buffer.is_empty() {
-                send_manifest_shard(
-                    client,
-                    endpoints,
-                    api_key,
-                    section,
-                    shard_index,
-                    &shard_buffer,
-                )?;
-                shard_buffer.clear();
-            }
-            break;
-        }
+    while !eof {
+        let mut shard_data = Vec::with_capacity(MANIFEST_SHARD_BYTE_LIMIT + 1024);
+        let mut records: usize = 0;
 
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        shard_buffer.extend_from_slice(line.as_bytes());
-        record_count += 1;
-
-        if record_count >= MANIFEST_SHARD_RECORD_LIMIT
-            || shard_buffer.len() >= MANIFEST_SHARD_BYTE_LIMIT
+        while records < MANIFEST_SHARD_RECORD_LIMIT
+            && shard_data.len() < MANIFEST_SHARD_BYTE_LIMIT
         {
-            send_manifest_shard(
-                client,
-                endpoints,
-                api_key,
-                section,
-                shard_index,
-                &shard_buffer,
-            )?;
-            shard_buffer.clear();
-            record_count = 0;
+            line.clear();
+            let read = reader
+                .read_line(&mut line)
+                .context("failed to read record shard line")?;
+            if read == 0 {
+                eof = true;
+                break;
+            }
+
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            shard_data.extend_from_slice(line.as_bytes());
+            records += 1;
+        }
+
+        if !shard_data.is_empty() {
+            tx.send(ManifestShard {
+                index: shard_index,
+                data: shard_data,
+            })
+            .map_err(|_| anyhow!("manifest shard upload worker dropped"))?;
             shard_index += 1;
         }
     }
+
+    drop(tx);
+
+    parallel_consume(rx.into_iter(), move |shard| {
+        send_manifest_shard(
+            client,
+            Arc::clone(&endpoints),
+            api_key,
+            section,
+            shard.index,
+            &shard.data,
+        )?;
+        Ok(())
+    })?;
 
     Ok(())
 }
 
 fn upload_branch_heads(
     client: &Client,
-    endpoints: &Endpoints,
+    endpoints: &Arc<Endpoints>,
     api_key: Option<&str>,
     branches: &[crate::models::BranchHead],
 ) -> Result<()> {
@@ -336,12 +394,12 @@ fn upload_branch_heads(
         buffer.push(b'\n');
     }
 
-    send_manifest_shard(client, endpoints, api_key, "branch_head", 0, &buffer)
+    send_manifest_shard(client, Arc::clone(endpoints), api_key, "branch_head", 0, &buffer)
 }
 
 fn send_manifest_shard(
     client: &Client,
-    endpoints: &Endpoints,
+    endpoints: Arc<Endpoints>,
     api_key: Option<&str>,
     section: &str,
     shard_index: u64,
@@ -396,6 +454,26 @@ fn post_json<T: Serialize>(
     }
 
     Ok(response)
+}
+
+fn parallel_consume<T, F>(rx: crossbeam_channel::IntoIter<T>, func: F) -> Result<()>
+where
+    T: Send,
+    F: Fn(T) -> Result<()> + Sync,
+{
+    if UPLOAD_PARALLELISM <= 1 {
+        for item in rx {
+            func(item)?;
+        }
+        return Ok(());
+    }
+
+    let pool = ThreadPoolBuilder::new()
+        .num_threads(UPLOAD_PARALLELISM)
+        .build()
+        .context("failed to build upload worker pool")?;
+
+    pool.install(|| rx.par_bridge().try_for_each(|item| func(item)))
 }
 
 #[derive(Serialize)]
