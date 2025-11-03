@@ -68,8 +68,8 @@ pub fn SearchPage() -> impl IntoView {
 
     view! {
         <div class="w-full px-4 py-8 text-black dark:text-white">
-            <div class="max-w-6xl mx-auto flex flex-col lg:flex-row gap-6">
-                <aside class="w-full lg:w-72 flex-shrink-0 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg p-4 space-y-4">
+            <div class="flex flex-col lg:flex-row gap-6">
+                <aside class="w-full lg:w-72 lg:order-first flex-shrink-0 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg p-4 space-y-4">
                     <h3 class="text-lg font-semibold text-gray-800 dark:text-gray-200">
                         "Filters"
                     </h3>
@@ -158,7 +158,7 @@ pub fn SearchPage() -> impl IntoView {
                         </Suspense>
                     </div>
                 </aside>
-                <div class="flex-1 space-y-4">
+                <div class="flex-1 space-y-4 overflow-x-auto max-w-full">
                     <div class="flex flex-wrap gap-2">
                         {move || {
                             let chips = filter_chips(&query_text.get());
@@ -218,7 +218,7 @@ pub fn SearchPage() -> impl IntoView {
                                             let next_page = page + 1;
                                             EitherOf3::B(
                                                 view! {
-                                                    <div class="space-y-4">
+                                                    <div class="space-y-4 overflow-x-auto max-w-full">
                                                         <p class="text-sm text-gray-600 dark:text-gray-400">
                                                             {format!(
                                                                 "Showing page {} ({} results per page)",
@@ -775,7 +775,7 @@ fn SearchResultCard(result: SearchResult) -> impl IntoView {
     });
 
     view! {
-        <div class="mt-4 p-4 border border-gray-300 dark:border-gray-700 rounded-md bg-white dark:bg-gray-800 break-words max-w-full">
+        <div class="mt-4 p-4 border border-gray-300 dark:border-gray-700 rounded-md bg-white dark:bg-gray-800 break-words max-w-full overflow-x-auto">
             <p class="font-mono text-sm break-all">
                 <a
                     href=primary_link

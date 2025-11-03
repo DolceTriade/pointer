@@ -2501,6 +2501,11 @@
       grid-template-columns: repeat(3, minmax(0, 1fr));
     }
   }
+  .lg\:order-first {
+    @media (width >= 64rem) {
+      order: -9999;
+    }
+  }
   .lg\:w-72 {
     @media (width >= 64rem) {
       width: calc(var(--spacing) * 72);
