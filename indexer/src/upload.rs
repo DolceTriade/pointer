@@ -110,12 +110,14 @@ fn upload_content_blobs(
     let (tx, rx) =
         bounded::<Vec<crate::models::ContentBlob>>(UPLOAD_PARALLELISM.saturating_mul(2).max(1));
 
-    let worker_func = Arc::new(move |batch: Vec<crate::models::ContentBlob>| -> Result<()> {
-        let payload = ContentBlobUploadRequest { blobs: batch };
-        let api = api_key_owned.as_ref().as_ref().map(|s| s.as_str());
-        post_json(client.as_ref(), &endpoints.blobs_upload, api, &payload)?;
-        Ok(())
-    });
+    let worker_func = Arc::new(
+        move |batch: Vec<crate::models::ContentBlob>| -> Result<()> {
+            let payload = ContentBlobUploadRequest { blobs: batch };
+            let api = api_key_owned.as_ref().as_ref().map(|s| s.as_str());
+            post_json(client.as_ref(), &endpoints.blobs_upload, api, &payload)?;
+            Ok(())
+        },
+    );
     let workers = spawn_workers(rx, worker_func);
 
     loop {
@@ -183,8 +185,7 @@ fn upload_unique_chunks(
     let endpoints = Arc::clone(endpoints);
     let client = Arc::new(client.clone());
 
-    let (tx, rx) =
-        bounded::<Vec<UniqueChunk>>(UPLOAD_PARALLELISM.saturating_mul(2).max(1));
+    let (tx, rx) = bounded::<Vec<UniqueChunk>>(UPLOAD_PARALLELISM.saturating_mul(2).max(1));
 
     let worker_func = Arc::new(move |chunks: Vec<UniqueChunk>| -> Result<()> {
         let payload = UniqueChunkUploadRequest { chunks };
@@ -236,8 +237,7 @@ fn upload_chunk_mappings(
     let client = Arc::new(client.clone());
 
     let mut stream = artifacts.chunk_mappings_stream()?;
-    let (tx, rx) =
-        bounded::<Vec<ChunkMapping>>(UPLOAD_PARALLELISM.saturating_mul(2).max(1));
+    let (tx, rx) = bounded::<Vec<ChunkMapping>>(UPLOAD_PARALLELISM.saturating_mul(2).max(1));
 
     let worker_func = Arc::new(move |mappings: Vec<ChunkMapping>| -> Result<()> {
         let payload = ChunkMappingUploadRequest { mappings };

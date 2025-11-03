@@ -16,232 +16,225 @@ pub fn extract(source: &str) -> Extraction {
 
     let mut references = Vec::new();
     let source_bytes = source.as_bytes();
-    let mut defined_nodes = HashSet::new();
-    collect_references(
-        &tree.root_node(),
-        source_bytes,
-        &mut references,
-        &[],
-        &mut defined_nodes,
-    );
+    collect_references(&tree.root_node(), source_bytes, &mut references);
 
     references.into()
 }
 
-fn collect_references(
-    node: &Node,
-    source: &[u8],
-    references: &mut Vec<ExtractedReference>,
-    namespace_stack: &[String],
-    defined_nodes: &mut HashSet<usize>,
-) {
-    if node.kind() == "source_file" {
-        let mut current_namespace = namespace_stack.to_vec();
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            if child.kind() == "package_clause" {
-                let mut pkg_cursor = child.walk();
-                let mut name_node_opt = None;
-                for grand in child.children(&mut pkg_cursor) {
-                    if matches!(grand.kind(), "identifier" | "package_identifier") {
-                        name_node_opt = Some(grand);
-                        break;
+fn collect_references(root: &Node, source: &[u8], references: &mut Vec<ExtractedReference>) {
+    let mut defined_nodes = HashSet::new();
+    let mut stack: Vec<(Node, Vec<String>)> = Vec::new();
+    stack.push((*root, Vec::new()));
+
+    while let Some((node, namespace_stack)) = stack.pop() {
+        let mut next_namespace = namespace_stack.clone();
+
+        if node.kind() == "source_file" {
+            let mut current_namespace = namespace_stack.clone();
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.kind() == "package_clause" {
+                    let mut pkg_cursor = child.walk();
+                    let mut name_node_opt = None;
+                    for grand in child.children(&mut pkg_cursor) {
+                        if matches!(grand.kind(), "identifier" | "package_identifier") {
+                            name_node_opt = Some(grand);
+                            break;
+                        }
                     }
+                    if let Some(name_node) = name_node_opt {
+                        if let Some(name) = record_definition_node(
+                            &name_node,
+                            source,
+                            references,
+                            &namespace_stack,
+                            "definition",
+                            &mut defined_nodes,
+                        ) {
+                            current_namespace = push_namespace(&namespace_stack, &name);
+                        }
+                    }
+                } else {
+                    stack.push((child, current_namespace.clone()));
                 }
-                if let Some(name_node) = name_node_opt {
+            }
+            continue;
+        }
+
+        match node.kind() {
+            "function_declaration" => {
+                if let Some(name_node) = node.child_by_field_name("name") {
                     if let Some(name) = record_definition_node(
                         &name_node,
                         source,
                         references,
-                        namespace_stack,
+                        &namespace_stack,
                         "definition",
-                        defined_nodes,
+                        &mut defined_nodes,
                     ) {
-                        current_namespace = push_namespace(namespace_stack, &name);
+                        next_namespace = push_namespace(&namespace_stack, &name);
                     }
                 }
-            } else {
-                collect_references(
-                    &child,
-                    source,
-                    references,
-                    &current_namespace,
-                    defined_nodes,
-                );
             }
-        }
-        return;
-    }
-
-    let mut next_namespace = namespace_stack.to_vec();
-
-    match node.kind() {
-        "function_declaration" => {
-            if let Some(name_node) = node.child_by_field_name("name") {
-                if let Some(name) = record_definition_node(
-                    &name_node,
-                    source,
-                    references,
-                    namespace_stack,
-                    "definition",
-                    defined_nodes,
-                ) {
-                    next_namespace = push_namespace(namespace_stack, &name);
-                }
-            }
-        }
-        "method_declaration" => {
-            let mut method_namespace = namespace_stack.to_vec();
-            if let Some(receiver) = node.child_by_field_name("receiver") {
-                let mut receiver_type_name = None;
-                let mut cursor = receiver.walk();
-                for param in receiver.children(&mut cursor) {
-                    if param.kind() == "parameter_declaration" {
-                        if let Some(receiver_type) = param.child_by_field_name("type") {
-                            receiver_type_name = find_type_identifier(&receiver_type, source);
-                            if receiver_type_name.is_some() {
-                                break;
+            "method_declaration" => {
+                let mut method_namespace = namespace_stack.to_vec();
+                if let Some(receiver) = node.child_by_field_name("receiver") {
+                    let mut receiver_type_name = None;
+                    let mut cursor = receiver.walk();
+                    for param in receiver.children(&mut cursor) {
+                        if param.kind() == "parameter_declaration" {
+                            if let Some(receiver_type) = param.child_by_field_name("type") {
+                                receiver_type_name = find_type_identifier(&receiver_type, source);
+                                if receiver_type_name.is_some() {
+                                    break;
+                                }
                             }
                         }
                     }
+                    if let Some(receiver_name) = receiver_type_name {
+                        if let Some(clean) = sanitize_identifier(&receiver_name) {
+                            method_namespace = push_namespace(&namespace_stack, &clean);
+                        }
+                    }
                 }
-                if let Some(receiver_name) = receiver_type_name {
-                    if let Some(clean) = sanitize_identifier(&receiver_name) {
-                        method_namespace = push_namespace(namespace_stack, &clean);
+
+                if let Some(name_node) = node.child_by_field_name("name") {
+                    if let Some(name) = record_definition_node(
+                        &name_node,
+                        source,
+                        references,
+                        &method_namespace,
+                        "definition",
+                        &mut defined_nodes,
+                    ) {
+                        method_namespace = push_namespace(&method_namespace, &name);
+                    }
+                }
+
+                next_namespace = method_namespace;
+            }
+            "type_spec" => {
+                if let Some(name_node) = node.child_by_field_name("name") {
+                    if let Some(name) = record_definition_node(
+                        &name_node,
+                        source,
+                        references,
+                        &namespace_stack,
+                        "definition",
+                        &mut defined_nodes,
+                    ) {
+                        next_namespace = push_namespace(&namespace_stack, &name);
                     }
                 }
             }
+            "short_var_declaration" | "var_spec" | "const_spec" => {
+                let mut names = Vec::new();
+                if let Some(left) = node.child_by_field_name("left") {
+                    collect_go_binding_names(&left, source, &mut names);
+                } else {
+                    collect_go_binding_names(&node, source, &mut names);
+                }
 
-            if let Some(name_node) = node.child_by_field_name("name") {
-                if let Some(name) = record_definition_node(
-                    &name_node,
-                    source,
-                    references,
-                    &method_namespace,
-                    "definition",
-                    defined_nodes,
-                ) {
-                    method_namespace = push_namespace(&method_namespace, &name);
+                for binding in names {
+                    record_definition_node(
+                        &binding,
+                        source,
+                        references,
+                        &namespace_stack,
+                        "definition",
+                        &mut defined_nodes,
+                    );
                 }
             }
-
-            next_namespace = method_namespace;
-        }
-        "type_spec" => {
-            if let Some(name_node) = node.child_by_field_name("name") {
-                if let Some(name) = record_definition_node(
-                    &name_node,
-                    source,
-                    references,
-                    namespace_stack,
-                    "definition",
-                    defined_nodes,
-                ) {
-                    next_namespace = push_namespace(namespace_stack, &name);
+            "field_declaration" => {
+                if let Some(name_node) = node.child_by_field_name("name") {
+                    let mut names = Vec::new();
+                    collect_go_binding_names(&name_node, source, &mut names);
+                    for binding in names {
+                        record_definition_node(
+                            &binding,
+                            source,
+                            references,
+                            &namespace_stack,
+                            "definition",
+                            &mut defined_nodes,
+                        );
+                    }
+                } else {
+                    let mut names = Vec::new();
+                    collect_go_binding_names(&node, source, &mut names);
+                    for binding in names {
+                        record_definition_node(
+                            &binding,
+                            source,
+                            references,
+                            &namespace_stack,
+                            "definition",
+                            &mut defined_nodes,
+                        );
+                    }
                 }
             }
-        }
-        "short_var_declaration" | "var_spec" | "const_spec" => {
-            let mut names = Vec::new();
-            if let Some(left) = node.child_by_field_name("left") {
-                collect_go_binding_names(&left, source, &mut names);
-            } else {
-                collect_go_binding_names(node, source, &mut names);
+            "method_spec" => {
+                if let Some(name_node) = node.child_by_field_name("name") {
+                    if let Some(name) = record_definition_node(
+                        &name_node,
+                        source,
+                        references,
+                        &namespace_stack,
+                        "definition",
+                        &mut defined_nodes,
+                    ) {
+                        next_namespace = push_namespace(&namespace_stack, &name);
+                    }
+                }
             }
-
-            for binding in names {
-                record_definition_node(
-                    &binding,
+            "method_elem" => {
+                if let Some(name_node) = node.child_by_field_name("name") {
+                    if let Some(name) = record_definition_node(
+                        &name_node,
+                        source,
+                        references,
+                        &namespace_stack,
+                        "definition",
+                        &mut defined_nodes,
+                    ) {
+                        next_namespace = push_namespace(&namespace_stack, &name);
+                    }
+                }
+            }
+            "parameter_declaration" | "variadic_parameter" => {
+                if let Some(name_node) = node.child_by_field_name("name") {
+                    let mut names = Vec::new();
+                    collect_go_binding_names(&name_node, source, &mut names);
+                    for binding in names {
+                        record_definition_node(
+                            &binding,
+                            source,
+                            references,
+                            &namespace_stack,
+                            "definition",
+                            &mut defined_nodes,
+                        );
+                    }
+                }
+            }
+            "identifier" | "field_identifier" | "type_identifier" => {
+                record_reference_node(
+                    &node,
                     source,
                     references,
-                    namespace_stack,
-                    "definition",
-                    defined_nodes,
+                    &namespace_stack,
+                    &mut defined_nodes,
                 );
             }
+            _ => {}
         }
-        "field_declaration" => {
-            if let Some(name_node) = node.child_by_field_name("name") {
-                let mut names = Vec::new();
-                collect_go_binding_names(&name_node, source, &mut names);
-                for binding in names {
-                    record_definition_node(
-                        &binding,
-                        source,
-                        references,
-                        namespace_stack,
-                        "definition",
-                        defined_nodes,
-                    );
-                }
-            } else {
-                let mut names = Vec::new();
-                collect_go_binding_names(node, source, &mut names);
-                for binding in names {
-                    record_definition_node(
-                        &binding,
-                        source,
-                        references,
-                        namespace_stack,
-                        "definition",
-                        defined_nodes,
-                    );
-                }
-            }
+        let mut cursor = node.walk();
+        let children: Vec<Node> = node.children(&mut cursor).collect();
+        for child in children.into_iter().rev() {
+            stack.push((child, next_namespace.clone()));
         }
-        "method_spec" => {
-            if let Some(name_node) = node.child_by_field_name("name") {
-                if let Some(name) = record_definition_node(
-                    &name_node,
-                    source,
-                    references,
-                    namespace_stack,
-                    "definition",
-                    defined_nodes,
-                ) {
-                    next_namespace = push_namespace(namespace_stack, &name);
-                }
-            }
-        }
-        "method_elem" => {
-            if let Some(name_node) = node.child_by_field_name("name") {
-                if let Some(name) = record_definition_node(
-                    &name_node,
-                    source,
-                    references,
-                    namespace_stack,
-                    "definition",
-                    defined_nodes,
-                ) {
-                    next_namespace = push_namespace(namespace_stack, &name);
-                }
-            }
-        }
-        "parameter_declaration" | "variadic_parameter" => {
-            if let Some(name_node) = node.child_by_field_name("name") {
-                let mut names = Vec::new();
-                collect_go_binding_names(&name_node, source, &mut names);
-                for binding in names {
-                    record_definition_node(
-                        &binding,
-                        source,
-                        references,
-                        namespace_stack,
-                        "definition",
-                        defined_nodes,
-                    );
-                }
-            }
-        }
-        "identifier" | "field_identifier" | "type_identifier" => {
-            record_reference_node(node, source, references, namespace_stack, defined_nodes);
-        }
-        _ => {}
-    }
-
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        collect_references(&child, source, references, &next_namespace, defined_nodes);
     }
 }
 

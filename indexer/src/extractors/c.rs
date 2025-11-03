@@ -16,200 +16,194 @@ pub fn extract(source: &str) -> Extraction {
 
     let mut references = Vec::new();
     let source_bytes = source.as_bytes();
-    let mut defined_nodes = HashSet::new();
-    collect_references(
-        &tree.root_node(),
-        source_bytes,
-        &mut references,
-        &[],
-        &mut defined_nodes,
-    );
+    collect_references(&tree.root_node(), source_bytes, &mut references);
 
     references.into()
 }
 
-fn collect_references(
-    node: &Node,
-    source: &[u8],
-    references: &mut Vec<ExtractedReference>,
-    namespace_stack: &[String],
-    defined_nodes: &mut HashSet<usize>,
-) {
-    let mut next_namespace = namespace_stack.to_vec();
+fn collect_references(root: &Node, source: &[u8], references: &mut Vec<ExtractedReference>) {
+    let mut defined_nodes = HashSet::new();
+    let mut stack: Vec<(Node, Vec<String>)> = Vec::new();
+    stack.push((*root, Vec::new()));
 
-    match node.kind() {
-        "translation_unit" => {
-            let mut cursor = node.walk();
-            for child in node.children(&mut cursor) {
-                collect_references(&child, source, references, namespace_stack, defined_nodes);
-            }
-            return;
-        }
-        "function_definition" => {
-            if let Some(declarator) = node.child_by_field_name("declarator") {
-                if let Some(name_node) = find_identifier_in_declarator(&declarator) {
-                    if let Some(name) = record_definition_node(
-                        &name_node,
-                        source,
-                        references,
-                        namespace_stack,
-                        "definition",
-                        defined_nodes,
-                    ) {
-                        next_namespace = push_namespace(namespace_stack, &name);
-                    }
+    while let Some((node, namespace_stack)) = stack.pop() {
+        let mut next_namespace = namespace_stack.clone();
+
+        match node.kind() {
+            "translation_unit" => {
+                let mut cursor = node.walk();
+                let children: Vec<Node> = node.children(&mut cursor).collect();
+                for child in children.into_iter().rev() {
+                    stack.push((child, namespace_stack.clone()));
                 }
+                continue;
             }
-        }
-        "declaration" => {
-            if has_function_declarator(node) {
-                if let Some(declarator) = node
-                    .children(&mut node.walk())
-                    .find(|c| c.kind() == "function_declarator")
-                {
+            "function_definition" => {
+                if let Some(declarator) = node.child_by_field_name("declarator") {
                     if let Some(name_node) = find_identifier_in_declarator(&declarator) {
-                        record_definition_node(
+                        if let Some(name) = record_definition_node(
                             &name_node,
                             source,
                             references,
-                            namespace_stack,
-                            "declaration",
-                            defined_nodes,
-                        );
+                            &namespace_stack,
+                            "definition",
+                            &mut defined_nodes,
+                        ) {
+                            next_namespace = push_namespace(&namespace_stack, &name);
+                        }
                     }
                 }
-            } else {
-                let mut names = Vec::new();
-                collect_declaration_identifiers(node, &mut names);
-                for identifier in names {
-                    record_definition_node(
-                        &identifier,
-                        source,
-                        references,
-                        namespace_stack,
-                        "definition",
-                        defined_nodes,
-                    );
-                }
             }
-        }
-        "type_definition" => {
-            let mut cursor = node.walk();
-            for child in node.children(&mut cursor) {
-                if child.kind() == "type_identifier" {
-                    record_definition_node(
-                        &child,
-                        source,
-                        references,
-                        namespace_stack,
-                        "definition",
-                        defined_nodes,
-                    );
-                } else if child.kind() == "init_declarator" {
+            "declaration" => {
+                if has_function_declarator(&node) {
+                    if let Some(declarator) = node
+                        .children(&mut node.walk())
+                        .find(|c| c.kind() == "function_declarator")
+                    {
+                        if let Some(name_node) = find_identifier_in_declarator(&declarator) {
+                            record_definition_node(
+                                &name_node,
+                                source,
+                                references,
+                                &namespace_stack,
+                                "declaration",
+                                &mut defined_nodes,
+                            );
+                        }
+                    }
+                } else {
                     let mut names = Vec::new();
-                    collect_c_binding_names(&child, &mut names);
+                    collect_declaration_identifiers(&node, &mut names);
                     for identifier in names {
                         record_definition_node(
                             &identifier,
                             source,
                             references,
-                            namespace_stack,
+                            &namespace_stack,
                             "definition",
-                            defined_nodes,
+                            &mut defined_nodes,
                         );
                     }
                 }
             }
-        }
-        "struct_specifier" | "union_specifier" | "enum_specifier" => {
-            if let Some(name_node) = node.child_by_field_name("name") {
-                if let Some(name) = record_definition_node(
-                    &name_node,
-                    source,
-                    references,
-                    namespace_stack,
-                    "definition",
-                    defined_nodes,
-                ) {
-                    next_namespace = push_namespace(namespace_stack, &name);
+            "type_definition" => {
+                let mut cursor = node.walk();
+                for child in node.children(&mut cursor) {
+                    if child.kind() == "type_identifier" {
+                        record_definition_node(
+                            &child,
+                            source,
+                            references,
+                            &namespace_stack,
+                            "definition",
+                            &mut defined_nodes,
+                        );
+                    } else if child.kind() == "init_declarator" {
+                        let mut names = Vec::new();
+                        collect_c_binding_names(&child, &mut names);
+                        for identifier in names {
+                            record_definition_node(
+                                &identifier,
+                                source,
+                                references,
+                                &namespace_stack,
+                                "definition",
+                                &mut defined_nodes,
+                            );
+                        }
+                    }
                 }
             }
-        }
-        "field_declaration" => {
-            let mut names = Vec::new();
-            collect_c_binding_names(node, &mut names);
-            for identifier in names {
-                record_definition_node(
-                    &identifier,
-                    source,
-                    references,
-                    namespace_stack,
-                    "definition",
-                    defined_nodes,
-                );
+            "struct_specifier" | "union_specifier" | "enum_specifier" => {
+                if let Some(name_node) = node.child_by_field_name("name") {
+                    if let Some(name) = record_definition_node(
+                        &name_node,
+                        source,
+                        references,
+                        &namespace_stack,
+                        "definition",
+                        &mut defined_nodes,
+                    ) {
+                        next_namespace = push_namespace(&namespace_stack, &name);
+                    }
+                }
             }
-        }
-        "enumerator" => {
-            if let Some(name_node) = node.child_by_field_name("name") {
-                record_definition_node(
-                    &name_node,
-                    source,
-                    references,
-                    namespace_stack,
-                    "definition",
-                    defined_nodes,
-                );
-            }
-        }
-        "parameter_declaration" => {
-            if let Some(declarator) = node.child_by_field_name("declarator") {
+            "field_declaration" => {
                 let mut names = Vec::new();
-                collect_c_binding_names(&declarator, &mut names);
+                collect_c_binding_names(&node, &mut names);
                 for identifier in names {
                     record_definition_node(
                         &identifier,
                         source,
                         references,
-                        namespace_stack,
+                        &namespace_stack,
                         "definition",
-                        defined_nodes,
+                        &mut defined_nodes,
                     );
                 }
-            } else if let Some(name_node) = node.child_by_field_name("name") {
-                record_definition_node(
-                    &name_node,
-                    source,
-                    references,
-                    namespace_stack,
-                    "definition",
-                    defined_nodes,
-                );
             }
-        }
-        "identifier" | "type_identifier" | "field_identifier" => {
-            record_reference_node(node, source, references, namespace_stack, defined_nodes);
-        }
-        "preproc_def" | "preproc_function_def" => {
-            if let Some(name_node) = node
-                .child_by_field_name("name")
-                .or_else(|| node.named_child(0))
-            {
-                record_definition_node(
-                    &name_node,
-                    source,
-                    references,
-                    namespace_stack,
-                    "definition",
-                    defined_nodes,
-                );
+            "enumerator" => {
+                if let Some(name_node) = node.child_by_field_name("name") {
+                    record_definition_node(
+                        &name_node,
+                        source,
+                        references,
+                        &namespace_stack,
+                        "definition",
+                        &mut defined_nodes,
+                    );
+                }
             }
+            "parameter_declaration" => {
+                if let Some(declarator) = node.child_by_field_name("declarator") {
+                    let mut names = Vec::new();
+                    collect_c_binding_names(&declarator, &mut names);
+                    for identifier in names {
+                        record_definition_node(
+                            &identifier,
+                            source,
+                            references,
+                            &namespace_stack,
+                            "definition",
+                            &mut defined_nodes,
+                        );
+                    }
+                } else if let Some(name_node) = node.child_by_field_name("name") {
+                    record_definition_node(
+                        &name_node,
+                        source,
+                        references,
+                        &namespace_stack,
+                        "definition",
+                        &mut defined_nodes,
+                    );
+                }
+            }
+            "identifier" | "type_identifier" | "field_identifier" => {
+                record_reference_node(&node, source, references, &namespace_stack, &defined_nodes);
+            }
+            "preproc_def" | "preproc_function_def" => {
+                if let Some(name_node) = node
+                    .child_by_field_name("name")
+                    .or_else(|| node.named_child(0))
+                {
+                    record_definition_node(
+                        &name_node,
+                        source,
+                        references,
+                        &namespace_stack,
+                        "definition",
+                        &mut defined_nodes,
+                    );
+                }
+            }
+            _ => {}
         }
-        _ => {}
-    }
-
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        collect_references(&child, source, references, &next_namespace, defined_nodes);
+        let mut cursor = node.walk();
+        let children: Vec<Node> = node.children(&mut cursor).collect();
+        for child in children.into_iter().rev() {
+            stack.push((child, next_namespace.clone()));
+        }
     }
 }
 
@@ -231,49 +225,53 @@ fn collect_declaration_identifiers<'a>(node: &Node<'a>, out: &mut Vec<Node<'a>>)
 }
 
 fn collect_c_binding_names<'a>(node: &Node<'a>, out: &mut Vec<Node<'a>>) {
-    match node.kind() {
-        "identifier" => out.push(*node),
-        "field_identifier" => out.push(*node),
-        "field_declarator" | "parameter_declaration" | "init_declarator" => {
-            if let Some(child) = node.child_by_field_name("declarator") {
-                collect_c_binding_names(&child, out);
-            } else if let Some(name) = node.child_by_field_name("name") {
-                collect_c_binding_names(&name, out);
+    let mut stack = vec![*node];
+
+    while let Some(current_node) = stack.pop() {
+        match current_node.kind() {
+            "identifier" => out.push(current_node),
+            "field_identifier" => out.push(current_node),
+            "field_declarator" | "parameter_declaration" | "init_declarator" => {
+                if let Some(child) = current_node.child_by_field_name("declarator") {
+                    stack.push(child);
+                } else if let Some(name) = current_node.child_by_field_name("name") {
+                    stack.push(name);
+                }
             }
-        }
-        "pointer_declarator"
-        | "function_declarator"
-        | "array_declarator"
-        | "parenthesized_declarator" => {
-            if let Some(child) = node.child_by_field_name("declarator") {
-                collect_c_binding_names(&child, out);
-            } else {
-                let mut cursor = node.walk();
-                for child in node.children(&mut cursor) {
-                    if child.is_named() && !is_type_context(&child) {
-                        collect_c_binding_names(&child, out);
+            "pointer_declarator"
+            | "function_declarator"
+            | "array_declarator"
+            | "parenthesized_declarator" => {
+                if let Some(child) = current_node.child_by_field_name("declarator") {
+                    stack.push(child);
+                } else {
+                    let mut cursor = current_node.walk();
+                    for child in current_node.children(&mut cursor) {
+                        if child.is_named() && !is_type_context(&child) {
+                            stack.push(child);
+                        }
                     }
                 }
             }
-        }
-        "parameter_list"
-        | "field_declarator_list"
-        | "argument_list"
-        | "initializer_list"
-        | "comma_expression"
-        | "bitfield_clause" => {
-            let mut cursor = node.walk();
-            for child in node.children(&mut cursor) {
-                if child.is_named() && !is_type_context(&child) {
-                    collect_c_binding_names(&child, out);
+            "parameter_list"
+            | "field_declarator_list"
+            | "argument_list"
+            | "initializer_list"
+            | "comma_expression"
+            | "bitfield_clause" => {
+                let mut cursor = current_node.walk();
+                for child in current_node.children(&mut cursor) {
+                    if child.is_named() && !is_type_context(&child) {
+                        stack.push(child);
+                    }
                 }
             }
-        }
-        _ => {
-            let mut cursor = node.walk();
-            for child in node.children(&mut cursor) {
-                if child.is_named() && !is_type_context(&child) {
-                    collect_c_binding_names(&child, out);
+            _ => {
+                let mut cursor = current_node.walk();
+                for child in current_node.children(&mut cursor) {
+                    if child.is_named() && !is_type_context(&child) {
+                        stack.push(child);
+                    }
                 }
             }
         }
@@ -295,16 +293,26 @@ fn is_type_context(node: &Node) -> bool {
 }
 
 fn find_identifier_in_declarator<'a>(declarator: &Node<'a>) -> Option<Node<'a>> {
-    match declarator.kind() {
-        "identifier" => Some(*declarator),
-        "pointer_declarator"
-        | "function_declarator"
-        | "array_declarator"
-        | "parenthesized_declarator" => declarator
-            .child_by_field_name("declarator")
-            .and_then(|d| find_identifier_in_declarator(&d)),
-        _ => None,
+    let mut current = *declarator;
+
+    loop {
+        match current.kind() {
+            "identifier" => return Some(current),
+            "pointer_declarator"
+            | "function_declarator"
+            | "array_declarator"
+            | "parenthesized_declarator" => {
+                if let Some(declarator_child) = current.child_by_field_name("declarator") {
+                    current = declarator_child;
+                } else {
+                    break;
+                }
+            }
+            _ => break,
+        }
     }
+
+    None
 }
 
 fn has_function_declarator(node: &Node) -> bool {

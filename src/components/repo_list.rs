@@ -4,7 +4,7 @@ use leptos_router::components::A;
 
 #[component]
 pub fn RepositoriesList() -> impl IntoView {
-    let repos_resource = Resource::new(|| (), move |_| get_repositories(10));
+    let repos_resource = Resource::new(|| (), move |_| get_repositories(25));
 
     view! {
         <div class="w-full max-w-4xl mt-12 px-4">
