@@ -5,6 +5,7 @@ pub mod db;
 pub mod dsl;
 pub mod pages;
 pub mod services;
+pub mod utils;
 
 #[cfg(feature = "ssr")]
 pub mod server;

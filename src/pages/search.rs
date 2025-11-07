@@ -3,6 +3,7 @@ use crate::db::models::{
 };
 use crate::dsl::DEFAULT_PAGE_SIZE;
 use crate::services::search_service::search;
+use crate::utils::time::{TimePoint, elapsed_since, now_seconds};
 use leptos::either::{Either, EitherOf3};
 use leptos::prelude::*;
 use leptos_router::{
@@ -10,6 +11,8 @@ use leptos_router::{
     hooks::{use_navigate, use_query},
     params::Params,
 };
+#[cfg(feature = "hydrate")]
+use std::time::Duration;
 use urlencoding::encode;
 
 #[derive(Params, PartialEq, Clone, Debug)]
@@ -61,6 +64,76 @@ pub fn SearchPage() -> impl IntoView {
     let path_input = RwSignal::new(String::new());
     let branch_input = RwSignal::new(String::new());
     let language_input = RwSignal::new(String::new());
+    let search_timer_running = RwSignal::new(false);
+    let search_elapsed = RwSignal::new(0.0f64);
+    let search_final_elapsed = RwSignal::new(None::<f64>);
+    let search_started_at = RwSignal::new(None::<TimePoint>);
+    let pending_query_signature = RwSignal::new(None::<String>);
+
+    Effect::new({
+        let query = query.clone();
+        let pending_query_signature = pending_query_signature.clone();
+        let search_timer_running = search_timer_running.clone();
+        let search_elapsed = search_elapsed.clone();
+        let search_final_elapsed = search_final_elapsed.clone();
+        let search_started_at = search_started_at.clone();
+        move |_| {
+            let new_signature = query
+                .get()
+                .ok()
+                .and_then(|params| params_signature(&params));
+            if new_signature != pending_query_signature.get() {
+                pending_query_signature.set(new_signature.clone());
+                if new_signature.is_some() {
+                    search_timer_running.set(true);
+                    search_final_elapsed.set(None);
+                    search_elapsed.set(0.0);
+                    search_started_at.set(Some(now_seconds()));
+                    schedule_search_timer_tick(
+                        search_elapsed,
+                        search_started_at,
+                        search_timer_running,
+                    );
+                } else {
+                    search_timer_running.set(false);
+                    search_started_at.set(None);
+                    search_final_elapsed.set(None);
+                }
+            }
+        }
+    });
+
+    Effect::new({
+        let pending_query_signature = pending_query_signature.clone();
+        let search_timer_running = search_timer_running.clone();
+        let search_elapsed = search_elapsed.clone();
+        let search_final_elapsed = search_final_elapsed.clone();
+        let search_started_at = search_started_at.clone();
+        move |_| {
+            if let Some(result) = search_results.get() {
+                match result {
+                    Ok(results_page) => {
+                        if let Some(result_signature) = results_signature(&results_page) {
+                            if pending_query_signature.get() == Some(result_signature.clone()) {
+                                search_timer_running.set(false);
+                                if let Some(started) = search_started_at.get_untracked() {
+                                    let elapsed_now = elapsed_since(started);
+                                    search_elapsed.set(elapsed_now);
+                                    search_final_elapsed.set(Some(elapsed_now));
+                                }
+                                search_started_at.set(None);
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        search_timer_running.set(false);
+                        search_started_at.set(None);
+                        search_final_elapsed.set(None);
+                    }
+                }
+            }
+        }
+    });
 
     let navigate_for_chips = navigate.clone();
     let navigate_for_filters = navigate.clone();
@@ -110,7 +183,7 @@ pub fn SearchPage() -> impl IntoView {
                             "Search Insights"
                         </h4>
                         <Suspense fallback=move || {
-                            view! { <p class="text-xs text-gray-500">"Loading stats..."</p> }
+                            view! { <SearchStatsSkeleton /> }
                         }>
                             {move || match search_results.get() {
                                 Some(Ok(results_page)) => {
@@ -148,12 +221,7 @@ pub fn SearchPage() -> impl IntoView {
                                     }
                                         .into_any()
                                 }
-                                None => {
-                                    view! {
-                                        <p class="text-xs text-gray-500">"Loading stats..."</p>
-                                    }
-                                        .into_any()
-                                }
+                                None => view! { <SearchStatsSkeleton /> }.into_any(),
                             }}
                         </Suspense>
                     </div>
@@ -197,8 +265,36 @@ pub fn SearchPage() -> impl IntoView {
                             }
                         }}
                     </div>
+                    {move || {
+                        if search_timer_running.get() {
+                            view! {
+                                <div class="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+                                    <span class="loading loading-spinner loading-xs text-blue-500"></span>
+                                    <span>
+                                        {format!(
+                                            "Searching... {}",
+                                            format_elapsed_time(search_elapsed.get()),
+                                        )}
+                                    </span>
+                                </div>
+                            }
+                                .into_any()
+                        } else if let Some(final_time) = search_final_elapsed.get() {
+                            view! {
+                                <div class="text-xs text-gray-500 dark:text-gray-400">
+                                    {format!(
+                                        "Search completed in {}",
+                                        format_elapsed_time(final_time),
+                                    )}
+                                </div>
+                            }
+                                .into_any()
+                        } else {
+                            view! { <></> }.into_any()
+                        }
+                    }}
                     <Suspense fallback=|| {
-                        view! { <p class="text-center py-8">"Loading..."</p> }
+                        view! { <SearchResultsSkeleton /> }
                     }>
                         {move || {
                             search_results
@@ -342,6 +438,115 @@ where
                 </button>
             </div>
         </div>
+    }
+}
+
+#[component]
+fn SearchStatsSkeleton() -> impl IntoView {
+    view! {
+        <div class="space-y-4">
+            {(0..3)
+                .map(|_| {
+                    view! {
+                        <div class="space-y-3">
+                            <div class="skeleton h-3 w-28 rounded"></div>
+                            {(0..3)
+                                .map(|_| {
+                                    view! {
+                                        <div class="flex flex-col gap-2 rounded-md border border-gray-200 dark:border-gray-700 p-2 bg-gray-50 dark:bg-gray-900/30">
+                                            <div class="flex items-center justify-between gap-2">
+                                                <span class="skeleton h-4 w-24 rounded"></span>
+                                                <span class="skeleton h-3 w-10 rounded"></span>
+                                            </div>
+                                            <div class="flex gap-2">
+                                                <span class="skeleton h-6 w-16 rounded"></span>
+                                                <span class="skeleton h-6 w-16 rounded"></span>
+                                            </div>
+                                        </div>
+                                    }
+                                })
+                                .collect_view()}
+                        </div>
+                    }
+                })
+                .collect_view()}
+        </div>
+    }
+}
+
+#[component]
+fn SearchResultsSkeleton() -> impl IntoView {
+    view! {
+        <div class="space-y-4">
+            <div class="skeleton h-4 w-56 rounded"></div>
+            {(0..3)
+                .map(|_| {
+                    view! {
+                        <div class="space-y-3 rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4">
+                            <div class="skeleton h-4 w-3/4 rounded"></div>
+                            <div class="skeleton h-3 w-full rounded"></div>
+                            <div class="skeleton h-3 w-5/6 rounded"></div>
+                        </div>
+                    }
+                })
+                .collect_view()}
+            <div class="flex items-center justify-between pt-2">
+                <span class="skeleton h-9 w-24 rounded"></span>
+                <span class="skeleton h-4 w-16 rounded"></span>
+                <span class="skeleton h-9 w-24 rounded"></span>
+            </div>
+        </div>
+    }
+}
+
+#[cfg_attr(not(feature = "hydrate"), allow(unused_variables))]
+fn schedule_search_timer_tick(
+    elapsed: RwSignal<f64>,
+    started_at: RwSignal<Option<TimePoint>>,
+    is_running: RwSignal<bool>,
+) {
+    #[cfg(feature = "hydrate")]
+    {
+        set_timeout(
+            move || {
+                if !is_running.get_untracked() {
+                    return;
+                }
+                if let Some(started) = started_at.get_untracked() {
+                    elapsed.set(elapsed_since(started));
+                }
+                schedule_search_timer_tick(elapsed, started_at, is_running);
+            },
+            Duration::from_millis(80),
+        );
+    }
+}
+
+fn format_elapsed_time(seconds: f64) -> String {
+    if seconds >= 10.0 {
+        format!("{seconds:.1}s")
+    } else if seconds >= 1.0 {
+        format!("{seconds:.2}s")
+    } else {
+        format!("{seconds:.3}s")
+    }
+}
+
+fn params_signature(params: &SearchParams) -> Option<String> {
+    params
+        .q
+        .as_ref()
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
+        .map(|text| format!("{}::{}", text, params.page.unwrap_or(1)))
+}
+
+fn results_signature(results: &SearchResultsPage) -> Option<String> {
+    let trimmed = results.query.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(format!("{}::{}", trimmed, results.page))
     }
 }
 

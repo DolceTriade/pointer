@@ -1748,14 +1748,15 @@ fn CodeIntelPanel(
                                 if selected_symbol.get().is_none() {
                                     return None;
                                 }
-
                                 let filter_text = snippet_filter.get();
                                 let needle = filter_text.to_lowercase();
                                 insights_resource
                                     .get()
                                     .map(|result| match result {
                                         Ok(Some(data)) => {
-                                            if let Some(node) = insights_scroll_container.get_untracked() {
+                                            if let Some(node) = insights_scroll_container
+                                                .get_untracked()
+                                            {
                                                 node.set_scroll_top(0);
                                             }
                                             let SymbolInsightsResponse { commit, matches, .. } = data;
@@ -1784,6 +1785,7 @@ fn CodeIntelPanel(
                                                 } else {
                                                     "No snippets matched the local filter.".to_string()
                                                 };
+
                                                 view! {
                                                     <p class="text-sm text-gray-500 dark:text-gray-400">
                                                         {message}
