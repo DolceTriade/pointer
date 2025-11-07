@@ -3,19 +3,25 @@ use leptos::tachys::dom::event_target_checked;
 use leptos::{either::Either, prelude::*};
 use leptos_darkmode::Darkmode;
 use leptos_router::hooks::{use_query, use_url};
+use urlencoding::decode;
 
 #[component]
 pub fn Header() -> impl IntoView {
     let mut darkmode = use_context::<Darkmode>();
     let route = use_url();
     let query_struct = use_query::<crate::pages::search::SearchParams>();
+    let contextual_defaults = Memo::new(move |_| {
+        let url = route.read();
+        contextual_query_for_path(url.path())
+    });
     let query = Memo::new(move |_| {
         query_struct
             .read()
             .as_ref()
             .ok()
             .and_then(|q| q.q.clone())
-            .unwrap_or_default()
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| contextual_defaults.get())
     });
 
     view! {
@@ -86,5 +92,134 @@ pub fn Header() -> impl IntoView {
                 </details>
             </div>
         </header>
+    }
+}
+
+fn contextual_query_for_path(path: &str) -> String {
+    let trimmed = path.trim_start_matches('/');
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let has_trailing_slash = trimmed.ends_with('/');
+    let segments: Vec<String> = trimmed
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .map(decode_segment)
+        .collect();
+
+    if segments.is_empty() || segments[0] != "repo" {
+        return String::new();
+    }
+
+    let mut tokens = Vec::new();
+    if let Some(repo) = segments.get(1) {
+        if let Some(token) = build_contextual_token("repo", repo) {
+            tokens.push(token);
+        }
+    } else {
+        return String::new();
+    }
+
+    if segments.get(2).map(|s| s.as_str()) == Some("tree") {
+        if let Some(branch) = segments.get(3) {
+            if let Some(token) = build_contextual_token("branch", branch) {
+                tokens.push(token);
+            }
+        }
+
+        if segments.len() > 4 {
+            let mut path_value = segments[4..].join("/");
+            if has_trailing_slash && !path_value.ends_with('/') {
+                path_value.push('/');
+            }
+            if let Some(token) = build_path_token(&path_value, has_trailing_slash) {
+                tokens.push(token);
+            }
+        }
+    }
+
+    tokens.join(" ")
+}
+
+fn decode_segment(segment: &str) -> String {
+    decode(segment)
+        .map(|cow| cow.into_owned())
+        .unwrap_or_else(|_| segment.to_string())
+}
+
+fn build_contextual_token(key: &str, value: &str) -> Option<String> {
+    if value.is_empty() {
+        return None;
+    }
+    let needs_quotes = value.chars().any(char::is_whitespace) || value.contains('"');
+    let token = if needs_quotes {
+        let escaped = value.replace('"', "\\\"");
+        format!(r#"{key}:"{}""#, escaped)
+    } else {
+        format!("{key}:{value}")
+    };
+    Some(token)
+}
+
+fn build_path_token(path: &str, is_directory: bool) -> Option<String> {
+    if path.is_empty() {
+        return None;
+    }
+    let mut value = path.to_string();
+    if is_directory {
+        if !value.ends_with('/') {
+            value.push('/');
+        }
+        if !value.ends_with('*') {
+            value.push('*');
+        }
+    }
+    build_contextual_token("path", &value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::contextual_query_for_path;
+
+    #[test]
+    fn contextual_query_repo_only() {
+        assert_eq!(
+            contextual_query_for_path("/repo/Pointer"),
+            "repo:Pointer".to_string()
+        );
+    }
+
+    #[test]
+    fn contextual_query_repo_branch_path() {
+        assert_eq!(
+            contextual_query_for_path("/repo/foo/tree/main/src/lib.rs"),
+            "repo:foo branch:main path:src/lib.rs".to_string()
+        );
+    }
+
+    #[test]
+    fn contextual_query_handles_encoded_segments_and_spaces() {
+        assert_eq!(
+            contextual_query_for_path("/repo/Foo%20Bar/tree/release%2F1.0/docs/My%20Guide/"),
+            r#"repo:"Foo Bar" branch:release/1.0 path:"docs/My Guide/*""#.to_string()
+        );
+    }
+
+    #[test]
+    fn contextual_query_directory_adds_wildcard() {
+        assert_eq!(
+            contextual_query_for_path("/repo/foo/tree/main/docs"),
+            "repo:foo branch:main path:docs".to_string()
+        );
+        assert_eq!(
+            contextual_query_for_path("/repo/foo/tree/main/docs/"),
+            "repo:foo branch:main path:docs/*".to_string()
+        );
+    }
+
+    #[test]
+    fn contextual_query_non_repo_path_returns_empty() {
+        assert!(contextual_query_for_path("/search").is_empty());
     }
 }
