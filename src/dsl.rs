@@ -110,8 +110,23 @@ pub enum ParseError {
 }
 
 // A simple recursive descent parser for the Zoekt query language
+#[derive(Debug, Clone)]
+struct Token {
+    value: String,
+    first_colon_in_quotes: bool,
+}
+
+impl Token {
+    fn new(value: String, first_colon_in_quotes: bool) -> Self {
+        Self {
+            value,
+            first_colon_in_quotes,
+        }
+    }
+}
+
 pub struct QueryParser {
-    tokens: Vec<String>,
+    tokens: Vec<Token>,
     pos: usize,
 }
 
@@ -122,10 +137,10 @@ impl QueryParser {
     }
 
     fn peek(&self) -> Option<&str> {
-        self.tokens.get(self.pos).map(|s| s.as_str())
+        self.tokens.get(self.pos).map(|token| token.value.as_str())
     }
 
-    fn consume(&mut self) -> Option<String> {
+    fn consume(&mut self) -> Option<Token> {
         if self.pos < self.tokens.len() {
             let token = self.tokens[self.pos].clone();
             self.pos += 1;
@@ -179,31 +194,42 @@ impl QueryParser {
 
     fn parse_term(&mut self) -> Result<QueryNode, ParseError> {
         if let Some(token) = self.consume() {
-            if token.starts_with('-') {
+            let token_value = token.value;
+            if token_value.starts_with('-') {
                 // Handle negation
-                let inner_token = token[1..].to_string();
+                let inner_token = token_value[1..].to_string();
                 if inner_token.starts_with('(') {
                     // -(...) case
                     let inner_expr = self.parse_group(&inner_token[1..])?;
                     Ok(QueryNode::Not(Box::new(inner_expr)))
-                } else if let Some((filter_type, value)) = inner_token.split_once(':') {
-                    // -filter:value case
-                    let filter = self.parse_filter(filter_type, value.to_string())?;
-                    Ok(QueryNode::Not(Box::new(QueryNode::Filter(filter))))
+                } else if !token.first_colon_in_quotes {
+                    if let Some((filter_type, value)) = inner_token.split_once(':') {
+                        // -filter:value case
+                        let filter = self.parse_filter(filter_type, value.to_string())?;
+                        Ok(QueryNode::Not(Box::new(QueryNode::Filter(filter))))
+                    } else {
+                        // -term case
+                        Ok(QueryNode::Not(Box::new(QueryNode::Term(inner_token))))
+                    }
                 } else {
                     // -term case
                     Ok(QueryNode::Not(Box::new(QueryNode::Term(inner_token))))
                 }
-            } else if token.starts_with('(') {
+            } else if token_value.starts_with('(') {
                 // Handle group
-                self.parse_group(&token[1..])
-            } else if let Some((filter_type, value)) = token.split_once(':') {
-                // Handle filter
-                let filter = self.parse_filter(filter_type, value.to_string())?;
-                Ok(QueryNode::Filter(filter))
+                self.parse_group(&token_value[1..])
+            } else if !token.first_colon_in_quotes {
+                if let Some((filter_type, value)) = token_value.split_once(':') {
+                    // Handle filter
+                    let filter = self.parse_filter(filter_type, value.to_string())?;
+                    Ok(QueryNode::Filter(filter))
+                } else {
+                    // Regular term
+                    Ok(QueryNode::Term(token_value))
+                }
             } else {
                 // Regular term
-                Ok(QueryNode::Term(token))
+                Ok(QueryNode::Term(token_value))
             }
         } else {
             Err(ParseError::EmptyQuery)
@@ -219,18 +245,19 @@ impl QueryParser {
             // Look for the matching parenthesis
             let mut paren_count = 1; // We already have one '(' from initial_content
             while let Some(token) = self.consume() {
-                if token.contains('(') {
-                    paren_count += token.matches('(').count();
+                let token_value = token.value;
+                if token_value.contains('(') {
+                    paren_count += token_value.matches('(').count();
                 }
-                if token.contains(')') {
-                    paren_count -= token.matches(')').count();
+                if token_value.contains(')') {
+                    paren_count -= token_value.matches(')').count();
                     if paren_count == 0 {
                         // Found the matching parenthesis
-                        group_content.push_str(&format!(" {}", token));
+                        group_content.push_str(&format!(" {}", token_value));
                         break;
                     }
                 }
-                group_content.push_str(&format!(" {}", token));
+                group_content.push_str(&format!(" {}", token_value));
             }
         }
 
@@ -393,14 +420,37 @@ fn normalize_line_anchors(pattern: &str) -> (String, bool, bool) {
 }
 
 // Simple tokenizer that handles quoted strings and basic tokens
-fn tokenize_query(query: &str) -> Vec<String> {
+fn tokenize_query(query: &str) -> Vec<Token> {
+    fn push_token(
+        tokens: &mut Vec<Token>,
+        token: &mut String,
+        first_colon_in_quotes: &mut Option<bool>,
+    ) {
+        if !token.is_empty() {
+            tokens.push(Token::new(
+                token.clone(),
+                first_colon_in_quotes.unwrap_or(false),
+            ));
+            token.clear();
+            *first_colon_in_quotes = None;
+        }
+    }
+
     let mut tokens = Vec::new();
     let mut chars = query.chars().peekable();
     let mut current_token = String::new();
     let mut in_quotes = false;
     let mut quote_char = '"';
+    let mut first_colon_in_quotes = None;
+    let mut escape_next = false;
 
     while let Some(ch) = chars.next() {
+        if escape_next {
+            current_token.push(ch);
+            escape_next = false;
+            continue;
+        }
+
         match ch {
             '"' | '\'' => {
                 if !in_quotes {
@@ -408,42 +458,39 @@ fn tokenize_query(query: &str) -> Vec<String> {
                     quote_char = ch;
                 } else if ch == quote_char {
                     in_quotes = false;
-                    if !current_token.is_empty() {
-                        tokens.push(current_token.clone());
-                        current_token.clear();
-                    }
+                    push_token(&mut tokens, &mut current_token, &mut first_colon_in_quotes);
                 } else {
                     current_token.push(ch);
                 }
             }
-            ':' if !in_quotes => {
+            '\\' if in_quotes => {
+                escape_next = true;
+            }
+            ':' => {
+                if first_colon_in_quotes.is_none() {
+                    first_colon_in_quotes = Some(in_quotes);
+                }
                 current_token.push(ch);
-                if let Some(&next_ch) = chars.peek() {
-                    if next_ch != '"' && next_ch != '\'' {
-                        // This is a filter, so collect the value
-                        while let Some(&next_ch) = chars.peek() {
-                            if next_ch.is_whitespace() {
-                                break;
+                if !in_quotes {
+                    if let Some(&next_ch) = chars.peek() {
+                        if next_ch != '"' && next_ch != '\'' {
+                            while let Some(&next_ch) = chars.peek() {
+                                if next_ch.is_whitespace() {
+                                    break;
+                                }
+                                current_token.push(chars.next().unwrap());
                             }
-                            current_token.push(chars.next().unwrap());
+                            push_token(&mut tokens, &mut current_token, &mut first_colon_in_quotes);
                         }
-                        tokens.push(current_token.clone());
-                        current_token.clear();
                     }
                 }
             }
             ' ' | '\t' | '\n' | '\r' if !in_quotes => {
-                if !current_token.is_empty() {
-                    tokens.push(current_token.clone());
-                    current_token.clear();
-                }
+                push_token(&mut tokens, &mut current_token, &mut first_colon_in_quotes);
             }
             '(' | ')' if !in_quotes => {
-                if !current_token.is_empty() {
-                    tokens.push(current_token.clone());
-                    current_token.clear();
-                }
-                tokens.push(ch.to_string());
+                push_token(&mut tokens, &mut current_token, &mut first_colon_in_quotes);
+                tokens.push(Token::new(ch.to_string(), false));
             }
             _ => {
                 current_token.push(ch);
@@ -451,15 +498,12 @@ fn tokenize_query(query: &str) -> Vec<String> {
         }
     }
 
-    if !current_token.is_empty() {
-        tokens.push(current_token);
-    }
+    push_token(&mut tokens, &mut current_token, &mut first_colon_in_quotes);
 
-    // Handle 'or' operator as separate token
-    let mut final_tokens = Vec::new();
+    let mut final_tokens = Vec::with_capacity(tokens.len());
     for token in tokens {
-        if token == "or" || token == "OR" {
-            final_tokens.push("or".to_string());
+        if token.value == "or" || token.value == "OR" {
+            final_tokens.push(Token::new("or".to_string(), false));
         } else {
             final_tokens.push(token);
         }
@@ -961,7 +1005,52 @@ mod tests {
     #[test]
     fn test_tokenize_quotes() {
         let tokens = tokenize_query("content:\"hello world\" repo:myrepo");
-        assert_eq!(tokens, vec!["content:hello world", "repo:myrepo"]);
+        let values: Vec<_> = tokens.into_iter().map(|t| t.value).collect();
+        assert_eq!(values, vec!["content:hello world", "repo:myrepo"]);
+    }
+
+    #[test]
+    fn tokenize_marks_colon_inside_quotes() {
+        let tokens = tokenize_query("\"foo:bar\"");
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].value, "foo:bar");
+        assert!(tokens[0].first_colon_in_quotes);
+    }
+
+    #[test]
+    fn tokenize_supports_escaped_quotes() {
+        let tokens = tokenize_query(r#"content:"foo \"bar\" baz""#);
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].value, r#"content:foo "bar" baz"#);
+    }
+
+    #[test]
+    fn quoted_term_with_colon_parses_as_term() {
+        let result = parse_query("\"foo:bar\"").expect("query should parse");
+        match result {
+            QueryNode::Term(term) => assert_eq!(term, "foo:bar"),
+            other => panic!("expected term node, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn filter_with_quoted_value_still_parses() {
+        let result = parse_query("repo:\"foo:bar\"").expect("query should parse");
+        match result {
+            QueryNode::Filter(Filter::Repo(repo)) => assert_eq!(repo, "foo:bar"),
+            other => panic!("expected repo filter, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn content_filter_with_escaped_quotes_parses() {
+        let result = parse_query(r#"content:"foo \"bar\" baz""#).expect("query should parse");
+        match result {
+            QueryNode::Filter(Filter::Content(value)) => {
+                assert_eq!(value, r#"foo "bar" baz"#)
+            }
+            other => panic!("expected content filter, got {:?}", other),
+        }
     }
 
     #[test]

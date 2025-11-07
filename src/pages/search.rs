@@ -750,24 +750,213 @@ where
 }
 
 fn remove_token(query: &str, token: &str) -> String {
-    let mut parts: Vec<_> = query
-        .split_whitespace()
-        .filter(|part| *part != token)
-        .map(|s| s.to_string())
+    let mut parts: Vec<_> = split_query_tokens(query)
+        .into_iter()
+        .filter(|part| part != token)
         .collect();
     parts.dedup();
     parts.join(" ")
 }
 
 fn filter_chips(query: &str) -> Vec<(String, String)> {
-    let mut chips = Vec::new();
-    for token in query.split_whitespace() {
-        if let Some((key, value)) = token.split_once(':') {
-            let label = format!("{}: {}", key, value.trim_matches('"'));
-            chips.push((label, token.to_string()));
+    split_query_tokens(query)
+        .into_iter()
+        .filter_map(|token| {
+            parse_filter_token(&token).map(|filter| {
+                let value_label = strip_enclosing_quotes(&filter.value);
+                let label = if filter.negated {
+                    format!("-{}: {}", filter.key, value_label)
+                } else {
+                    format!("{}: {}", filter.key, value_label)
+                };
+                (label, token)
+            })
+        })
+        .collect()
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ParsedFilterToken {
+    negated: bool,
+    key: String,
+    value: String,
+}
+
+fn parse_filter_token(token: &str) -> Option<ParsedFilterToken> {
+    let trimmed = token.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed == "(" || trimmed == ")" {
+        return None;
+    }
+
+    let (negated, remainder) = if let Some(rest) = trimmed.strip_prefix('-') {
+        (true, rest)
+    } else {
+        (false, trimmed)
+    };
+
+    let colon_idx = find_unquoted_colon(remainder)?;
+    let (key, value_with_colon) = remainder.split_at(colon_idx);
+    let value = &value_with_colon[1..];
+
+    if key.is_empty() || value.is_empty() {
+        return None;
+    }
+
+    Some(ParsedFilterToken {
+        negated,
+        key: key.to_string(),
+        value: value.to_string(),
+    })
+}
+
+fn split_query_tokens(query: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    let mut quote_char = '\0';
+    let mut escape_next = false;
+
+    for ch in query.chars() {
+        if escape_next {
+            current.push(ch);
+            escape_next = false;
+            continue;
+        }
+
+        match ch {
+            '\\' if in_quotes => {
+                current.push(ch);
+                escape_next = true;
+            }
+            '"' | '\'' => {
+                current.push(ch);
+                if in_quotes {
+                    if ch == quote_char {
+                        in_quotes = false;
+                        quote_char = '\0';
+                    }
+                } else {
+                    in_quotes = true;
+                    quote_char = ch;
+                }
+            }
+            '(' | ')' if !in_quotes => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+                tokens.push(ch.to_string());
+            }
+            c if c.is_whitespace() && !in_quotes => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(ch),
         }
     }
-    chips
+
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+
+    tokens
+}
+
+fn find_unquoted_colon(input: &str) -> Option<usize> {
+    let mut in_quotes = false;
+    let mut quote_char = '\0';
+    let mut escape_next = false;
+
+    for (idx, ch) in input.char_indices() {
+        if escape_next {
+            escape_next = false;
+            continue;
+        }
+
+        match ch {
+            '\\' if in_quotes => {
+                escape_next = true;
+            }
+            '"' | '\'' => {
+                if in_quotes {
+                    if ch == quote_char {
+                        in_quotes = false;
+                        quote_char = '\0';
+                    }
+                } else {
+                    in_quotes = true;
+                    quote_char = ch;
+                }
+            }
+            ':' if !in_quotes => {
+                return Some(idx);
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+fn strip_enclosing_quotes(value: &str) -> String {
+    let trimmed = value.trim();
+    let mut chars = trimmed.chars();
+    let first = chars.next();
+    let last = trimmed.chars().last();
+    if let (Some(start), Some(end)) = (first, last) {
+        if trimmed.len() >= 2 && ((start == '"' && end == '"') || (start == '\'' && end == '\'')) {
+            return trimmed[1..trimmed.len() - 1].to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_query_tokens_preserves_quoted_filters() {
+        let tokens = split_query_tokens(r#"repo:Unvanquished regex:"def .* (.*):" lang:rust"#);
+        assert_eq!(
+            tokens,
+            vec![
+                "repo:Unvanquished".to_string(),
+                r#"regex:"def .* (.*):""#.to_string(),
+                "lang:rust".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn filter_chips_ignore_colons_inside_quotes() {
+        let chips = filter_chips(r#"repo:Unvanquished regex:"def .* (.*):" -branch:"feature:123""#);
+        assert_eq!(chips.len(), 3);
+        assert_eq!(
+            chips[0],
+            (
+                "repo: Unvanquished".to_string(),
+                "repo:Unvanquished".to_string()
+            )
+        );
+        assert_eq!(
+            chips[1],
+            (
+                "regex: def .* (.*):".to_string(),
+                r#"regex:"def .* (.*):""#.to_string()
+            )
+        );
+        assert_eq!(
+            chips[2],
+            (
+                "-branch: feature:123".to_string(),
+                r#"-branch:"feature:123""#.to_string()
+            )
+        );
+    }
 }
 
 fn submit_search<F>(navigate: &F, query_text: &RwSignal<String>, page: usize)
@@ -800,13 +989,16 @@ where
     F: Fn(&str, NavigateOptions),
 {
     let mut current = query_text.get();
-    if !current.split_whitespace().any(|existing| existing == token) {
-        if !current.trim().is_empty() {
-            current.push(' ');
-        }
-        current.push_str(&token);
-        query_text.set(current);
+    let existing_tokens = split_query_tokens(&current);
+    if existing_tokens.iter().any(|existing| existing == &token) {
+        return;
     }
+
+    if !current.trim().is_empty() {
+        current.push(' ');
+    }
+    current.push_str(&token);
+    query_text.set(current);
 
     submit_search(navigate, query_text, 1);
 }
