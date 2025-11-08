@@ -41,15 +41,21 @@ pub fn RepoDetailPage() -> impl IntoView {
     let branches = Resource::new(repo_name, |repo| get_repo_branches(repo));
 
     view! {
-        <main class="flex-grow flex flex-col items-center justify-start pt-8 p-4">
+        <main class="flex-grow flex flex-col items-center justify-start pt-8 p-4 text-slate-900 dark:text-slate-100">
             <div class="w-full max-w-3xl">
-                <h1 class="text-2xl font-semibold text-slate-100">{move || repo_name()}</h1>
-                <p class="mt-2 text-sm text-slate-400">
+                <h1 class="text-2xl font-semibold text-slate-900 dark:text-slate-100">
+                    {move || repo_name()}
+                </h1>
+                <p class="mt-2 text-sm text-slate-600 dark:text-slate-300">
                     "Pick a branch to browse files and code insights."
                 </p>
 
                 <Suspense fallback=move || {
-                    view! { <p class="mt-6 text-sm text-slate-400">"Loading branches..."</p> }
+                    view! {
+                        <p class="mt-6 text-sm text-slate-600 dark:text-slate-300">
+                            "Loading branches..."
+                        </p>
+                    }
                 }>
                     {move || {
                         branches
@@ -58,7 +64,7 @@ pub fn RepoDetailPage() -> impl IntoView {
                                 Err(e) => {
                                     EitherOf3::A(
                                         view! {
-                                            <p class="mt-6 text-sm text-red-400">
+                                            <p class="mt-6 text-sm text-red-500 dark:text-red-300">
                                                 "Error loading repository: " {e.to_string()}
                                             </p>
                                         },
@@ -67,7 +73,7 @@ pub fn RepoDetailPage() -> impl IntoView {
                                 Ok(branches) if branches.is_empty() => {
                                     EitherOf3::B(
                                         view! {
-                                            <p class="mt-6 text-sm text-slate-400">
+                                            <p class="mt-6 text-sm text-slate-600 dark:text-slate-300">
                                                 "This repository has no indexed branches."
                                             </p>
                                         },
@@ -93,20 +99,20 @@ pub fn RepoDetailPage() -> impl IntoView {
                                             <section class="mt-6">
                                                 <header class="flex items-center justify-between">
                                                     <div>
-                                                        <h2 class="text-lg font-semibold text-slate-100">
+                                                        <h2 class="text-lg font-semibold text-slate-900 dark:text-slate-100">
                                                             "Available branches"
                                                         </h2>
-                                                        <p class="text-xs text-slate-400">
+                                                        <p class="text-xs text-slate-600 dark:text-slate-300">
                                                             {format!("Showing {} of {} branches", visible_count, total)}
                                                         </p>
                                                     </div>
-                                                    <span class="text-xs text-slate-500">
+                                                    <span class="text-xs text-slate-500 dark:text-slate-300">
                                                         {format!("{} total", total)}
                                                     </span>
                                                 </header>
 
-                                                <div class="mt-4 border border-slate-800/80 rounded-lg bg-slate-900/60 shadow-lg">
-                                                    <ul class="divide-y divide-slate-800 max-h-80 overflow-y-auto">
+                                                <div class="mt-4 border border-slate-200 dark:border-slate-800/80 rounded-lg bg-white/85 dark:bg-slate-900/60 shadow-lg backdrop-blur">
+                                                    <ul class="divide-y divide-slate-200 dark:divide-slate-800 max-h-80 overflow-y-auto">
                                                         {visible
                                                             .into_iter()
                                                             .map(|branch| {
@@ -115,12 +121,14 @@ pub fn RepoDetailPage() -> impl IntoView {
                                                                     <li class="last:border-b-0">
                                                                         <A
                                                                             href=href
-                                                                            attr:class="flex items-center justify-between gap-3 px-4 py-3 text-left transition-colors hover:bg-slate-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-500"
+                                                                            attr:class="flex items-center justify-between gap-3 px-4 py-3 text-left transition-colors text-slate-900 dark:text-slate-100 rounded-md hover:bg-slate-100/90 dark:hover:bg-slate-800/70 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-600 dark:focus-visible:outline-sky-400"
                                                                         >
-                                                                            <span class="font-mono text-sm text-slate-100 break-words">
+                                                                            <span class="font-mono text-sm text-slate-900 dark:text-slate-100 break-words">
                                                                                 {branch.clone()}
                                                                             </span>
-                                                                            <span class="text-xs text-slate-400">"Open"</span>
+                                                                            <span class="text-xs text-slate-600 dark:text-slate-200">
+                                                                                "Open"
+                                                                            </span>
                                                                         </A>
                                                                     </li>
                                                                 }
@@ -135,7 +143,7 @@ pub fn RepoDetailPage() -> impl IntoView {
                                                         view! {
                                                             <button
                                                                 type="button"
-                                                                class="mt-4 text-sm font-medium text-sky-400 hover:text-sky-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-500"
+                                                                class="mt-4 text-sm font-medium text-sky-600 dark:text-sky-400 hover:text-sky-500 dark:hover:text-sky-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-600 dark:focus-visible:outline-sky-400"
                                                                 on:click=move |_| {
                                                                     set_show_all.update(|value| *value = !*value)
                                                                 }
@@ -155,7 +163,7 @@ pub fn RepoDetailPage() -> impl IntoView {
                                                 {if !show_all && total > visible_count {
                                                     Some(
                                                         view! {
-                                                            <p class="mt-2 text-xs text-slate-500">
+                                                            <p class="mt-2 text-xs text-slate-600 dark:text-slate-400">
                                                                 {format!(
                                                                     "Showing the first {} branches. Use the button above to see the rest.",
                                                                     MAX_VISIBLE_BRANCHES,

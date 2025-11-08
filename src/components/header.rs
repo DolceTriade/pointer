@@ -25,11 +25,13 @@ pub fn Header() -> impl IntoView {
     });
 
     view! {
-        <header class="navbar flex justify-between bg-base-100 shadow-md w-full">
+        <header class="navbar flex justify-between w-full shadow-md border-b border-slate-200/70 dark:border-slate-800/70 bg-white/90 dark:bg-slate-950/80 text-slate-900 dark:text-white backdrop-blur">
             <div class="flex-none items-center justify-between mx-auto p-2">
                 <a href="/" class="flex items-center gap-2">
                     <img class="hover:animate-spin w-14" src="/asterisk.svg" alt="Logo" />
-                    <span class="text-xl font-semibold whitespace-nowrap">Pointer</span>
+                    <span class="text-xl font-semibold whitespace-nowrap text-slate-900 dark:text-white">
+                        Pointer
+                    </span>
                 </a>
             </div>
             <div class="flex-1 flex justify-center">
@@ -41,7 +43,7 @@ pub fn Header() -> impl IntoView {
                     }
                 }}
             </div>
-            <div class="flex-none">
+            <div class="flex-none text-slate-600 dark:text-white">
                 <details class="dropdown dropdown-end">
                     <summary class="btn btn-ghost btn-circle">
                         <svg
@@ -64,12 +66,14 @@ pub fn Header() -> impl IntoView {
                             />
                         </svg>
                     </summary>
-                    <ul class="mt-3 p-2 shadow menu menu-sm dropdown-content bg-base-100 rounded-box w-56 z-50">
+                    <ul class="mt-3 p-2 shadow menu menu-sm dropdown-content rounded-box w-56 z-50 bg-white/95 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-900 dark:text-slate-100">
                         <li>
                             <div class="p-2">
                                 <div class="form-control">
                                     <label class="cursor-pointer label">
-                                        <span class="label-text">Dark Mode</span>
+                                        <span class="label-text text-slate-700 dark:text-slate-200">
+                                            Dark Mode
+                                        </span>
                                         <input
                                             type="checkbox"
                                             class="toggle toggle-primary"

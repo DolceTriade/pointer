@@ -545,16 +545,24 @@ fn Breadcrumbs(
     };
 
     view! {
-        <div class="flex flex-wrap items-center gap-3 mb-6">
-            <div class="text-sm breadcrumbs flex-1 min-w-0">
+        <div class="flex flex-wrap items-center gap-3 mb-6 text-slate-700 dark:text-slate-300">
+            <div class="text-sm breadcrumbs flex-1 min-w-0 text-inherit">
                 <ul>
                     <li>
-                        <A href=move || format!("/repo/{}", repo())>{move || repo()}</A>
+                        <A
+                            href=move || format!("/repo/{}", repo())
+                            attr:class="text-slate-700 dark:text-slate-200 hover:text-slate-900 dark:hover:text-white"
+                        >
+                            {move || repo()}
+                        </A>
                     </li>
                     <li>
-                        <A href=move || {
-                            format!("/repo/{}/tree/{}/", repo(), branch())
-                        }>{move || branch()}</A>
+                        <A
+                            href=move || format!("/repo/{}/tree/{}/", repo(), branch())
+                            attr:class="text-slate-700 dark:text-slate-200 hover:text-slate-900 dark:hover:text-white"
+                        >
+                            {move || branch()}
+                        </A>
                     </li>
                     <For
                         each=move || segments.get()
@@ -569,9 +577,24 @@ fn Breadcrumbs(
                             view! {
                                 <li>
                                     {if is_last {
-                                        Either::Left(view! { <span class="truncate">{name}</span> })
+                                        Either::Left(
+                                            view! {
+                                                <span class="truncate font-medium text-slate-900 dark:text-white">
+                                                    {name}
+                                                </span>
+                                            },
+                                        )
                                     } else {
-                                        Either::Right(view! { <A href=full_path>{name}</A> })
+                                        Either::Right(
+                                            view! {
+                                                <A
+                                                    href=full_path
+                                                    attr:class="text-slate-700 dark:text-slate-200 hover:text-slate-900 dark:hover:text-white"
+                                                >
+                                                    {name}
+                                                </A>
+                                            },
+                                        )
                                     }}
                                 </li>
                             }
@@ -581,7 +604,7 @@ fn Breadcrumbs(
             </div>
             <Show when=move || !segments.get().is_empty() fallback=|| ()>
                 <button
-                    class="btn btn-xs btn-outline gap-2"
+                    class="inline-flex items-center gap-2 text-xs font-semibold border border-slate-300 dark:border-slate-600 rounded-md px-3 py-1.5 bg-white/80 dark:bg-slate-900/50 text-slate-700 dark:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
                     type="button"
                     on:click=copy_segments
                     title="Copy file path"
@@ -609,7 +632,7 @@ fn Breadcrumbs(
                 </button>
             </Show>
             <Show when=move || copy_feedback.get().is_some() fallback=|| ()>
-                <span class="badge badge-success badge-outline text-xs font-mono">
+                <span class="badge badge-outline text-xs font-mono border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-100 bg-white/80 dark:bg-slate-900/40">
                     {move || {
                         copy_feedback
                             .get()
@@ -805,16 +828,16 @@ fn FileQuickNavigator(repo: Signal<String>, branch: Signal<String>) -> impl Into
         <div class="relative mb-4" node_ref=container_ref>
             <input
                 type="text"
-                class="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-900 bg-white"
+                class="w-full px-3 py-2 text-sm rounded-md border border-slate-200 dark:border-slate-700 bg-white/95 text-slate-900 dark:bg-slate-950/60 dark:text-slate-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-600 dark:focus-visible:outline-sky-400"
                 placeholder="Go to file..."
                 prop:value=query
                 on:input=move |ev| set_query.set(event_target_value(&ev))
             />
             <Show when=move || !query.get().trim().is_empty() fallback=|| ()>
-                <div class="absolute left-0 right-0 z-30 mt-1 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-md shadow-lg">
+                <div class="absolute left-0 right-0 z-30 mt-1 bg-white/95 dark:bg-slate-950/85 border border-slate-200 dark:border-slate-800 rounded-md shadow-lg text-slate-900 dark:text-slate-100">
                     <Suspense fallback=move || {
                         view! {
-                            <div class="px-3 py-2 text-sm text-gray-500 dark:text-gray-400">
+                            <div class="px-3 py-2 text-sm text-slate-600 dark:text-slate-300">
                                 "Searching..."
                             </div>
                         }
@@ -826,7 +849,7 @@ fn FileQuickNavigator(repo: Signal<String>, branch: Signal<String>) -> impl Into
                                     Ok(entries) => {
                                         if entries.is_empty() {
                                             view! {
-                                                <div class="px-3 py-2 text-sm text-gray-500 dark:text-gray-400">
+                                                <div class="px-3 py-2 text-sm text-slate-600 dark:text-slate-300">
                                                     "No matches"
                                                 </div>
                                             }
@@ -835,7 +858,7 @@ fn FileQuickNavigator(repo: Signal<String>, branch: Signal<String>) -> impl Into
                                             let current_repo = repo.get();
                                             let current_branch = branch.get();
                                             view! {
-                                                <ul class="divide-y divide-gray-200 dark:divide-gray-700">
+                                                <ul class="divide-y divide-slate-200 dark:divide-slate-800">
                                                     {entries
                                                         .iter()
                                                         .cloned()
@@ -858,7 +881,7 @@ fn FileQuickNavigator(repo: Signal<String>, branch: Signal<String>) -> impl Into
                                                                 <li>
                                                                     <A
                                                                         href=href
-                                                                        attr:class="flex items-center gap-2 px-3 py-2 text-sm hover:bg-gray-100 dark:hover:bg-gray-700"
+                                                                        attr:class="flex items-center gap-2 px-3 py-2 text-sm hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors rounded-md text-slate-900 dark:text-slate-100"
                                                                     >
                                                                         {if entry.kind == "dir" {
                                                                             Either::Left(view! { <DirectoryIcon /> })
@@ -867,7 +890,7 @@ fn FileQuickNavigator(repo: Signal<String>, branch: Signal<String>) -> impl Into
                                                                         }}
                                                                         <div class="flex flex-col min-w-0">
                                                                             <span class="font-medium truncate">{name}</span>
-                                                                            <span class="text-xs text-gray-500 dark:text-gray-400 truncate">
+                                                                            <span class="text-xs text-slate-600 dark:text-slate-300 truncate">
                                                                                 {display_path}
                                                                             </span>
                                                                         </div>
@@ -1437,18 +1460,18 @@ fn CodeIntelPanel(
     let insights_scroll_container = NodeRef::<Div>::new();
 
     view! {
-        <aside class="w-80 flex-shrink-0 bg-white dark:bg-gray-800 rounded-lg shadow border border-gray-200 dark:border-gray-700 p-4 sticky top-20 max-h-[calc(100vh-6rem)] overflow-visible">
-            <h2 class="text-xl font-semibold mb-4 text-gray-800 dark:text-gray-200">
+        <aside class="w-80 flex-shrink-0 bg-white/95 dark:bg-slate-950/70 text-slate-900 dark:text-slate-100 rounded-lg shadow border border-slate-200 dark:border-slate-800 p-4 sticky top-20 max-h-[calc(100vh-6rem)] overflow-visible backdrop-blur">
+            <h2 class="text-xl font-semibold mb-4 text-slate-900 dark:text-white">
                 "Code Intelligence"
             </h2>
-            <div class="text-sm text-gray-600 dark:text-gray-400 mb-4">
+            <div class="text-sm text-slate-600 dark:text-slate-300 mb-4">
                 {move || {
                     selected_symbol
                         .get()
                         .map(|symbol| {
                             Either::Left(
                                 view! {
-                                    <span class="font-mono text-blue-600 dark:text-blue-400">
+                                    <span class="font-mono text-blue-600 dark:text-blue-300">
                                         {symbol}
                                     </span>
                                 },
@@ -1472,11 +1495,11 @@ fn CodeIntelPanel(
             >
                 <div class="space-y-4">
                     <div class="flex flex-col gap-1">
-                        <label class="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                        <label class="text-xs uppercase tracking-wide text-slate-600 dark:text-slate-300">
                             "Scope"
                         </label>
                         <select
-                            class="select select-sm select-bordered bg-white dark:bg-gray-800"
+                            class="select select-sm select-bordered bg-white/95 text-slate-900 dark:bg-slate-900/70 dark:text-slate-100 border border-slate-200 dark:border-slate-700 focus-visible:outline focus-visible:outline-sky-600 dark:focus-visible:outline-sky-400"
                             on:change=move |ev| {
                                 let value = event_target_value(&ev);
                                 scope.set(SymbolSearchScope::from_str(&value));
@@ -1494,11 +1517,11 @@ fn CodeIntelPanel(
                         </select>
                     </div>
                     <div class="flex flex-col gap-1">
-                        <label class="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                        <label class="text-xs uppercase tracking-wide text-slate-600 dark:text-slate-300">
                             "Language"
                         </label>
                         <select
-                            class="select select-sm select-bordered bg-white dark:bg-gray-800"
+                            class="select select-sm select-bordered bg-white/95 text-slate-900 dark:bg-slate-900/70 dark:text-slate-100 border border-slate-200 dark:border-slate-700 focus-visible:outline focus-visible:outline-sky-600 dark:focus-visible:outline-sky-400"
                             on:change=move |ev| {
                                 let value = event_target_value(&ev);
                                 manual_language_override.set(true);
@@ -1526,7 +1549,7 @@ fn CodeIntelPanel(
                                 .then(|| {
                                     view! {
                                         <button
-                                            class="text-xs text-blue-600 dark:text-blue-400 hover:underline text-left"
+                                            class="text-xs text-blue-600 dark:text-blue-300 hover:underline text-left"
                                             on:click=move |_| {
                                                 manual_language_override.set(false);
                                                 language_filter.set(language.get());
@@ -1539,11 +1562,11 @@ fn CodeIntelPanel(
                         }}
                     </div>
                     <div class="flex flex-col gap-1">
-                        <label class="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                        <label class="text-xs uppercase tracking-wide text-slate-600 dark:text-slate-300">
                             "Filter snippets"
                         </label>
                         <input
-                            class="input input-sm input-bordered bg-white dark:bg-gray-800"
+                            class="input input-sm input-bordered bg-white/95 text-slate-900 dark:bg-slate-900/70 dark:text-slate-100 border border-slate-200 dark:border-slate-700 focus-visible:outline focus-visible:outline-sky-600 dark:focus-visible:outline-sky-400"
                             type="text"
                             placeholder="Find text in snippets"
                             prop:value=move || snippet_filter.get()
@@ -1555,18 +1578,18 @@ fn CodeIntelPanel(
                         fallback=move || view! { <></> }
                     >
                         <div class="flex flex-col gap-2">
-                            <label class="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                            <label class="text-xs uppercase tracking-wide text-slate-600 dark:text-slate-300">
                                 "Path filters"
                             </label>
                             <input
-                                class="input input-sm input-bordered bg-white dark:bg-gray-800"
+                                class="input input-sm input-bordered bg-white/95 text-slate-900 dark:bg-slate-900/70 dark:text-slate-100 border border-slate-200 dark:border-slate-700 focus-visible:outline focus-visible:outline-sky-600 dark:focus-visible:outline-sky-400"
                                 placeholder="e.g. components/light/ or components/light/domain.py"
                                 prop:value=move || manual_path_input.get()
                                 on:input=move |ev| manual_path_input.set(event_target_value(&ev))
                             />
                             <div class="flex gap-2">
                                 <button
-                                    class="text-xs rounded-full border border-gray-300 dark:border-gray-600 px-2 py-1 text-gray-600 hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-700"
+                                    class="text-xs rounded-full border border-slate-300 dark:border-slate-600 px-2 py-1 text-slate-600 hover:bg-slate-100 dark:text-slate-100 dark:hover:bg-slate-800"
                                     on:click={
                                         let manual_path_input = manual_path_input.clone();
                                         let included_paths = included_paths.clone();
@@ -1591,7 +1614,7 @@ fn CodeIntelPanel(
                                     "Add include"
                                 </button>
                                 <button
-                                    class="text-xs rounded-full border border-gray-300 dark:border-gray-600 px-2 py-1 text-gray-600 hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-700"
+                                    class="text-xs rounded-full border border-slate-300 dark:border-slate-600 px-2 py-1 text-slate-600 hover:bg-slate-100 dark:text-slate-100 dark:hover:bg-slate-800"
                                     on:click={
                                         let manual_path_input = manual_path_input.clone();
                                         let excluded_paths = excluded_paths.clone();
@@ -1616,7 +1639,7 @@ fn CodeIntelPanel(
                                     "Add exclude"
                                 </button>
                             </div>
-                            <p class="text-[11px] text-gray-500 dark:text-gray-400">
+                            <p class="text-[11px] text-slate-600 dark:text-slate-300">
                                 "Add a trailing '/' to match an entire directory."
                             </p>
                         </div>
@@ -1631,7 +1654,7 @@ fn CodeIntelPanel(
                                 Either::Right(
                                     view! {
                                         <div class="flex flex-wrap items-center gap-2 text-xs">
-                                            <span class="text-gray-500 dark:text-gray-400 uppercase tracking-wide">
+                                            <span class="text-slate-500 dark:text-slate-300 uppercase tracking-wide">
                                                 "Includes"
                                             </span>
                                             <For
@@ -1646,7 +1669,7 @@ fn CodeIntelPanel(
                                                                 {display.clone()}
                                                             </span>
                                                             <button
-                                                                class="text-xs text-gray-600 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white"
+                                                                class="text-xs text-slate-600 hover:text-slate-900 dark:text-slate-200 dark:hover:text-white"
                                                                 on:click=move |ev| {
                                                                     ev.stop_propagation();
                                                                     let value = display.clone();
@@ -1683,7 +1706,7 @@ fn CodeIntelPanel(
                                 Either::Right(
                                     view! {
                                         <div class="flex flex-wrap items-center gap-2 text-xs">
-                                            <span class="text-gray-500 dark:text-gray-400 uppercase tracking-wide">
+                                            <span class="text-slate-500 dark:text-slate-300 uppercase tracking-wide">
                                                 "Excludes"
                                             </span>
                                             <For
@@ -1698,7 +1721,7 @@ fn CodeIntelPanel(
                                                                 {display.clone()}
                                                             </span>
                                                             <button
-                                                                class="text-xs text-gray-600 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white"
+                                                                class="text-xs text-slate-600 hover:text-slate-900 dark:text-slate-200 dark:hover:text-white"
                                                                 on:click=move |ev| {
                                                                     ev.stop_propagation();
                                                                     let value = display.clone();
@@ -1731,7 +1754,7 @@ fn CodeIntelPanel(
                         when=move || selected_symbol.get().is_some()
                         fallback=move || {
                             view! {
-                                <p class="text-sm text-gray-500 dark:text-gray-400">
+                                <p class="text-sm text-slate-600 dark:text-slate-300">
                                     "Highlight a symbol in the editor to see definitions and references."
                                 </p>
                             }
@@ -1739,7 +1762,7 @@ fn CodeIntelPanel(
                     >
                         <Suspense fallback=move || {
                             view! {
-                                <p class="text-sm text-gray-500 dark:text-gray-400">
+                                <p class="text-sm text-slate-600 dark:text-slate-300">
                                     "Gathering symbol data..."
                                 </p>
                             }
@@ -1787,7 +1810,7 @@ fn CodeIntelPanel(
                                                 };
 
                                                 view! {
-                                                    <p class="text-sm text-gray-500 dark:text-gray-400">
+                                                    <p class="text-sm text-slate-600 dark:text-slate-300">
                                                         {message}
                                                     </p>
                                                 }
@@ -1868,12 +1891,12 @@ fn CodeIntelPanel(
                                                                 let definition_file_path = definition.file_path.clone();
 
                                                                 view! {
-                                                                    <div class="rounded border border-gray-200 dark:border-gray-700 p-3">
+                                                                    <div class="rounded border border-slate-200 dark:border-slate-800 bg-white/90 dark:bg-slate-900/60 p-3 shadow-sm">
                                                                         <div class="flex items-center justify-between gap-2">
                                                                             <span class="font-mono text-sm text-blue-600 dark:text-blue-400">
                                                                                 {definition.symbol.clone()}
                                                                             </span>
-                                                                            <span class="text-xs text-gray-500 dark:text-gray-400 uppercase">
+                                                                            <span class="text-xs text-slate-500 dark:text-slate-300 uppercase">
                                                                                 {definition_language}
                                                                             </span>
                                                                         </div>
@@ -1882,7 +1905,7 @@ fn CodeIntelPanel(
                                                                             .as_ref()
                                                                             .map(|ns| {
                                                                                 view! {
-                                                                                    <div class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                                                                                    <div class="text-xs text-slate-500 dark:text-slate-300 mt-1">
                                                                                         {ns.clone()}
                                                                                     </div>
                                                                                 }
@@ -1906,7 +1929,7 @@ fn CodeIntelPanel(
                                                                         {definition_line
                                                                             .map(|line| {
                                                                                 view! {
-                                                                                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                                                                                    <p class="text-xs text-slate-600 dark:text-slate-300 mt-1">
                                                                                         {format!("Line {}", line)}
                                                                                     </p>
                                                                                 }
@@ -1916,22 +1939,22 @@ fn CodeIntelPanel(
                                                                             .as_ref()
                                                                             .map(|kind| {
                                                                                 view! {
-                                                                                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-1 uppercase">
+                                                                                    <p class="text-xs text-slate-600 dark:text-slate-300 mt-1 uppercase">
                                                                                         {kind.clone()}
                                                                                     </p>
                                                                                 }
                                                                             })}
-                                                                        <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                                                                        <p class="text-xs text-slate-600 dark:text-slate-300 mt-1">
                                                                             {format!("Score: {:.3}", definition.score)}
                                                                         </p>
                                                                         <div class="mt-4">
-                                                                            <h3 class="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                                                                            <h3 class="text-xs font-semibold uppercase tracking-wide text-slate-600 dark:text-slate-300">
                                                                                 {format!("References ({reference_count})")}
                                                                             </h3>
                                                                             {if grouped_references.is_empty() {
                                                                                 Either::Left(
                                                                                     view! {
-                                                                                        <p class="text-xs text-gray-500 dark:text-gray-400 mt-2">
+                                                                                        <p class="text-xs text-slate-600 dark:text-slate-300 mt-2">
                                                                                             "No references were indexed for this symbol."
                                                                                         </p>
                                                                                     },
@@ -1959,15 +1982,15 @@ fn CodeIntelPanel(
                                                                                                     let summary_label_text = summary_label.clone();
 
                                                                                                     view! {
-                                                                                                        <details class="border border-gray-200 dark:border-gray-700 rounded">
-                                                                                                            <summary class="flex items-center justify-between gap-2 px-3 py-2 cursor-pointer select-none hover:bg-gray-100 dark:hover:bg-gray-700 rounded">
+                                                                                                        <details class="border border-slate-200 dark:border-slate-800 rounded bg-white/90 dark:bg-slate-950/40">
+                                                                                                            <summary class="flex items-center justify-between gap-2 px-3 py-2 cursor-pointer select-none hover:bg-slate-100 dark:hover:bg-slate-800 rounded text-slate-900 dark:text-slate-100">
                                                                                                                 <span
                                                                                                                     class="min-w-0 text-sm text-blue-600 dark:text-blue-400 text-ellipsis overflow-hidden whitespace-nowrap"
                                                                                                                     title=summary_label_title
                                                                                                                 >
                                                                                                                     {summary_label_text}
                                                                                                                 </span>
-                                                                                                                <span class="text-xs text-gray-500 dark:text-gray-400">
+                                                                                                                <span class="text-xs text-slate-500 dark:text-slate-300">
                                                                                                                     {reference_label}
                                                                                                                 </span>
                                                                                                             </summary>
@@ -1988,7 +2011,7 @@ fn CodeIntelPanel(
                                                                                                                         let reference_label = reference_file_path.clone();
                                                                                                                         let reference_title = reference_label.clone();
                                                                                                                         view! {
-                                                                                                                            <div class="rounded border border-gray-200 dark:border-gray-700 transition-colors overflow-hidden">
+                                                                                                                            <div class="rounded border border-slate-200 dark:border-slate-800 bg-white/90 dark:bg-slate-950/40 transition-colors overflow-hidden">
                                                                                                                                 <div class="flex items-center justify-between gap-2 px-3 py-2">
                                                                                                                                     <div class="min-w-0">
                                                                                                                                         <A
@@ -2000,7 +2023,7 @@ fn CodeIntelPanel(
                                                                                                                                                 {reference_label.clone()}
                                                                                                                                             </span>
                                                                                                                                         </A>
-                                                                                                                                        <p class="text-xs text-gray-500 dark:text-gray-400">
+                                                                                                                                        <p class="text-xs text-slate-500 dark:text-slate-300">
                                                                                                                                             {format!(
                                                                                                                                                 "Line {}  •  Column {}",
                                                                                                                                                 line_number,
@@ -2020,7 +2043,7 @@ fn CodeIntelPanel(
                                                                                                                                         let highlight_line = snippet.highlight_line;
                                                                                                                                         let start_line = snippet.start_line;
                                                                                                                                         view! {
-                                                                                                                                            <div class="bg-gray-50 dark:bg-gray-900/50 border-t border-gray-200 dark:border-gray-700 px-3 py-2 text-xs font-mono">
+                                                                                                                                            <div class="bg-slate-50/80 dark:bg-slate-900/60 border-t border-slate-200 dark:border-slate-800 px-3 py-2 text-xs font-mono text-slate-900 dark:text-slate-100">
                                                                                                                                                 {snippet
                                                                                                                                                     .lines
                                                                                                                                                     .into_iter()
@@ -2035,7 +2058,7 @@ fn CodeIntelPanel(
                                                                                                                                                         };
                                                                                                                                                         view! {
                                                                                                                                                             <div class=row_class>
-                                                                                                                                                                <span class="w-12 text-right text-[10px] text-gray-500">
+                                                                                                                                                                <span class="w-12 text-right text-[10px] text-slate-500 dark:text-slate-300">
                                                                                                                                                                     {current_line}
                                                                                                                                                                 </span>
                                                                                                                                                                 <span class="whitespace-pre-wrap break-words">{text}</span>
@@ -2071,7 +2094,7 @@ fn CodeIntelPanel(
                                         }
                                         Ok(None) => {
                                             view! {
-                                                <p class="text-sm text-gray-500 dark:text-gray-400">
+                                                <p class="text-sm text-slate-600 dark:text-slate-300">
                                                     "Select a symbol to see indexed results."
                                                 </p>
                                             }
