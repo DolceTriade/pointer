@@ -347,6 +347,12 @@ fn preprocess_regex_pattern(raw: &str) -> Result<String, ParseError> {
                 Some('t') => decoded.push('\t'),
                 Some('\\') => decoded.push('\\'),
                 Some(other) => {
+                    if other == '(' || other == ')' {
+                        return Err(ParseError::InvalidFilter(
+                            "regex parentheses are treated as literals and cannot be escaped"
+                                .to_string(),
+                        ));
+                    }
                     decoded.push('\\');
                     decoded.push(other);
                 }
@@ -405,6 +411,14 @@ fn normalize_line_anchors(pattern: &str) -> (String, bool, bool) {
             ']' => {
                 in_char_class = false;
                 result.push(ch);
+            }
+            '(' if !in_char_class => {
+                result.push('\\');
+                result.push('(');
+            }
+            ')' if !in_char_class => {
+                result.push('\\');
+                result.push(')');
             }
             '^' if !in_char_class => {
                 start_anchored = true;
@@ -1101,5 +1115,21 @@ mod tests {
     fn preprocess_regex_end_anchor_only() {
         let pattern = preprocess_regex_pattern("foo$").expect("should preprocess");
         assert_eq!(pattern, "(?:\n|^)(.*)foo(\n|$)");
+    }
+
+    #[test]
+    fn preprocess_regex_parentheses_are_literal() {
+        let pattern = preprocess_regex_pattern("(foo) bar").expect("should preprocess");
+        assert_eq!(pattern, "(?:\n|^)(.*)\\(foo\\) bar(.*)(\n|$)");
+    }
+
+    #[test]
+    fn preprocess_regex_parentheses_cannot_be_escaped() {
+        match preprocess_regex_pattern(r"\(foo\)") {
+            Err(ParseError::InvalidFilter(msg)) => {
+                assert!(msg.contains("parentheses"), "unexpected message: {}", msg);
+            }
+            other => panic!("expected parentheses error, got {:?}", other),
+        }
     }
 }
