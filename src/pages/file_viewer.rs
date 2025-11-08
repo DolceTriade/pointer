@@ -430,6 +430,7 @@ pub fn render_markdown(markdown: &str) -> String {
     options.insert(Options::ENABLE_FOOTNOTES);
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_TASKLISTS);
+    options.insert(Options::ENABLE_GFM);
 
     let parser = Parser::new_ext(markdown, options);
 
@@ -2370,10 +2371,10 @@ pub fn FileViewer() -> impl IntoView {
                                                                                 <h2 class="text-2xl font-semibold mb-4 text-gray-800 dark:text-gray-200">
                                                                                     "README.md"
                                                                                 </h2>
-                                                                                <div
-                                                                                    class="prose dark:prose-invert max-w-none"
+                                                                                <article
+                                                                                    class="prose dark:prose-invert prose-headings:underline dark:prose-headings:text-gray-200 text-gray-800 dark:text-gray-200 max-w-none"
                                                                                     inner_html=render_markdown(&readme_content)
-                                                                                ></div>
+                                                                                ></article>
                                                                             </div>
                                                                         }
                                                                     })}

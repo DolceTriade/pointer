@@ -3,6 +3,8 @@
 @tailwind components;
 @tailwind utilities;
 
+@plugin "@tailwindcss/typography";
+
 @plugin "daisyui" {
     themes: light, dark --prefersdark, pastel, fantasy --default;
 }
