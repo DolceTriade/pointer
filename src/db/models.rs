@@ -84,7 +84,17 @@ pub struct SearchResult {
     pub content_text: String,
     pub snippets: Vec<SearchSnippet>,
     pub branches: Vec<String>,
+    pub live_branches: Vec<String>,
     pub is_historical: bool,
+    pub snapshot_indexed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepoBranchInfo {
+    pub name: String,
+    pub commit_sha: String,
+    pub indexed_at: Option<String>,
+    pub is_live: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

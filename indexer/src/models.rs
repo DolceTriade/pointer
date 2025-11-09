@@ -65,10 +65,27 @@ pub struct IndexReport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BranchSnapshotPolicy {
+    pub interval_seconds: u64,
+    pub keep_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BranchPolicy {
+    pub latest_keep_count: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_live: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub snapshot_policies: Vec<BranchSnapshotPolicy>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BranchHead {
     pub repository: String,
     pub branch: String,
     pub commit_sha: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy: Option<BranchPolicy>,
 }
 
 // A unique, deduplicated chunk of text content.

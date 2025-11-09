@@ -1,11 +1,13 @@
 use std::env;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use anyhow::Result;
 use clap::{ArgAction, Args, Parser, Subcommand};
+use humantime::parse_duration;
 use tracing::info;
 
-use crate::config::IndexerConfig;
+use crate::config::{BranchPolicyConfig, IndexerConfig, SnapshotPolicyConfig};
 use crate::engine::Indexer;
 use crate::output;
 use crate::upload;
@@ -55,6 +57,18 @@ pub struct IndexArgs {
     /// API key used when uploading to the backend (sent as a Bearer token).
     #[arg(long)]
     pub upload_api_key: Option<String>,
+    /// Mark this branch as the live branch for the repository.
+    #[arg(long = "live", action = ArgAction::SetTrue, conflicts_with = "not_live")]
+    pub live: bool,
+    /// Explicitly mark this branch as not-live.
+    #[arg(long = "not-live", action = ArgAction::SetTrue, conflicts_with = "live")]
+    pub not_live: bool,
+    /// Number of most recent snapshots that should always be retained.
+    #[arg(long = "keep-latest", default_value_t = 1)]
+    pub keep_latest: u32,
+    /// Snapshot retention policies in the format "<interval>:<count>", e.g. "7d:4".
+    #[arg(long = "snapshot-policy")]
+    pub snapshot_policies: Vec<SnapshotPolicyArg>,
 }
 
 pub fn run() -> Result<()> {
@@ -83,6 +97,7 @@ fn run_index(args: IndexArgs) -> Result<()> {
         repo_meta.branch,
         repo_meta.commit,
         output_dir.clone(),
+        build_branch_policy(&args),
     );
 
     let indexer = Indexer::new(config);
@@ -97,6 +112,72 @@ fn run_index(args: IndexArgs) -> Result<()> {
     info!(repo = repository, output = ?output_dir, files = artifacts.file_pointer_count(), "indexing complete");
 
     Ok(())
+}
+
+fn build_branch_policy(args: &IndexArgs) -> Option<BranchPolicyConfig> {
+    let branch = args.branch.as_ref()?;
+    if branch.trim().is_empty() {
+        return None;
+    }
+
+    let live = if args.live {
+        Some(true)
+    } else if args.not_live {
+        Some(false)
+    } else {
+        None
+    };
+
+    let latest_keep = args.keep_latest.max(1);
+    let snapshot_policies = args
+        .snapshot_policies
+        .iter()
+        .map(|policy| SnapshotPolicyConfig {
+            interval_seconds: policy.interval_seconds,
+            keep_count: policy.keep_count,
+        })
+        .collect();
+
+    Some(BranchPolicyConfig {
+        live,
+        latest_keep_count: latest_keep,
+        snapshot_policies,
+    })
+}
+
+#[derive(Debug, Clone)]
+pub struct SnapshotPolicyArg {
+    pub interval_seconds: u64,
+    pub keep_count: u32,
+}
+
+impl FromStr for SnapshotPolicyArg {
+    type Err = String;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        let (interval_part, count_part) = input
+            .split_once(':')
+            .ok_or_else(|| "snapshot policy must be in the form <interval>:<count>".to_string())?;
+
+        let duration = parse_duration(interval_part)
+            .map_err(|err| format!("invalid interval '{interval_part}': {err}"))?;
+        let interval_seconds = duration.as_secs();
+        if interval_seconds == 0 {
+            return Err("snapshot policy interval must be greater than zero".to_string());
+        }
+
+        let keep_count: u32 = count_part
+            .parse()
+            .map_err(|_| format!("invalid snapshot count '{count_part}'"))?;
+        if keep_count == 0 {
+            return Err("snapshot policy count must be greater than zero".to_string());
+        }
+
+        Ok(Self {
+            interval_seconds,
+            keep_count,
+        })
+    }
 }
 
 fn resolve_repo_path(path: &Path) -> Result<PathBuf> {

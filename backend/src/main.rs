@@ -5,6 +5,9 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::mem;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::Duration;
+
+mod gc;
 
 use anyhow::{Context, Result, anyhow};
 use axum::{
@@ -30,8 +33,10 @@ use thiserror::Error;
 use tokio::fs::File as TokioFile;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, BufReader as TokioBufReader};
 use tokio::net::TcpListener;
-use tokio::signal;
+use tokio::{signal, time};
 use tracing::info;
+
+use crate::gc::{GarbageCollector, is_latest_commit_on_any_branch, prune_commit_data};
 use zstd::stream::read::Decoder;
 
 #[derive(Debug, Parser)]
@@ -44,6 +49,10 @@ struct ServerConfig {
     max_connections: u32,
     #[arg(long, env = "SCRATCH_DIR", default_value = ".pointer-backend-scratch")]
     scratch_dir: PathBuf,
+    #[arg(long, env = "ENABLE_GC", default_value_t = false)]
+    enable_gc: bool,
+    #[arg(long, env = "GC_INTERVAL_SECS", default_value_t = 3600)]
+    gc_interval_secs: u64,
 }
 
 #[derive(Clone)]
@@ -209,10 +218,15 @@ async fn main() -> Result<()> {
         .await
         .context("database migration failed")?;
 
-    let state = AppState {
-        pool,
+    let app_state = AppState {
+        pool: pool.clone(),
         scratch_dir: config.scratch_dir.clone(),
     };
+
+    if config.enable_gc {
+        let interval = Duration::from_secs(config.gc_interval_secs.max(60));
+        spawn_gc_loop(pool.clone(), interval);
+    }
 
     let app = Router::new()
         // New ingestion routes
@@ -235,8 +249,9 @@ async fn main() -> Result<()> {
         .route("/api/v1/prune/commit", post(prune_commit_handler))
         .route("/api/v1/prune/branch", post(prune_branch_handler))
         .route("/api/v1/prune/policy", post(apply_retention_policy_handler))
+        .route("/api/v1/admin/gc", post(run_gc_handler))
         .route("/healthz", get(health_check))
-        .with_state(state)
+        .with_state(app_state)
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024));
 
     let listener = TcpListener::bind(bind_addr)
@@ -251,6 +266,18 @@ async fn main() -> Result<()> {
         .context("server shutdown")?;
 
     Ok(())
+}
+
+fn spawn_gc_loop(pool: PgPool, interval: Duration) {
+    tokio::spawn(async move {
+        let collector = GarbageCollector::new(pool);
+        loop {
+            if let Err(err) = collector.run_once().await {
+                tracing::error!(error = ?err, "background garbage collection run failed");
+            }
+            time::sleep(interval).await;
+        }
+    });
 }
 
 async fn shutdown_signal() {
@@ -1034,6 +1061,8 @@ async fn upsert_branch_heads_batch(
         return Ok(());
     }
 
+    let mut tx = pool.begin().await.map_err(ApiErrorKind::from)?;
+
     let mut qb = QueryBuilder::new("INSERT INTO branches (repository, branch, commit_sha) ");
     qb.push_values(chunk.iter(), |mut b, branch| {
         b.push_bind(&branch.repository)
@@ -1046,9 +1075,159 @@ async fn upsert_branch_heads_batch(
     );
 
     qb.build()
-        .execute(&pool)
+        .execute(&mut *tx)
         .await
         .map_err(ApiErrorKind::from)?;
+
+    for branch in &chunk {
+        let (policy_latest_keep, snapshot_specs, policy_specified, live_state) =
+            if let Some(policy) = &branch.policy {
+                (
+                    policy.latest_keep_count,
+                    policy.snapshot_policies.as_slice(),
+                    true,
+                    policy.is_live,
+                )
+            } else {
+                (1, &[][..], false, None)
+            };
+        if policy_latest_keep == 0 {
+            return Err(ApiErrorKind::Internal(anyhow!(
+                "latest_keep_count must be positive for branch {}",
+                branch.branch
+            )));
+        }
+        let latest_keep = i32::try_from(policy_latest_keep).map_err(|_| {
+            ApiErrorKind::Internal(anyhow!(
+                "latest_keep_count exceeds supported range for branch {}: {}",
+                branch.branch,
+                policy_latest_keep
+            ))
+        })?;
+
+        sqlx::query(
+            "INSERT INTO branch_policies (repository, branch, latest_keep_count, updated_at)
+                 VALUES ($1, $2, $3, NOW())
+                 ON CONFLICT (repository, branch)
+                 DO UPDATE SET latest_keep_count = EXCLUDED.latest_keep_count,
+                               updated_at = NOW()",
+        )
+        .bind(&branch.repository)
+        .bind(&branch.branch)
+        .bind(latest_keep)
+        .execute(&mut *tx)
+        .await
+        .map_err(ApiErrorKind::from)?;
+
+        if policy_specified {
+            sqlx::query(
+                "DELETE FROM branch_snapshot_policies WHERE repository = $1 AND branch = $2",
+            )
+            .bind(&branch.repository)
+            .bind(&branch.branch)
+            .execute(&mut *tx)
+            .await
+            .map_err(ApiErrorKind::from)?;
+
+            if !snapshot_specs.is_empty() {
+                let mut seen_intervals = HashSet::new();
+                let mut sanitized = Vec::new();
+                for snap in snapshot_specs {
+                    let interval_seconds = i64::try_from(snap.interval_seconds).map_err(|_| {
+                        ApiErrorKind::Internal(anyhow!(
+                            "snapshot policy interval exceeds supported range for branch {}",
+                            branch.branch
+                        ))
+                    })?;
+                    if interval_seconds <= 0 {
+                        return Err(ApiErrorKind::Internal(anyhow!(
+                            "snapshot policy interval must be positive for branch {}",
+                            branch.branch
+                        )));
+                    }
+                    let keep_count = i32::try_from(snap.keep_count).map_err(|_| {
+                        ApiErrorKind::Internal(anyhow!(
+                            "snapshot policy count exceeds supported range for branch {}",
+                            branch.branch
+                        ))
+                    })?;
+                    if keep_count <= 0 {
+                        return Err(ApiErrorKind::Internal(anyhow!(
+                            "snapshot policy count must be positive for branch {}",
+                            branch.branch
+                        )));
+                    }
+                    if seen_intervals.insert(interval_seconds) {
+                        sanitized.push((interval_seconds, keep_count));
+                    }
+                }
+
+                if !sanitized.is_empty() {
+                    let mut snapshot_policy_qb = QueryBuilder::new(
+                        "INSERT INTO branch_snapshot_policies (repository, branch, interval_seconds, keep_count) ",
+                    );
+                    snapshot_policy_qb.push_values(sanitized.iter(), |mut b, (interval, count)| {
+                        b.push_bind(&branch.repository)
+                            .push_bind(&branch.branch)
+                            .push_bind(interval)
+                            .push_bind(count);
+                    });
+                    snapshot_policy_qb.push(
+                        " ON CONFLICT (repository, branch, interval_seconds)
+                      DO UPDATE SET keep_count = EXCLUDED.keep_count, created_at = NOW()",
+                    );
+                    snapshot_policy_qb
+                        .build()
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(ApiErrorKind::from)?;
+                }
+            }
+
+            match live_state {
+                Some(true) => {
+                    sqlx::query(
+                        "INSERT INTO repo_live_branches (repository, branch, updated_at)
+                         VALUES ($1, $2, NOW())
+                         ON CONFLICT (repository)
+                         DO UPDATE SET branch = EXCLUDED.branch, updated_at = NOW()",
+                    )
+                    .bind(&branch.repository)
+                    .bind(&branch.branch)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(ApiErrorKind::from)?;
+                }
+                Some(false) => {
+                    sqlx::query(
+                        "DELETE FROM repo_live_branches WHERE repository = $1 AND branch = $2",
+                    )
+                    .bind(&branch.repository)
+                    .bind(&branch.branch)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(ApiErrorKind::from)?;
+                }
+                None => {}
+            }
+        }
+    }
+
+    let mut snapshot_qb =
+        QueryBuilder::new("INSERT INTO branch_snapshots (repository, branch, commit_sha) ");
+    snapshot_qb.push_values(chunk.iter(), |mut b, branch| {
+        b.push_bind(&branch.repository)
+            .push_bind(&branch.branch)
+            .push_bind(&branch.commit_sha);
+    });
+    snapshot_qb.push(" ON CONFLICT DO NOTHING");
+    snapshot_qb
+        .build()
+        .execute(&mut *tx)
+        .await
+        .map_err(ApiErrorKind::from)?;
+
+    tx.commit().await.map_err(ApiErrorKind::from)?;
 
     Ok(())
 }
@@ -1081,21 +1260,11 @@ struct PruneBranchResponse {
     message: String,
 }
 
-// Function to check if a commit is the latest on any branch
-async fn is_latest_commit_on_any_branch(
-    pool: &PgPool,
-    repository: &str,
-    commit_sha: &str,
-) -> std::result::Result<bool, ApiErrorKind> {
-    let result: Option<(String,)> =
-        sqlx::query_as("SELECT commit_sha FROM branches WHERE repository = $1 AND commit_sha = $2")
-            .bind(repository)
-            .bind(commit_sha)
-            .fetch_optional(pool)
-            .await
-            .map_err(ApiErrorKind::from)?;
-
-    Ok(result.is_some())
+#[derive(Debug, Serialize)]
+struct GcResponse {
+    branches_evaluated: usize,
+    snapshots_removed: usize,
+    commits_pruned: usize,
 }
 
 // Manual prune for a specific commit
@@ -1126,100 +1295,6 @@ async fn prune_commit_handler(
             "No data found for the specified commit".to_string()
         },
     }))
-}
-
-// Function to actually remove all data associated with a commit
-async fn prune_commit_data(
-    pool: &PgPool,
-    repository: &str,
-    commit_sha: &str,
-) -> std::result::Result<bool, ApiErrorKind> {
-    let mut tx = pool.begin().await.map_err(ApiErrorKind::from)?;
-
-    // Get all content hashes associated with this commit from the files table
-    let content_hashes: Vec<(String,)> = sqlx::query_as(
-        "SELECT DISTINCT content_hash FROM files WHERE repository = $1 AND commit_sha = $2",
-    )
-    .bind(repository)
-    .bind(commit_sha)
-    .fetch_all(&mut *tx)
-    .await
-    .map_err(ApiErrorKind::from)?;
-
-    // Count files to be deleted
-    let files_deleted_result =
-        sqlx::query("DELETE FROM files WHERE repository = $1 AND commit_sha = $2")
-            .bind(repository)
-            .bind(commit_sha)
-            .execute(&mut *tx)
-            .await
-            .map_err(ApiErrorKind::from)?;
-
-    let files_deleted = files_deleted_result.rows_affected();
-
-    if files_deleted == 0 {
-        tx.commit().await.map_err(ApiErrorKind::from)?;
-        return Ok(false);
-    }
-
-    // Get content hashes that are no longer referenced by any files
-    let unreferenced_content_hashes: Vec<(String,)> = sqlx::query_as(
-        "SELECT hash FROM content_blobs WHERE hash = ANY($1) AND hash NOT IN (SELECT DISTINCT content_hash FROM files WHERE content_hash = ANY($1))"
-    )
-    .bind(&content_hashes.iter().map(|(h,)| h.as_str()).collect::<Vec<_>>())
-    .fetch_all(&mut *tx)
-    .await
-    .map_err(ApiErrorKind::from)?;
-
-    // Delete unreferenced content blobs
-    if !unreferenced_content_hashes.is_empty() {
-        let hashes_to_delete: Vec<&str> = unreferenced_content_hashes
-            .iter()
-            .map(|(h,)| h.as_str())
-            .collect();
-
-        // Delete from symbol_references through symbols table
-        sqlx::query(
-            "DELETE FROM symbol_references WHERE symbol_id IN (
-                SELECT id FROM symbols WHERE content_hash = ANY($1)
-            )",
-        )
-        .bind(&hashes_to_delete)
-        .execute(&mut *tx)
-        .await
-        .map_err(ApiErrorKind::from)?;
-
-        // Delete from symbols
-        sqlx::query("DELETE FROM symbols WHERE content_hash = ANY($1)")
-            .bind(&hashes_to_delete)
-            .execute(&mut *tx)
-            .await
-            .map_err(ApiErrorKind::from)?;
-
-        // Delete from content_blob_chunks
-        sqlx::query("DELETE FROM content_blob_chunks WHERE content_hash = ANY($1)")
-            .bind(&hashes_to_delete)
-            .execute(&mut *tx)
-            .await
-            .map_err(ApiErrorKind::from)?;
-
-        // Delete from content_blobs
-        sqlx::query("DELETE FROM content_blobs WHERE hash = ANY($1)")
-            .bind(&hashes_to_delete)
-            .execute(&mut *tx)
-            .await
-            .map_err(ApiErrorKind::from)?;
-    }
-
-    // Delete chunks with a ref_count of 0
-    sqlx::query("DELETE FROM chunks WHERE ref_count = 0")
-        .execute(&mut *tx)
-        .await
-        .map_err(ApiErrorKind::from)?;
-
-    tx.commit().await.map_err(ApiErrorKind::from)?;
-
-    Ok(files_deleted > 0)
 }
 
 // Prune all commits for a specific branch except the latest
@@ -1273,6 +1348,16 @@ async fn prune_branch_handler(
             "Pruned {} commits from branch (kept latest commit {})",
             pruned_count, latest_commit
         ),
+    }))
+}
+
+async fn run_gc_handler(State(state): State<AppState>) -> ApiResult<Json<GcResponse>> {
+    let collector = GarbageCollector::new(state.pool.clone());
+    let outcome = collector.run_once().await?;
+    Ok(Json(GcResponse {
+        branches_evaluated: outcome.branches_evaluated,
+        snapshots_removed: outcome.snapshots_removed,
+        commits_pruned: outcome.commits_pruned,
     }))
 }
 

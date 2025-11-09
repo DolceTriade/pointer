@@ -6,7 +6,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::db::models::{
-    FileReference, HighlightedLine, SearchResultsPage, SymbolResult, TokenOccurrence,
+    FileReference, HighlightedLine, RepoBranchInfo, SearchResultsPage, SymbolResult,
+    TokenOccurrence,
 };
 #[cfg(feature = "ssr")]
 use crate::db::models::{ReferenceResult, SearchResult};
@@ -130,7 +131,10 @@ pub struct DbUniqueChunk {
 pub trait Database: Clone + Send + Sync + 'static {
     // Repository and Branch operations
     async fn get_all_repositories(&self) -> Result<Vec<RepoSummary>, DbError>;
-    async fn get_branches_for_repository(&self, repository: &str) -> Result<Vec<String>, DbError>;
+    async fn get_branches_for_repository(
+        &self,
+        repository: &str,
+    ) -> Result<Vec<RepoBranchInfo>, DbError>;
     async fn resolve_branch_head(
         &self,
         repository: &str,

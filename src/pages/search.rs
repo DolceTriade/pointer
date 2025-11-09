@@ -4,6 +4,7 @@ use crate::db::models::{
 use crate::dsl::DEFAULT_PAGE_SIZE;
 use crate::services::search_service::search;
 use crate::utils::time::{TimePoint, elapsed_since, now_seconds};
+use chrono::Utc;
 use leptos::either::{Either, EitherOf3};
 use leptos::prelude::*;
 use leptos_router::{
@@ -13,6 +14,7 @@ use leptos_router::{
 };
 #[cfg(feature = "hydrate")]
 use std::time::Duration;
+use std::{collections::HashSet, rc::Rc};
 use urlencoding::encode;
 
 #[derive(Params, PartialEq, Clone, Debug)]
@@ -914,6 +916,14 @@ fn strip_enclosing_quotes(value: &str) -> String {
     trimmed.to_string()
 }
 
+fn format_indexed_timestamp(ts: &str) -> Option<String> {
+    chrono::DateTime::parse_from_rfc3339(ts).ok().map(|dt| {
+        dt.with_timezone(&Utc)
+            .format("Indexed %Y-%m-%d %H:%M UTC")
+            .to_string()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1038,7 +1048,9 @@ fn SearchResultCard(result: SearchResult) -> impl IntoView {
         match_line,
         content_text,
         branches,
+        live_branches,
         is_historical,
+        snapshot_indexed_at,
         snippets,
     } = result;
 
@@ -1067,20 +1079,24 @@ fn SearchResultCard(result: SearchResult) -> impl IntoView {
     let extra_count = extra_snippets.len();
     let expanded = RwSignal::new(false);
 
-    let branch_badge = (!branches.is_empty()).then(|| {
-        let label = format!("Branches: {}", branches.join(", "));
-        view! {
-            <span class="inline-flex items-center rounded-full bg-blue-100 text-blue-700 dark:bg-blue-900/50 dark:text-blue-100 px-2 py-0.5">
-                {label}
-            </span>
-        }
-    });
+    let live_branch_set: Rc<HashSet<String>> = Rc::new(live_branches.iter().cloned().collect());
 
     let historical_badge = is_historical.then(|| view! {
         <span class="inline-flex items-center rounded-full bg-amber-200 text-amber-900 dark:bg-amber-900/60 dark:text-amber-100 px-2 py-0.5">
-            "Historical"
+            "Historical snapshot"
         </span>
     });
+
+    let indexed_badge = snapshot_indexed_at
+        .as_deref()
+        .and_then(format_indexed_timestamp)
+        .map(|label| {
+            view! {
+                <span class="inline-flex items-center rounded-full bg-slate-200 text-slate-800 dark:bg-slate-800/70 dark:text-slate-200 px-2 py-0.5">
+                    {label}
+                </span>
+            }
+        });
 
     let short_commit: String = commit_sha.chars().take(7).collect();
     let primary_label = format!(
@@ -1183,8 +1199,42 @@ fn SearchResultCard(result: SearchResult) -> impl IntoView {
             </p>
             <div class="flex flex-wrap items-center gap-2 mt-1 text-xs text-gray-600 dark:text-gray-400">
                 <span>{format!("Commit {}", short_commit)}</span>
-                {branch_badge}
+                {indexed_badge}
                 {historical_badge}
+            </div>
+            <div class="flex flex-wrap items-center gap-2 mt-1 text-xs text-gray-600 dark:text-gray-400">
+                {if branches.is_empty() {
+                    Either::Left(
+                        view! {
+                            <span class="text-xs text-gray-500 dark:text-gray-400">
+                                "No branch metadata"
+                            </span>
+                        },
+                    )
+                } else {
+                    let branches_iter = branches.clone();
+                    let live_branch_set = live_branch_set.clone();
+                    Either::Right(
+                        branches_iter
+                            .into_iter()
+                            .map(move |branch| {
+                                let live_branch_set = live_branch_set.clone();
+                                let is_live = live_branch_set.contains(&branch);
+                                let badge_class = if is_live {
+                                    "inline-flex items-center rounded-full bg-emerald-100 text-emerald-800 dark:bg-emerald-900/60 dark:text-emerald-100 px-2 py-0.5"
+                                } else {
+                                    "inline-flex items-center rounded-full bg-slate-200 text-slate-800 dark:bg-slate-800/70 dark:text-slate-200 px-2 py-0.5"
+                                };
+                                let label = if is_live {
+                                    format!("{branch} (live)")
+                                } else {
+                                    branch.clone()
+                                };
+                                view! { <span class=badge_class>{label}</span> }
+                            })
+                            .collect_view(),
+                    )
+                }}
             </div>
             <pre class="bg-gray-100 dark:bg-gray-900 p-2 rounded-md mt-2 text-sm overflow-x-auto max-w-full">
                 <code>{render_highlighted_snippet(primary_snippet.content_text.clone())}</code>

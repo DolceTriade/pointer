@@ -1,6 +1,6 @@
 use crate::db::models::{
-    FacetCount, FileReference as DbFileReference, SearchResultsPage, SearchResultsStats,
-    SearchSnippet,
+    FacetCount, FileReference as DbFileReference, RepoBranchInfo, SearchResultsPage,
+    SearchResultsStats, SearchSnippet,
 };
 use crate::db::{
     Database, DbError, DbUniqueChunk, FileReference, RawFileContent, ReferenceResult, RepoSummary,
@@ -9,6 +9,7 @@ use crate::db::{
 };
 use crate::dsl::{CaseSensitivity, ContentPredicate, TextSearchPlan, TextSearchRequest};
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Postgres, QueryBuilder, Transaction, types::Json};
 use std::{
     collections::{HashMap, HashSet},
@@ -47,15 +48,36 @@ impl Database for PostgresDb {
         Ok(repos)
     }
 
-    async fn get_branches_for_repository(&self, repository: &str) -> Result<Vec<String>, DbError> {
-        let branches: Vec<String> =
-            sqlx::query_scalar("SELECT branch FROM branches WHERE repository = $1 ORDER BY branch")
-                .bind(repository)
-                .fetch_all(&self.pool)
-                .await
-                .map_err(|e| DbError::Database(e.to_string()))?;
+    async fn get_branches_for_repository(
+        &self,
+        repository: &str,
+    ) -> Result<Vec<RepoBranchInfo>, DbError> {
+        let rows = sqlx::query!(
+            r#"
+            SELECT
+                b.branch,
+                b.commit_sha,
+                lb.branch IS NOT NULL AS is_live,
+                COALESCE(snapshot.latest_indexed_at, b.indexed_at) AS indexed_at
+            FROM branches b
+            LEFT JOIN repo_live_branches lb
+              ON lb.repository = b.repository
+             AND lb.branch = b.branch
+            LEFT JOIN LATERAL (
+                SELECT MAX(indexed_at) AS latest_indexed_at
+                FROM branch_snapshots bs
+                WHERE bs.repository = b.repository AND bs.branch = b.branch
+            ) snapshot ON TRUE
+            WHERE b.repository = $1
+            ORDER BY b.branch
+            "#,
+            repository
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DbError::Database(e.to_string()))?;
 
-        if branches.is_empty() {
+        if rows.is_empty() {
             let commits: Vec<String> = sqlx::query_scalar(
                 "SELECT DISTINCT commit_sha FROM files WHERE repository = $1 ORDER BY commit_sha DESC",
             )
@@ -64,10 +86,29 @@ impl Database for PostgresDb {
             .await
             .map_err(|e| DbError::Database(e.to_string()))?;
 
-            Ok(commits)
-        } else {
-            Ok(branches)
+            let fallback = commits
+                .into_iter()
+                .map(|commit| RepoBranchInfo {
+                    name: commit.clone(),
+                    commit_sha: commit,
+                    indexed_at: None,
+                    is_live: false,
+                })
+                .collect();
+            return Ok(fallback);
         }
+
+        let branches = rows
+            .into_iter()
+            .map(|row| RepoBranchInfo {
+                name: row.branch,
+                commit_sha: row.commit_sha,
+                indexed_at: row.indexed_at.map(|dt| dt.to_rfc3339()),
+                is_live: row.is_live.unwrap_or(false),
+            })
+            .collect();
+
+        Ok(branches)
     }
 
     async fn resolve_branch_head(
@@ -1221,6 +1262,37 @@ ORDER BY idx
                 qb.push_bind(&plan.excluded_branches);
                 qb.push(")))");
             }
+            if plan.branches.is_empty() && !plan.include_historical {
+                qb.push(
+                    "
+                    AND (
+                        NOT EXISTS (
+                            SELECT 1 FROM repo_live_branches lb WHERE lb.repository = f.repository
+                        )
+                        OR EXISTS (
+                            SELECT 1
+                            FROM repo_live_branches lb
+                            WHERE lb.repository = f.repository
+                              AND (
+                                  EXISTS (
+                                      SELECT 1
+                                      FROM branch_snapshots bs
+                                      WHERE bs.repository = lb.repository
+                                        AND bs.branch = lb.branch
+                                        AND bs.commit_sha = f.commit_sha
+                                  )
+                                  OR EXISTS (
+                                      SELECT 1
+                                      FROM branches b
+                                      WHERE b.repository = lb.repository
+                                        AND b.branch = lb.branch
+                                        AND b.commit_sha = f.commit_sha
+                                  )
+                              )
+                        )
+                    )",
+                );
+            }
             qb.push(
                 "
                 ) cm
@@ -1277,9 +1349,26 @@ ORDER BY idx
                 lp.line_count,
                 ctx.context_snippet AS content_text,
                 ctx.match_line_number,
-                COALESCE(branch_match.branches, ARRAY[]::TEXT[]) AS branches,
+                COALESCE(branch_match.branches, branch_fallback.fallback_branches, ARRAY[]::TEXT[]) AS branches,
+                COALESCE(
+                    live_branch_match.live_branches,
+                    live_branch_fallback.live_branches,
+                    ARRAY[]::TEXT[]
+                ) AS live_branches,
+                branch_match.snapshot_indexed_at AS snapshot_indexed_at,
                 CASE
-                    WHEN repo_branches.repo_has_branches IS TRUE AND branch_match.branches IS NULL THEN TRUE
+                    WHEN live_repo.repo_live_branches IS NULL THEN FALSE
+                    WHEN COALESCE(
+                            array_length(
+                                COALESCE(
+                                    live_branch_match.live_branches,
+                                    live_branch_fallback.live_branches,
+                                    ARRAY[]::TEXT[]
+                                ),
+                                1
+                            ),
+                            0
+                        ) = 0 THEN TRUE
                     ELSE FALSE
                 END AS is_historical
             FROM
@@ -1291,20 +1380,65 @@ ORDER BY idx
                 lp.highlight_case_sensitive
             ) ctx
             LEFT JOIN LATERAL (
-                SELECT array_agg(DISTINCT branch) AS branches
-                FROM branches b
-                WHERE b.repository = lp.repository AND b.commit_sha = lp.commit_sha
+                SELECT
+                    array_agg(DISTINCT bs.branch) AS branches,
+                    MAX(bs.indexed_at) AS snapshot_indexed_at
+                FROM branch_snapshots bs
+                WHERE bs.repository = lp.repository AND bs.commit_sha = lp.commit_sha
             ) branch_match ON TRUE
             LEFT JOIN LATERAL (
-                SELECT TRUE AS repo_has_branches
+                SELECT array_agg(DISTINCT b.branch) AS fallback_branches
                 FROM branches b
-                WHERE b.repository = lp.repository
-                LIMIT 1
-            ) repo_branches ON TRUE
+                WHERE b.repository = lp.repository AND b.commit_sha = lp.commit_sha
+            ) branch_fallback ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT array_agg(lb.branch) AS live_branches
+                FROM repo_live_branches lb
+                JOIN branch_snapshots bs
+                  ON bs.repository = lb.repository
+                 AND bs.branch = lb.branch
+                WHERE lb.repository = lp.repository
+                  AND bs.commit_sha = lp.commit_sha
+            ) live_branch_match ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT array_agg(lb.branch) AS live_branches
+                FROM repo_live_branches lb
+                JOIN branches b
+                  ON b.repository = lb.repository
+                 AND b.branch = lb.branch
+                WHERE lb.repository = lp.repository
+                  AND b.commit_sha = lp.commit_sha
+            ) live_branch_fallback ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT array_agg(lb.branch) AS repo_live_branches
+                FROM repo_live_branches lb
+                WHERE lb.repository = lp.repository
+            ) live_repo ON TRUE
             WHERE
                 lp.include_historical
-                OR branch_match.branches IS NOT NULL
-                OR repo_branches.repo_has_branches IS NULL
+                OR live_repo.repo_live_branches IS NULL
+                OR COALESCE(
+                    array_length(
+                        COALESCE(
+                            live_branch_match.live_branches,
+                            live_branch_fallback.live_branches,
+                            ARRAY[]::TEXT[]
+                        ),
+                        1
+                    ),
+                    0
+                ) > 0
+                OR COALESCE(
+                    array_length(
+                        COALESCE(
+                            branch_match.branches,
+                            branch_fallback.fallback_branches,
+                            ARRAY[]::TEXT[]
+                        ),
+                        1
+                    ),
+                    0
+                ) > 0
             ORDER BY
                 lp.repository,
                 lp.commit_sha,
@@ -1521,7 +1655,12 @@ ORDER BY idx
                         content_text: best_row.content_text,
                         snippets,
                         branches: best_row.branches,
+                        live_branches: best_row.live_branches,
                         is_historical: best_row.is_historical,
+                        snapshot_indexed_at: best_row
+                            .snapshot_indexed_at
+                            .as_ref()
+                            .map(|dt| dt.to_rfc3339()),
                     }
                 })
                 .collect()
@@ -1873,7 +2012,9 @@ struct SearchResultRow {
     content_text: String,
     match_line_number: i32,
     branches: Vec<String>,
+    live_branches: Vec<String>,
     is_historical: bool,
+    snapshot_indexed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(sqlx::FromRow)]

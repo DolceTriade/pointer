@@ -1,8 +1,10 @@
+use chrono::Utc;
 use leptos::either::EitherOf3;
 use leptos::prelude::*;
 use leptos_router::components::A;
 use leptos_router::hooks::use_params;
 use leptos_router::params::Params;
+use serde::{Deserialize, Serialize};
 
 #[derive(Params, Debug, PartialEq)]
 struct RepoParams {
@@ -11,8 +13,16 @@ struct RepoParams {
 
 const MAX_VISIBLE_BRANCHES: usize = 12;
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RepoBranchDisplay {
+    pub name: String,
+    pub commit_sha: String,
+    pub indexed_at: Option<String>,
+    pub is_live: bool,
+}
+
 #[server]
-pub async fn get_repo_branches(repo: String) -> Result<Vec<String>, ServerFnError> {
+pub async fn get_repo_branches(repo: String) -> Result<Vec<RepoBranchDisplay>, ServerFnError> {
     use crate::db::{Database, postgres::PostgresDb};
 
     let state = expect_context::<crate::server::GlobalAppState>();
@@ -24,7 +34,15 @@ pub async fn get_repo_branches(repo: String) -> Result<Vec<String>, ServerFnErro
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))?;
 
-    Ok(branches)
+    Ok(branches
+        .into_iter()
+        .map(|branch| RepoBranchDisplay {
+            name: branch.name,
+            commit_sha: branch.commit_sha,
+            indexed_at: branch.indexed_at,
+            is_live: branch.is_live,
+        })
+        .collect())
 }
 
 #[component]
@@ -83,7 +101,7 @@ pub fn RepoDetailPage() -> impl IntoView {
                                     let total = branches.len();
                                     let repo = repo_name();
                                     let show_all = show_all_branches();
-                                    let visible: Vec<String> = if show_all {
+                                    let visible: Vec<RepoBranchDisplay> = if show_all {
                                         branches.clone()
                                     } else {
                                         branches
@@ -116,16 +134,48 @@ pub fn RepoDetailPage() -> impl IntoView {
                                                         {visible
                                                             .into_iter()
                                                             .map(|branch| {
-                                                                let href = format!("/repo/{}/tree/{}", repo, &branch);
+                                                                let href = format!("/repo/{}/tree/{}", repo, branch.name);
+                                                                let short_commit: String = branch
+                                                                    .commit_sha
+                                                                    .chars()
+                                                                    .take(7)
+                                                                    .collect();
+                                                                let live_badge = branch
+                                                                    .is_live
+                                                                    .then(|| {
+                                                                        view! {
+                                                                            <span class="inline-flex items-center rounded-full bg-emerald-200/70 text-emerald-900 dark:bg-emerald-900/60 dark:text-emerald-100 px-2 py-0.5 text-[11px] uppercase tracking-wide">
+                                                                                "Live"
+                                                                            </span>
+                                                                        }
+                                                                    });
+                                                                let indexed_badge = branch
+                                                                    .indexed_at
+                                                                    .as_deref()
+                                                                    .and_then(format_indexed_timestamp)
+                                                                    .map(|label| {
+                                                                        view! {
+                                                                            <span class="inline-flex items-center rounded-full bg-slate-200 text-slate-800 dark:bg-slate-800/70 dark:text-slate-200 px-2 py-0.5 text-[11px]">
+                                                                                {label}
+                                                                            </span>
+                                                                        }
+                                                                    });
                                                                 view! {
                                                                     <li class="last:border-b-0">
                                                                         <A
                                                                             href=href
                                                                             attr:class="flex items-center justify-between gap-3 px-4 py-3 text-left transition-colors text-slate-900 dark:text-slate-100 rounded-md hover:bg-slate-100/90 dark:hover:bg-slate-800/70 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-600 dark:focus-visible:outline-sky-400"
                                                                         >
-                                                                            <span class="font-mono text-sm text-slate-900 dark:text-slate-100 break-words">
-                                                                                {branch.clone()}
-                                                                            </span>
+                                                                            <div class="flex flex-col gap-1 min-w-0">
+                                                                                <span class="font-mono text-sm text-slate-900 dark:text-slate-100 break-words">
+                                                                                    {branch.name.clone()}
+                                                                                </span>
+                                                                                <div class="flex flex-wrap items-center gap-2 text-[11px] text-slate-600 dark:text-slate-300">
+                                                                                    <span>{format!("Head {}", short_commit)}</span>
+                                                                                    {live_badge}
+                                                                                    {indexed_badge}
+                                                                                </div>
+                                                                            </div>
                                                                             <span class="text-xs text-slate-600 dark:text-slate-200">
                                                                                 "Open"
                                                                             </span>
@@ -184,4 +234,12 @@ pub fn RepoDetailPage() -> impl IntoView {
             </div>
         </main>
     }
+}
+
+fn format_indexed_timestamp(ts: &str) -> Option<String> {
+    chrono::DateTime::parse_from_rfc3339(ts).ok().map(|dt| {
+        dt.with_timezone(&Utc)
+            .format("Indexed %Y-%m-%d %H:%M UTC")
+            .to_string()
+    })
 }

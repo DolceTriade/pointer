@@ -16,8 +16,8 @@ use crate::chunk_store::ChunkStore;
 use crate::config::IndexerConfig;
 use crate::extractors::{self, ExtractedSymbol};
 use crate::models::{
-    BranchHead, ChunkMapping, ContentBlob, FilePointer, IndexArtifacts, RecordWriter,
-    ReferenceRecord, SymbolNamespaceRecord, SymbolRecord,
+    BranchHead, BranchPolicy, BranchSnapshotPolicy, ChunkMapping, ContentBlob, FilePointer,
+    IndexArtifacts, RecordWriter, ReferenceRecord, SymbolNamespaceRecord, SymbolRecord,
 };
 use crate::utils;
 
@@ -239,10 +239,27 @@ impl Indexer {
 
         let mut branches = Vec::new();
         if let Some(branch) = &self.config.branch {
+            let policy = self
+                .config
+                .branch_policy
+                .clone()
+                .map(|policy| BranchPolicy {
+                    latest_keep_count: policy.latest_keep_count,
+                    is_live: policy.live,
+                    snapshot_policies: policy
+                        .snapshot_policies
+                        .into_iter()
+                        .map(|snapshot| BranchSnapshotPolicy {
+                            interval_seconds: snapshot.interval_seconds,
+                            keep_count: snapshot.keep_count,
+                        })
+                        .collect(),
+                });
             branches.push(BranchHead {
                 repository: self.config.repository.clone(),
                 branch: branch.clone(),
                 commit_sha: self.config.commit.clone(),
+                policy,
             });
         }
 
