@@ -2757,6 +2757,11 @@
   .italic {
     font-style: italic;
   }
+  .placeholder-gray-500 {
+    &::placeholder {
+      color: var(--color-gray-500);
+    }
+  }
   .opacity-0 {
     opacity: 0%;
   }
@@ -3330,6 +3335,13 @@
   .dark\:text-white {
     &:where(.dark, .dark *) {
       color: var(--color-white);
+    }
+  }
+  .dark\:placeholder-gray-400 {
+    &:where(.dark, .dark *) {
+      &::placeholder {
+        color: var(--color-gray-400);
+      }
     }
   }
   .dark\:prose-invert {

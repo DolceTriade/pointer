@@ -58,7 +58,7 @@ pub fn SearchBar(#[prop(optional)] initial_query: String) -> impl IntoView {
                     <input
                         type="text"
                         placeholder="Search for code... (use DSL: repo:myrepo lang:rust)"
-                        class="w-full px-8 py-4 bg-transparent focus:outline-none pr-16"
+                        class="w-full px-8 py-4 bg-transparent focus:outline-none pr-16 text-gray-900 dark:text-gray-100 placeholder-gray-500 dark:placeholder-gray-400"
                         prop:value=query
                         on:input=on_input
                         on:keydown={
