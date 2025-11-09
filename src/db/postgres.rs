@@ -1310,6 +1310,7 @@ ORDER BY idx
         let minimum = page_size.saturating_mul(sample_factor);
         let fetch_limit_u64 = base_limit.max(minimum).saturating_add(1);
         let fetch_limit = fetch_limit_u64.min(i64::MAX as u64) as i64;
+        let file_limit = fetch_limit.min(200);
 
         qb.push(
             "),
@@ -1339,6 +1340,48 @@ ORDER BY idx
         qb.push_bind(fetch_limit);
         qb.push(
             "
+            ),
+            scored_files AS (
+                SELECT
+                    repository,
+                    commit_sha,
+                    file_path,
+                    content_hash,
+                    include_historical,
+                    SUM(
+                        CASE
+                            WHEN highlight_case_sensitive THEN 2
+                            ELSE 1
+                        END
+                    ) AS score,
+                    MIN(start_line) AS min_start_line
+                FROM limited_plan
+                GROUP BY repository, commit_sha, file_path, content_hash, include_historical
+            ),
+            top_files AS (
+                SELECT
+                    repository,
+                    commit_sha,
+                    file_path,
+                    content_hash,
+                    include_historical
+                FROM scored_files
+                ORDER BY score DESC, min_start_line ASC
+                LIMIT ",
+        );
+        qb.push_bind(file_limit);
+        qb.push(
+            "
+            ),
+            final_plan AS (
+                SELECT lp.*
+                FROM limited_plan lp
+                JOIN top_files tf
+                  ON lp.repository = tf.repository
+                 AND lp.commit_sha = tf.commit_sha
+                 AND lp.file_path = tf.file_path
+                 AND lp.content_hash = tf.content_hash
+                 AND lp.include_historical = tf.include_historical
             )
             SELECT DISTINCT ON (lp.repository, lp.commit_sha, lp.file_path, lp.start_line, ctx.match_line_number)
                 lp.repository,
@@ -1372,7 +1415,7 @@ ORDER BY idx
                     ELSE FALSE
                 END AS is_historical
             FROM
-                limited_plan lp
+                final_plan lp
             CROSS JOIN LATERAL extract_context_with_highlight(
                 lp.text_content,
                 lp.highlight_pattern,

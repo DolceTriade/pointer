@@ -101,8 +101,8 @@ CREATE OR REPLACE FUNCTION symbol_weight(
     SELECT
         0::DOUBLE PRECISION
         + CASE
-            WHEN symbol_kind = 'definition' THEN 120
-            WHEN symbol_kind = 'declaration' THEN 90
+            WHEN symbol_kind = 'definition' THEN 200
+            WHEN symbol_kind = 'declaration' THEN 100
             ELSE 50
           END
         + CASE
