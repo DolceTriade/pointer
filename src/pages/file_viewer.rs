@@ -11,7 +11,7 @@ use leptos_router::components::A;
 use leptos_router::hooks::{use_location, use_params};
 use leptos_router::params::Params;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::{collections::HashSet, rc::Rc};
 use web_sys::wasm_bindgen::{JsCast, UnwrapThrowExt};
 
 const SYMBOL_HIGHLIGHT_CLASS: &str = "selected-symbol-highlight";
@@ -29,6 +29,7 @@ pub enum FileViewerData {
         html: String,
         line_count: usize,
         language: Option<String>,
+        content: String,
     },
     Binary {
         download_url: String,
@@ -239,6 +240,7 @@ pub async fn get_file_viewer_data(
             html,
             line_count,
             language: file_content.language.clone(),
+            content: file_content.content.clone(),
         })
     }
 }
@@ -1073,8 +1075,15 @@ fn FileContent(
     html: String,
     line_count: usize,
     selected_symbol: RwSignal<Option<String>>,
+    content: String,
+    language: Option<String>,
 ) -> impl IntoView {
     let code_ref = NodeRef::<Code>::new();
+    let line_numbers_ref = NodeRef::<Div>::new();
+    let line_height = RwSignal::new(16.0);
+    let scopes = Rc::new(parse_scopes(&content, language.as_deref(), line_count));
+    let has_scopes = !scopes.is_empty();
+    let active_scopes = RwSignal::new(build_scope_stack(&scopes, 1));
 
     let code_ref = code_ref.clone();
     Effect::new(move |_| {
@@ -1115,6 +1124,22 @@ fn FileContent(
 
         on_cleanup(move || handle.remove());
     });
+
+    {
+        let line_numbers_ref = line_numbers_ref.clone();
+        let line_height = line_height.clone();
+        Effect::new(move |_| {
+            if let Some(div) = line_numbers_ref.get() {
+                let total_height = div.scroll_height() as f64;
+                if line_count > 0 {
+                    let candidate = total_height / line_count.max(1) as f64;
+                    if candidate.is_finite() && candidate > 0.0 {
+                        line_height.set(candidate);
+                    }
+                }
+            }
+        });
+    }
 
     let on_mouse_up = {
         let selected_symbol = selected_symbol.clone();
@@ -1219,23 +1244,82 @@ fn FileContent(
         });
     }
 
+    {
+        let code_ref = code_ref.clone();
+        let line_height = line_height.clone();
+        let scopes = scopes.clone();
+        let active_scopes = active_scopes.clone();
+        Effect::new(move |_| {
+            if scopes.is_empty() {
+                return;
+            }
+            if line_height.get() <= 0.0 {
+                return;
+            }
+            if code_ref.get().is_none() {
+                return;
+            }
+            use leptos::leptos_dom::helpers::window_event_listener;
+
+            let updater = Rc::new({
+                let code_ref = code_ref.clone();
+                let line_height = line_height.clone();
+                let scopes = scopes.clone();
+                let active_scopes = active_scopes.clone();
+                move || {
+                    if let (Some(window), Some(code_el)) = (web_sys::window(), code_ref.get()) {
+                        let element: web_sys::Element = code_el.unchecked_into();
+                        let top_line =
+                            compute_top_line(&window, &element, line_height.get(), line_count);
+                        active_scopes.set(build_scope_stack(&scopes, top_line));
+                    }
+                }
+            });
+
+            updater();
+
+            let scroll_handle = window_event_listener(leptos::ev::scroll, {
+                let updater = Rc::clone(&updater);
+                move |_| updater()
+            });
+            let resize_handle = window_event_listener(leptos::ev::resize, {
+                let updater = Rc::clone(&updater);
+                move |_| updater()
+            });
+            on_cleanup(move || {
+                scroll_handle.remove();
+                resize_handle.remove();
+            });
+        });
+    }
+
     view! {
-        <div class="flex font-mono text-sm overflow-x-auto">
-            <div class="text-right text-gray-500 pr-4 select-none">
-                {(1..=line_count)
-                    .map(|n| {
-                        view! {
-                            <a href=format!("#L{n}") class="block hover:text-blue-400">
-                                {n}
-                            </a>
-                        }
-                    })
-                    .collect_view()}
+        <div class="relative space-y-2">
+            <Show when=move || has_scopes fallback=move || view! { <></> }>
+                <ScopeBreadcrumbBar current=active_scopes.clone() />
+            </Show>
+            <div class="flex font-mono text-sm overflow-x-auto">
+                <div class="text-right text-gray-500 pr-4 select-none" node_ref=line_numbers_ref>
+                    {(1..=line_count)
+                        .map(|n| {
+                            let link_id = format!("line-number-{}", n);
+                            view! {
+                                <a
+                                    id=link_id
+                                    href=format!("#L{n}")
+                                    class="block hover:text-blue-400"
+                                >
+                                    {n}
+                                </a>
+                            }
+                        })
+                        .collect_view()}
+                </div>
+                <pre class="flex-grow" tabindex="0" on:mouseup=on_mouse_up>
+                    <code id="code-content" inner_html=html node_ref=code_ref />
+                </pre>
+                <LineHighlighter />
             </div>
-            <pre class="flex-grow" tabindex="0" on:mouseup=on_mouse_up>
-                <code id="code-content" inner_html=html node_ref=code_ref />
-            </pre>
-            <LineHighlighter />
         </div>
     }
 }
@@ -1376,6 +1460,359 @@ fn PathFilterActions(
                 </ul>
             </div>
         </details>
+    }
+}
+
+#[component]
+fn ScopeBreadcrumbBar(current: RwSignal<Vec<ScopeDisplay>>) -> impl IntoView {
+    view! {
+        <div class="sticky top-0 z-10 bg-white/95 dark:bg-gray-900/95 backdrop-blur border-b border-gray-200 dark:border-gray-700 mb-2 shadow-sm">
+            <div class="flex flex-wrap items-center gap-2 text-xs px-3 py-2 text-gray-600 dark:text-gray-300">
+                {move || {
+                    let stack = current.get();
+                    if stack.is_empty() {
+                        view! { <span class="text-gray-500 dark:text-gray-400">"No enclosing scope"</span> }
+                            .into_any()
+                    } else {
+                        stack
+                            .into_iter()
+                            .map(|scope| {
+                                let line = scope.start_line;
+                                let label = scope.label.clone();
+                                view! {
+                                    <button
+                                        class="inline-flex items-center gap-2 rounded-full bg-gray-100 dark:bg-gray-800 px-2 py-0.5 text-gray-700 dark:text-gray-100 hover:bg-blue-100 dark:hover:bg-blue-900 transition"
+                                        on:click=move |_| scroll_to_line(line)
+                                    >
+                                        <span>{label}</span>
+                                        <span class="text-[10px] text-gray-500 dark:text-gray-400">{"#"}{line}</span>
+                                    </button>
+                                }
+                            })
+                            .collect_view()
+                            .into_any()
+                    }
+                }}
+            </div>
+        </div>
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ScopeNode {
+    label: String,
+    start_line: usize,
+    end_line: usize,
+    parent: Option<usize>,
+    depth: usize,
+}
+
+#[derive(Clone, Debug)]
+struct ScopeDisplay {
+    label: String,
+    start_line: usize,
+}
+
+struct StackEntry {
+    scope_idx: Option<usize>,
+}
+
+struct PendingScope {
+    label: String,
+    start_line: usize,
+}
+
+fn parse_scopes(content: &str, language: Option<&str>, total_lines: usize) -> Vec<ScopeNode> {
+    if let Some(lang) = language {
+        let lower = lang.to_lowercase();
+        if lower.contains("python") || lower.contains("py") {
+            return parse_python_scopes(content, total_lines);
+        }
+    }
+    parse_brace_scopes(content, total_lines)
+}
+
+fn parse_brace_scopes(content: &str, total_lines: usize) -> Vec<ScopeNode> {
+    let mut scopes: Vec<ScopeNode> = Vec::new();
+    let mut stack: Vec<StackEntry> = Vec::new();
+    let mut pending: Vec<PendingScope> = Vec::new();
+
+    for (idx, line) in content.lines().enumerate() {
+        let line_no = idx + 1;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if let Some(label) = detect_brace_scope_label(trimmed) {
+            let has_brace = trimmed.contains('{');
+            if has_brace {
+                let scope_idx = add_scope(&mut scopes, &stack, label, line_no);
+                stack.push(StackEntry {
+                    scope_idx: Some(scope_idx),
+                });
+            } else {
+                pending.push(PendingScope {
+                    label,
+                    start_line: line_no,
+                });
+            }
+        }
+
+        for ch in line.chars() {
+            match ch {
+                '{' => {
+                    if let Some(pending_scope) = pending.pop() {
+                        let scope_idx = add_scope(
+                            &mut scopes,
+                            &stack,
+                            pending_scope.label,
+                            pending_scope.start_line,
+                        );
+                        stack.push(StackEntry {
+                            scope_idx: Some(scope_idx),
+                        });
+                    } else {
+                        stack.push(StackEntry { scope_idx: None });
+                    }
+                }
+                '}' => {
+                    if let Some(entry) = stack.pop() {
+                        if let Some(scope_idx) = entry.scope_idx {
+                            scopes[scope_idx].end_line = line_no.max(scopes[scope_idx].start_line);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    while let Some(entry) = stack.pop() {
+        if let Some(idx) = entry.scope_idx {
+            scopes[idx].end_line = total_lines.max(scopes[idx].start_line);
+        }
+    }
+
+    for pending_scope in pending {
+        let idx = add_scope(
+            &mut scopes,
+            &[],
+            pending_scope.label,
+            pending_scope.start_line,
+        );
+        scopes[idx].end_line = pending_scope.start_line;
+    }
+
+    scopes
+}
+
+fn parse_python_scopes(content: &str, total_lines: usize) -> Vec<ScopeNode> {
+    let mut scopes: Vec<ScopeNode> = Vec::new();
+    let mut stack: Vec<(usize, usize)> = Vec::new();
+
+    for (idx, line) in content.lines().enumerate() {
+        let line_no = idx + 1;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        let indent = line
+            .chars()
+            .take_while(|c| *c == ' ' || *c == '\t')
+            .map(|ch| if ch == '\t' { 4 } else { 1 })
+            .sum();
+
+        while let Some(&(prev_indent, scope_idx)) = stack.last() {
+            if indent <= prev_indent {
+                stack.pop();
+                scopes[scope_idx].end_line =
+                    line_no.saturating_sub(1).max(scopes[scope_idx].start_line);
+            } else {
+                break;
+            }
+        }
+
+        if trimmed.ends_with(':') {
+            if let Some(label) = detect_python_scope_label(trimmed) {
+                let parent = stack.last().map(|&(_, idx)| idx);
+                let depth = parent.map(|idx| scopes[idx].depth + 1).unwrap_or(0);
+                let node = ScopeNode {
+                    label,
+                    start_line: line_no,
+                    end_line: line_no,
+                    parent,
+                    depth,
+                };
+                let idx = scopes.len();
+                scopes.push(node);
+                stack.push((indent, idx));
+            }
+        }
+    }
+
+    let final_line = total_lines.max(1);
+    while let Some((_, idx)) = stack.pop() {
+        scopes[idx].end_line = final_line.max(scopes[idx].start_line);
+    }
+
+    scopes
+}
+
+fn detect_brace_scope_label(line: &str) -> Option<String> {
+    let lowered = line.to_lowercase();
+    if lowered.starts_with("namespace ") {
+        let name = line["namespace ".len()..]
+            .split(['{', '('])
+            .next()
+            .unwrap_or("")
+            .trim();
+        if !name.is_empty() {
+            return Some(format!("namespace {}", name));
+        }
+    }
+
+    for keyword in ["class", "struct", "enum", "interface"] {
+        if lowered.starts_with(&format!("{keyword} ")) {
+            let name = line[keyword.len() + 1..]
+                .split(['{', ':', '('])
+                .next()
+                .unwrap_or("")
+                .trim();
+            if !name.is_empty() {
+                return Some(format!("{} {}", keyword, name));
+            }
+        }
+    }
+
+    for keyword in [
+        "else if", "else", "if", "switch", "for", "while", "do", "try", "catch",
+    ] {
+        if lowered.starts_with(keyword) {
+            let summary = line.split('{').next().unwrap_or(line).trim().to_string();
+            return Some(summary);
+        }
+    }
+
+    if line.contains('(') && line.contains(')') && line.ends_with('{') && !line.contains(';') {
+        let before_paren = line.split('(').next().unwrap_or("");
+        let candidate = before_paren
+            .split_whitespace()
+            .last()
+            .unwrap_or("")
+            .trim_matches(|c: char| c == '*' || c == '&');
+        if !candidate.is_empty()
+            && !matches!(
+                candidate,
+                "if" | "for" | "while" | "switch" | "catch" | "else"
+            )
+        {
+            return Some(format!("fn {}(...)", candidate));
+        }
+    }
+
+    None
+}
+
+fn detect_python_scope_label(line: &str) -> Option<String> {
+    let trimmed = line.trim_end_matches(':').trim();
+    let mut parts = trimmed.split_whitespace();
+    let keyword = parts.next()?;
+    match keyword {
+        "def" => parts
+            .next()
+            .map(|name| format!("def {}", name.trim_end_matches('('))),
+        "class" => parts.next().map(|name| format!("class {}", name)),
+        "if" | "elif" | "else" | "for" | "while" | "try" | "except" | "with" => {
+            Some(trimmed.to_string())
+        }
+        _ => None,
+    }
+}
+
+fn add_scope(
+    scopes: &mut Vec<ScopeNode>,
+    stack: &[StackEntry],
+    label: String,
+    start_line: usize,
+) -> usize {
+    let parent = stack.iter().rev().find_map(|entry| entry.scope_idx);
+    let depth = parent.map(|idx| scopes[idx].depth + 1).unwrap_or(0);
+    let node = ScopeNode {
+        label,
+        start_line,
+        end_line: start_line,
+        parent,
+        depth,
+    };
+    scopes.push(node);
+    scopes.len() - 1
+}
+
+fn build_scope_stack(scopes: &Vec<ScopeNode>, line: usize) -> Vec<ScopeDisplay> {
+    if scopes.is_empty() {
+        return Vec::new();
+    }
+    let mut candidate: Option<usize> = None;
+    for (idx, scope) in scopes.iter().enumerate() {
+        if line >= scope.start_line && line <= scope.end_line {
+            candidate = match candidate {
+                Some(existing) => {
+                    if scope.depth >= scopes[existing].depth {
+                        Some(idx)
+                    } else {
+                        Some(existing)
+                    }
+                }
+                None => Some(idx),
+            };
+        }
+    }
+
+    let mut stack = Vec::new();
+    let mut current = candidate;
+    while let Some(idx) = current {
+        let scope = &scopes[idx];
+        stack.push(ScopeDisplay {
+            label: scope.label.clone(),
+            start_line: scope.start_line,
+        });
+        current = scope.parent;
+    }
+    stack.reverse();
+    stack
+}
+
+fn compute_top_line(
+    window: &web_sys::Window,
+    element: &web_sys::Element,
+    line_height: f64,
+    line_count: usize,
+) -> usize {
+    if line_height <= 0.0 {
+        return 1;
+    }
+    let scroll_y = window.scroll_y().unwrap_or(0.0);
+    let rect = element.get_bounding_client_rect();
+    let absolute_top = rect.top() + scroll_y;
+    let offset = scroll_y - absolute_top;
+    let line = if offset <= 0.0 {
+        1
+    } else {
+        (offset / line_height).floor() as usize + 1
+    };
+    line.clamp(1, line_count.max(1))
+}
+
+fn scroll_to_line(line: usize) {
+    if let Some(window) = web_sys::window() {
+        if let Some(document) = window.document() {
+            let target_id = format!("line-number-{}", line);
+            if let Some(target) = document.get_element_by_id(&target_id) {
+                target.scroll_into_view();
+            }
+        }
     }
 }
 
@@ -2295,7 +2732,12 @@ pub fn FileViewer() -> impl IntoView {
                                         .map(|result| match result {
                                             Ok(data) => {
                                                 match data {
-                                                    FileViewerData::File { html, line_count, .. } => {
+                                                    FileViewerData::File {
+                                                        html,
+                                                        line_count,
+                                                        language,
+                                                        content,
+                                                    } => {
                                                         EitherOf4::A(
                                                             view! {
                                                                 <div class="bg-white dark:bg-gray-800 rounded-lg shadow border border-gray-200 dark:border-gray-700 p-4">
@@ -2303,6 +2745,8 @@ pub fn FileViewer() -> impl IntoView {
                                                                         html=html
                                                                         line_count=line_count
                                                                         selected_symbol=selected_symbol
+                                                                        content=content
+                                                                        language=language
                                                                     />
                                                                 </div>
                                                             },
