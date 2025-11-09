@@ -1661,9 +1661,10 @@ fn parse_python_scopes(content: &str, total_lines: usize) -> Vec<ScopeNode> {
 }
 
 fn detect_brace_scope_label(line: &str) -> Option<String> {
-    let lowered = line.to_lowercase();
+    let trimmed = line.trim_start();
+    let lowered = trimmed.to_lowercase();
     if lowered.starts_with("namespace ") {
-        let name = line["namespace ".len()..]
+        let name = trimmed["namespace ".len()..]
             .split(['{', '('])
             .next()
             .unwrap_or("")
@@ -1673,9 +1674,9 @@ fn detect_brace_scope_label(line: &str) -> Option<String> {
         }
     }
 
-    for keyword in ["class", "struct", "enum", "interface"] {
+    for keyword in ["class", "struct", "enum", "interface", "trait", "object"] {
         if lowered.starts_with(&format!("{keyword} ")) {
-            let name = line[keyword.len() + 1..]
+            let name = trimmed[keyword.len() + 1..]
                 .split(['{', ':', '('])
                 .next()
                 .unwrap_or("")
@@ -1686,17 +1687,54 @@ fn detect_brace_scope_label(line: &str) -> Option<String> {
         }
     }
 
+    for keyword in ["mod", "module"] {
+        if lowered.starts_with(&format!("{keyword} ")) {
+            let name = trimmed[keyword.len() + 1..]
+                .split(['{', ';'])
+                .next()
+                .unwrap_or("")
+                .trim();
+            if !name.is_empty() {
+                return Some(format!("{} {}", keyword, name));
+            }
+        }
+    }
+
+    if trimmed.starts_with("impl") {
+        let rest = trimmed["impl".len()..].trim();
+        let signature = rest
+            .split('{')
+            .next()
+            .unwrap_or(rest)
+            .trim_end_matches(|c: char| c == ';')
+            .trim();
+        if !signature.is_empty() {
+            return Some(format!("impl {}", signature));
+        } else {
+            return Some("impl".to_string());
+        }
+    }
+
     for keyword in [
         "else if", "else", "if", "switch", "for", "while", "do", "try", "catch",
     ] {
         if lowered.starts_with(keyword) {
-            let summary = line.split('{').next().unwrap_or(line).trim().to_string();
+            let summary = trimmed
+                .split('{')
+                .next()
+                .unwrap_or(trimmed)
+                .trim()
+                .to_string();
             return Some(summary);
         }
     }
 
-    if line.contains('(') && line.contains(')') && line.ends_with('{') && !line.contains(';') {
-        let before_paren = line.split('(').next().unwrap_or("");
+    if trimmed.contains('(')
+        && trimmed.contains(')')
+        && trimmed.ends_with('{')
+        && !trimmed.contains(';')
+    {
+        let before_paren = trimmed.split('(').next().unwrap_or("");
         let candidate = before_paren
             .split_whitespace()
             .last()
