@@ -4,6 +4,7 @@ pub mod components;
 pub mod db;
 pub mod dsl;
 pub mod pages;
+pub mod scope_parser;
 pub mod services;
 pub mod utils;
 
