@@ -1085,6 +1085,7 @@ fn FileContent(
     let scopes = Rc::new(extract_scopes(&content, language.as_deref()));
     let has_scopes = !scopes.is_empty();
     let active_scopes = RwSignal::new(scope_chain_for_line(&scopes, 1));
+    let scopes_collapsed = RwSignal::new(false);
 
     let code_ref = code_ref.clone();
     Effect::new(move |_| {
@@ -1297,7 +1298,10 @@ fn FileContent(
     view! {
         <div class="relative space-y-2">
             <Show when=move || has_scopes fallback=move || view! { <></> }>
-                <ScopeBreadcrumbBar current=active_scopes.clone() />
+                <ScopeBreadcrumbBar
+                    current=active_scopes.clone()
+                    collapsed=scopes_collapsed.clone()
+                />
             </Show>
             <div class="flex font-mono text-sm overflow-x-auto">
                 <div class="text-right text-gray-500 pr-4 select-none" node_ref=line_numbers_ref>
@@ -1465,35 +1469,54 @@ fn PathFilterActions(
 }
 
 #[component]
-fn ScopeBreadcrumbBar(current: RwSignal<Vec<ScopeBreadcrumb>>) -> impl IntoView {
+fn ScopeBreadcrumbBar(
+    current: RwSignal<Vec<ScopeBreadcrumb>>,
+    collapsed: RwSignal<bool>,
+) -> impl IntoView {
     view! {
         <div class="sticky top-0 z-10 bg-white/95 dark:bg-gray-900/95 backdrop-blur border-b border-gray-200 dark:border-gray-700 mb-2 shadow-sm">
-            <div class="flex flex-wrap items-center gap-2 text-xs px-3 py-2 text-gray-600 dark:text-gray-300">
-                {move || {
-                    let stack = current.get();
-                    if stack.is_empty() {
-                        view! { <span class="text-gray-500 dark:text-gray-400">"No enclosing scope"</span> }
-                            .into_any()
-                    } else {
-                        stack
-                            .into_iter()
-                            .map(|scope| {
-                                let line = scope.start_line;
-                                let label = scope.label.clone();
-                                view! {
-                                    <button
-                                        class="inline-flex items-center gap-2 rounded-full bg-gray-100 dark:bg-gray-800 px-2 py-0.5 text-gray-700 dark:text-gray-100 hover:bg-blue-100 dark:hover:bg-blue-900 transition"
-                                        on:click=move |_| scroll_to_line(line)
-                                    >
-                                        <span>{label}</span>
-                                        <span class="text-[10px] text-gray-500 dark:text-gray-400">{"#"}{line}</span>
-                                    </button>
-                                }
-                            })
-                            .collect_view()
-                            .into_any()
-                    }
+            <div class="flex items-center justify-between gap-3 text-xs px-3 py-2 text-gray-600 dark:text-gray-300">
+                <div class="flex flex-wrap items-center gap-2 overflow-hidden min-h-[1.5rem]">
+                    {move || {
+                        let stack = current.get();
+                        if stack.is_empty() {
+                            view! { <span class="text-gray-500 dark:text-gray-400">"No enclosing scope"</span> }
+                                .into_any()
+                        } else if collapsed.get() {
+                            view! {
+                                <span class="text-gray-500 dark:text-gray-400 italic">
+                                    {format!("{} scope{}", stack.len(), if stack.len() == 1 { "" } else { "s" })}
+                                    " hidden"
+                                </span>
+                            }
+                                .into_any()
+                        } else {
+                            stack
+                                .into_iter()
+                                .map(|scope| {
+                                    let line = scope.start_line;
+                                    let label = scope.label.clone();
+                                    view! {
+                                        <button
+                                            class="inline-flex items-center gap-2 rounded-full bg-gray-100 dark:bg-gray-800 px-2 py-0.5 text-gray-700 dark:text-gray-100 hover:bg-blue-100 dark:hover:bg-blue-900 transition"
+                                            on:click=move |_| scroll_to_line(line)
+                                        >
+                                            <span class="truncate max-w-[16rem]">{label}</span>
+                                            <span class="text-[10px] text-gray-500 dark:text-gray-400">{"#"}{line}</span>
+                                        </button>
+                                    }
+                                })
+                                .collect_view()
+                                .into_any()
+                        }
                 }}
+                </div>
+                <button
+                    class="text-[11px] uppercase tracking-wide px-2 py-1 rounded border border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 transition"
+                    on:click=move |_| collapsed.update(|value| *value = !*value)
+                >
+                    {move || if collapsed.get() { "Expand" } else { "Collapse" }}
+                </button>
             </div>
         </div>
     }

@@ -2205,6 +2205,9 @@
   .max-h-\[calc\(100vh-6rem\)\] {
     max-height: calc(100vh - 6rem);
   }
+  .min-h-\[1\.5rem\] {
+    min-height: 1.5rem;
+  }
   .min-h-screen {
     min-height: 100vh;
   }
@@ -2276,6 +2279,9 @@
   }
   .max-w-\[12rem\] {
     max-width: 12rem;
+  }
+  .max-w-\[16rem\] {
+    max-width: 16rem;
   }
   .max-w-full {
     max-width: 100%;
@@ -3489,6 +3495,15 @@
       &:hover {
         @media (hover: hover) {
           background-color: var(--color-gray-700);
+        }
+      }
+    }
+  }
+  .dark\:hover\:bg-gray-800 {
+    &:where(.dark, .dark *) {
+      &:hover {
+        @media (hover: hover) {
+          background-color: var(--color-gray-800);
         }
       }
     }
