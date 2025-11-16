@@ -102,10 +102,18 @@ fn parse_brace_scopes(source: &str) -> Vec<ScopeInfo> {
 fn parse_indentation_scopes(source: &str) -> Vec<ScopeInfo> {
     let mut scopes: Vec<ScopeInfo> = Vec::new();
     let mut stack: Vec<(usize, usize)> = Vec::new();
+    let mut multiline_delimiter: Option<&'static str> = None;
 
     for (idx, line) in source.lines().enumerate() {
         let line_no = idx + 1;
-        if line.trim().is_empty() {
+        let trimmed = line.trim();
+        let inside_multiline = multiline_delimiter.is_some();
+        if trimmed.is_empty() {
+            update_multiline_state(line, &mut multiline_delimiter);
+            continue;
+        }
+        if inside_multiline {
+            update_multiline_state(line, &mut multiline_delimiter);
             continue;
         }
         let indent = line
@@ -138,6 +146,7 @@ fn parse_indentation_scopes(source: &str) -> Vec<ScopeInfo> {
             scopes.push(scope);
             stack.push((indent, scopes.len() - 1));
         }
+        update_multiline_state(line, &mut multiline_delimiter);
     }
 
     let final_line = source.lines().count().max(1);
@@ -319,6 +328,36 @@ fn line_continues_to_next(line: &str) -> bool {
     trimmed.ends_with("->") || trimmed.ends_with("=>")
 }
 
+fn update_multiline_state(line: &str, state: &mut Option<&'static str>) {
+    let bytes = line.as_bytes();
+    let mut idx = 0;
+    while idx + 2 < bytes.len() {
+        if bytes[idx] == b'\\' {
+            idx += 1;
+            continue;
+        }
+        if &bytes[idx..idx + 3] == b"\"\"\"" {
+            if matches!(state, Some(current) if *current == "\"\"\"") {
+                *state = None;
+            } else if state.is_none() {
+                *state = Some("\"\"\"");
+            }
+            idx += 3;
+            continue;
+        }
+        if &bytes[idx..idx + 3] == b"'''" {
+            if matches!(state, Some(current) if *current == "'''") {
+                *state = None;
+            } else if state.is_none() {
+                *state = Some("'''");
+            }
+            idx += 3;
+            continue;
+        }
+        idx += 1;
+    }
+}
+
 pub fn scope_chain_for_line(scopes: &[ScopeInfo], top_line: usize) -> Vec<ScopeBreadcrumb> {
     if scopes.is_empty() {
         return Vec::new();
@@ -413,6 +452,69 @@ func (f ManifestFile) new(sourceRepo SourceRepo) (*Runfiles, error) {
     err = r.loadRepoMapping()
     return r, err
 }
+"#;
+
+    const PYTHON_SNIPPET: &str = r#"TTS_92 = """
+tts:
+  - platform: google_translate
+    service_name: google_say
+"""
+
+
+class ConfigErrorTranslationKey(StrEnum):
+    """Config error translation keys for config errors."""
+
+    # translation keys with a generated config related message text
+    CONFIG_VALIDATION_ERR = "config_validation_err"
+    PLATFORM_CONFIG_VALIDATION_ERR = "platform_config_validation_err"
+
+    # translation keys with a general static message text
+    COMPONENT_IMPORT_ERR = "component_import_err"
+    CONFIG_PLATFORM_IMPORT_ERR = "config_platform_import_err"
+    CONFIG_VALIDATOR_UNKNOWN_ERR = "config_validator_unknown_err"
+    CONFIG_SCHEMA_UNKNOWN_ERR = "config_schema_unknown_err"
+    PLATFORM_COMPONENT_LOAD_ERR = "platform_component_load_err"
+    PLATFORM_COMPONENT_LOAD_EXC = "platform_component_load_exc"
+    PLATFORM_SCHEMA_VALIDATOR_ERR = "platform_schema_validator_err"
+
+    # translation key in case multiple errors occurred
+    MULTIPLE_INTEGRATION_CONFIG_ERRORS = "multiple_integration_config_errors"
+
+
+_CONFIG_LOG_SHOW_STACK_TRACE: dict[ConfigErrorTranslationKey, bool] = {
+    ConfigErrorTranslationKey.COMPONENT_IMPORT_ERR: False,
+    ConfigErrorTranslationKey.CONFIG_PLATFORM_IMPORT_ERR: False,
+    ConfigErrorTranslationKey.CONFIG_VALIDATOR_UNKNOWN_ERR: True,
+    ConfigErrorTranslationKey.CONFIG_SCHEMA_UNKNOWN_ERR: True,
+    ConfigErrorTranslationKey.PLATFORM_COMPONENT_LOAD_ERR: False,
+    ConfigErrorTranslationKey.PLATFORM_COMPONENT_LOAD_EXC: True,
+    ConfigErrorTranslationKey.PLATFORM_SCHEMA_VALIDATOR_ERR: True,
+}
+
+
+@dataclass
+class ConfigExceptionInfo:
+    """Configuration exception info class."""
+
+    exception: Exception
+    translation_key: ConfigErrorTranslationKey
+    platform_path: str
+    config: ConfigType
+    integration_link: str | None
+
+
+@dataclass
+class IntegrationConfigInfo:
+    """Configuration for an integration and exception information."""
+
+    config: ConfigType | None
+    exception_info_list: list[ConfigExceptionInfo]
+
+
+def get_default_config_dir() -> str:
+    """Put together the default configuration directory based on the OS."""
+    data_dir = os.path.expanduser("~")
+    return os.path.join(data_dir, CONFIG_DIR_NAME)
 "#;
 
     #[test]
@@ -654,6 +756,61 @@ fn bar() {}
                 label: "func (f ManifestFile) new(sourceRepo SourceRepo) (*Runfiles, error)"
                     .to_string(),
                 start_line: 6
+            }]
+        );
+    }
+
+    #[test]
+    fn python_scope_visibility_cases() {
+        let scopes = extract_scopes(PYTHON_SNIPPET, Some("python"));
+        assert!(
+            scopes
+                .iter()
+                .any(|scope| scope.label.starts_with("class ConfigErrorTranslationKey"))
+        );
+        assert!(scopes.iter().all(|scope| !scope.label.starts_with("tts")));
+
+        // When the class definition is visible, breadcrumbs stay empty.
+        let chain = visible_scope_chain(&scopes, 8, 9);
+        assert!(chain.is_empty());
+
+        // Scrolling past the class header shows the class scope.
+        let chain = visible_scope_chain(&scopes, 12, 18);
+        assert_eq!(
+            chain,
+            vec![ScopeBreadcrumb {
+                label: "class ConfigErrorTranslationKey(StrEnum)".to_string(),
+                start_line: 8
+            }]
+        );
+
+        // Inside the dataclass, we should see the enclosing class.
+        let chain = visible_scope_chain(&scopes, 44, 47);
+        assert_eq!(
+            chain,
+            vec![ScopeBreadcrumb {
+                label: "class ConfigExceptionInfo".to_string(),
+                start_line: 40
+            }]
+        );
+
+        // Similarly for the integration config class.
+        let chain = visible_scope_chain(&scopes, 54, 55);
+        assert_eq!(
+            chain,
+            vec![ScopeBreadcrumb {
+                label: "class IntegrationConfigInfo".to_string(),
+                start_line: 51
+            }]
+        );
+
+        // The function should appear when its signature is off screen.
+        let chain = visible_scope_chain(&scopes, 59, 60);
+        assert_eq!(
+            chain,
+            vec![ScopeBreadcrumb {
+                label: "def get_default_config_dir() -> str".to_string(),
+                start_line: 58
             }]
         );
     }
