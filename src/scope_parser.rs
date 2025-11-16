@@ -42,21 +42,23 @@ fn parse_brace_scopes(source: &str) -> Vec<ScopeInfo> {
 
     let mut scopes = Vec::new();
     let mut stack: Vec<Option<usize>> = Vec::new();
-    let mut pending: Vec<PendingScope> = Vec::new();
+    let mut pending: Option<PendingScope> = None;
+    let mut previous_line_continues = false;
 
     for (idx, line) in source.lines().enumerate() {
         let line_no = idx + 1;
         let trimmed = line.trim();
         if trimmed.is_empty() {
+            previous_line_continues = false;
             continue;
         }
 
         if let Some(label) = detect_scope_label(trimmed) {
-            if trimmed.contains('{') {
-                push_scope(&mut scopes, &stack, label, line_no);
-                stack.push(Some(scopes.len() - 1));
-            } else {
-                pending.push(PendingScope {
+            let should_override = pending.is_none()
+                || !previous_line_continues
+                || line_definitely_starts_scope(trimmed);
+            if should_override {
+                pending = Some(PendingScope {
                     label,
                     start_line: line_no,
                 });
@@ -66,7 +68,7 @@ fn parse_brace_scopes(source: &str) -> Vec<ScopeInfo> {
         for ch in line.chars() {
             match ch {
                 '{' => {
-                    if let Some(p) = pending.pop() {
+                    if let Some(p) = pending.take() {
                         push_scope(&mut scopes, &stack, p.label, p.start_line);
                         stack.push(Some(scopes.len() - 1));
                     } else {
@@ -84,6 +86,8 @@ fn parse_brace_scopes(source: &str) -> Vec<ScopeInfo> {
                 _ => {}
             }
         }
+
+        previous_line_continues = line_continues_to_next(trimmed);
     }
 
     while let Some(entry) = stack.pop() {
@@ -162,12 +166,157 @@ fn push_scope(
 }
 
 fn detect_scope_label(line: &str) -> Option<String> {
-    let before_brace = line.split('{').next().unwrap_or(line).trim();
-    if before_brace.is_empty() {
-        None
-    } else {
-        Some(before_brace.chars().take(120).collect())
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
     }
+
+    let without_leading_closers = trimmed.trim_start_matches(|c| matches!(c, '}' | ')' | ';'));
+    if without_leading_closers.is_empty() {
+        return None;
+    }
+
+    if without_leading_closers.starts_with("//")
+        || without_leading_closers.starts_with("/*")
+        || without_leading_closers.starts_with('*')
+        || without_leading_closers.starts_with('#')
+        || without_leading_closers.starts_with("--")
+    {
+        return None;
+    }
+
+    if without_leading_closers == "{" || without_leading_closers == "}" {
+        return None;
+    }
+
+    if without_leading_closers.ends_with(',') {
+        return None;
+    }
+
+    let lower = without_leading_closers.to_ascii_lowercase();
+    if lower.starts_with("type ") && !without_leading_closers.contains('{') {
+        return None;
+    }
+
+    let before_brace = without_leading_closers
+        .split('{')
+        .next()
+        .unwrap_or(without_leading_closers)
+        .trim();
+
+    if before_brace.is_empty() {
+        return None;
+    }
+
+    let looks_like_scope = without_leading_closers.contains('{')
+        || line_definitely_starts_scope(without_leading_closers)
+        || line_looks_like_signature(before_brace);
+
+    if !looks_like_scope {
+        return None;
+    }
+
+    Some(before_brace.chars().take(120).collect())
+}
+
+fn has_assignment_operator(segment: &str) -> bool {
+    let bytes = segment.as_bytes();
+    let mut idx = 0;
+    while idx < bytes.len() {
+        match bytes[idx] {
+            b'=' => {
+                let prev = if idx > 0 { bytes[idx - 1] } else { 0 };
+                let next = if idx + 1 < bytes.len() {
+                    bytes[idx + 1]
+                } else {
+                    0
+                };
+                let part_of_comparison =
+                    matches!(prev, b'<' | b'>' | b'=' | b'!') || matches!(next, b'=' | b'>');
+                if !part_of_comparison {
+                    return true;
+                }
+            }
+            b':' => {
+                if idx + 1 < bytes.len() && bytes[idx + 1] == b'=' {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        idx += 1;
+    }
+    false
+}
+
+fn line_looks_like_signature(segment: &str) -> bool {
+    if let Some(idx) = segment.find('(') {
+        let before = segment[..idx].trim();
+        if before.is_empty() {
+            return false;
+        }
+        if before.ends_with(',') {
+            return false;
+        }
+        if has_assignment_operator(before) {
+            return false;
+        }
+        true
+    } else {
+        false
+    }
+}
+
+fn line_definitely_starts_scope(line: &str) -> bool {
+    let stripped = line
+        .trim_start_matches(|c| matches!(c, '}' | ')' | ';'))
+        .to_ascii_lowercase();
+    const KEYWORDS: [&str; 24] = [
+        "if ",
+        "if(",
+        "else",
+        "else if",
+        "for ",
+        "for(",
+        "while",
+        "switch",
+        "case ",
+        "fn ",
+        "fn(",
+        "func ",
+        "function",
+        "def ",
+        "class ",
+        "struct ",
+        "enum ",
+        "impl",
+        "trait",
+        "interface",
+        "namespace",
+        "module",
+        "match",
+        "loop",
+    ];
+    KEYWORDS.iter().any(|kw| stripped.starts_with(kw))
+}
+
+fn line_continues_to_next(line: &str) -> bool {
+    let trimmed = line.trim_end();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let trailing = trimmed.as_bytes();
+    if trailing.ends_with(b"||") || trailing.ends_with(b"&&") {
+        return true;
+    }
+    match trimmed.chars().last().unwrap_or_default() {
+        ',' | '\\' | '+' | '-' | '*' | '/' | '%' | ':' | '?' | '(' | '.' | '&' | '|' => {
+            return true;
+        }
+        '=' => return true,
+        _ => {}
+    }
+    trimmed.ends_with("->") || trimmed.ends_with("=>")
 }
 
 pub fn scope_chain_for_line(scopes: &[ScopeInfo], top_line: usize) -> Vec<ScopeBreadcrumb> {
@@ -204,9 +353,67 @@ pub fn scope_chain_for_line(scopes: &[ScopeInfo], top_line: usize) -> Vec<ScopeB
     chain
 }
 
+pub fn visible_scope_chain(
+    scopes: &[ScopeInfo],
+    visible_start: usize,
+    visible_end: usize,
+) -> Vec<ScopeBreadcrumb> {
+    if scopes.is_empty() || visible_start > visible_end {
+        return Vec::new();
+    }
+
+    for line in visible_start..=visible_end {
+        let mut chain = scope_chain_for_line(scopes, line);
+        if chain.is_empty() {
+            continue;
+        }
+        chain.retain(|crumb| crumb.start_line < visible_start);
+        if !chain.is_empty() {
+            return chain;
+        }
+    }
+
+    Vec::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const GO_SNIPPET: &str = r#"// ManifestFile specifies the location of the runfile manifest file.  You can
+// pass this as an option to New.  If unset or empty, use the value of the
+// environmental variable RUNFILES_MANIFEST_FILE.
+type ManifestFile string
+
+func (f ManifestFile) new(sourceRepo SourceRepo) (*Runfiles, error) {
+    m, err := f.parse()
+    if err != nil {
+        return nil, err
+    }
+    env := []string{
+        manifestFileVar + "=" + string(f),
+    }
+    // Certain tools (e.g., Java tools) may need the runfiles directory, so try to find it even if
+    // running with a manifest file.
+    if strings.HasSuffix(string(f), ".runfiles_manifest") ||
+        strings.HasSuffix(string(f), "/MANIFEST") ||
+        strings.HasSuffix(string(f), "\\MANIFEST") {
+        // Cut off either "_manifest" or "/MANIFEST" or "\\MANIFEST", all of length 9, from the end
+        // of the path to obtain the runfiles directory.
+        d := string(f)[:len(string(f))-len("_manifest")]
+        env = append(env,
+            directoryVar+"="+d,
+            legacyDirectoryVar+"="+d)
+    }
+    r := &Runfiles{
+        impl:       &m,
+        env:        env,
+        sourceRepo: string(sourceRepo),
+    }
+    err = r.loadRepoMapping()
+    return r, err
+}
+"#;
 
     #[test]
     fn detects_nested_brace_scopes() {
@@ -292,5 +499,162 @@ def outer():
         assert_eq!(chain[0].label, "def outer()");
         assert_eq!(chain[1].label.trim(), "if check");
         assert!(chain[2].label.contains("for value"));
+    }
+
+    #[test]
+    fn visible_scope_returns_hidden_scope() {
+        let source = r#"fn foo() {
+    let x = 1;
+}
+
+fn bar() {}
+"#;
+        let scopes = extract_scopes(source, Some("rust"));
+        let chain = visible_scope_chain(&scopes, 3, 4);
+        assert_eq!(
+            chain,
+            vec![ScopeBreadcrumb {
+                label: "fn foo()".to_string(),
+                start_line: 1
+            }]
+        );
+    }
+
+    #[test]
+    fn visible_scope_requires_hidden_definition() {
+        let source = r#"fn foo() {
+    let x = 1;
+}
+"#;
+        let scopes = extract_scopes(source, Some("rust"));
+        let chain = visible_scope_chain(&scopes, 1, 3);
+        assert!(chain.is_empty());
+    }
+
+    #[test]
+    fn visible_scope_handles_nested_scopes() {
+        let source = r#"fn outer() {
+    if ready {
+        println!("inner");
+    }
+}
+"#;
+        let scopes = extract_scopes(source, Some("rust"));
+        let chain = visible_scope_chain(&scopes, 3, 4);
+        assert_eq!(
+            chain,
+            vec![
+                ScopeBreadcrumb {
+                    label: "fn outer()".to_string(),
+                    start_line: 1
+                },
+                ScopeBreadcrumb {
+                    label: "if ready".to_string(),
+                    start_line: 2
+                }
+            ]
+        );
+
+        let chain = visible_scope_chain(&scopes, 2, 4);
+        assert_eq!(
+            chain,
+            vec![ScopeBreadcrumb {
+                label: "fn outer()".to_string(),
+                start_line: 1
+            }]
+        );
+    }
+
+    #[test]
+    fn go_scope_visibility_cases() {
+        let scopes = extract_scopes(GO_SNIPPET, Some("go"));
+        assert!(
+            scopes
+                .iter()
+                .any(|scope| scope.label.starts_with("func (f ManifestFile) new"))
+        );
+
+        // When the function signature is visible, no breadcrumbs should render.
+        let chain = visible_scope_chain(&scopes, 6, 8);
+        assert!(chain.is_empty());
+
+        // Scrolling past the signature should show the enclosing function.
+        let chain = visible_scope_chain(&scopes, 10, 14);
+        assert_eq!(
+            chain,
+            vec![
+                ScopeBreadcrumb {
+                    label: "func (f ManifestFile) new(sourceRepo SourceRepo) (*Runfiles, error)"
+                        .to_string(),
+                    start_line: 6
+                },
+                ScopeBreadcrumb {
+                    label: "if err != nil".to_string(),
+                    start_line: 8
+                }
+            ]
+        );
+
+        // Inside the env literal the stack should include the function and the literal.
+        let chain = visible_scope_chain(&scopes, 12, 13);
+        assert_eq!(
+            chain,
+            vec![
+                ScopeBreadcrumb {
+                    label: "func (f ManifestFile) new(sourceRepo SourceRepo) (*Runfiles, error)"
+                        .to_string(),
+                    start_line: 6
+                },
+                ScopeBreadcrumb {
+                    label: "env := []string".to_string(),
+                    start_line: 11
+                }
+            ]
+        );
+
+        // Within the HasSuffix condition, the function and if block should be present.
+        let chain = visible_scope_chain(&scopes, 19, 23);
+        assert_eq!(
+            chain,
+            vec![
+                ScopeBreadcrumb {
+                    label: "func (f ManifestFile) new(sourceRepo SourceRepo) (*Runfiles, error)"
+                        .to_string(),
+                    start_line: 6
+                },
+                ScopeBreadcrumb {
+                    label: "if strings.HasSuffix(string(f), \".runfiles_manifest\") ||".to_string(),
+                    start_line: 16
+                }
+            ]
+        );
+
+        // Within the struct literal, the breadcrumb should include the literal scope.
+        let chain = visible_scope_chain(&scopes, 27, 31);
+        assert_eq!(
+            chain,
+            vec![
+                ScopeBreadcrumb {
+                    label: "func (f ManifestFile) new(sourceRepo SourceRepo) (*Runfiles, error)"
+                        .to_string(),
+                    start_line: 6
+                },
+                ScopeBreadcrumb {
+                    label: "r := &Runfiles".to_string(),
+                    start_line: 26
+                }
+            ]
+        );
+
+        // After the struct literal closes, only the function should remain.
+        let chain = visible_scope_chain(&scopes, 31, 32);
+        assert_eq!(
+            chain,
+            vec![ScopeBreadcrumb {
+                label: "func (f ManifestFile) new(sourceRepo SourceRepo) (*Runfiles, error)"
+                    .to_string(),
+                start_line: 6
+            }]
+        );
     }
 }

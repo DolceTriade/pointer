@@ -4,7 +4,7 @@ use crate::db::{
     SnippetResponse, TreeEntry,
     models::{FileReference, SymbolResult},
 };
-use crate::scope_parser::{ScopeBreadcrumb, extract_scopes, scope_chain_for_line};
+use crate::scope_parser::{ScopeBreadcrumb, extract_scopes, visible_scope_chain};
 use leptos::either::{Either, EitherOf4};
 use leptos::html::{Code, Details, Div};
 use leptos::prelude::*;
@@ -1081,11 +1081,40 @@ fn FileContent(
 ) -> impl IntoView {
     let code_ref = NodeRef::<Code>::new();
     let line_numbers_ref = NodeRef::<Div>::new();
+    let scroll_container_ref = NodeRef::<Div>::new();
     let line_height = RwSignal::new(16.0);
     let scopes = Rc::new(extract_scopes(&content, language.as_deref()));
     let has_scopes = !scopes.is_empty();
-    let active_scopes = RwSignal::new(scope_chain_for_line(&scopes, 1));
+    let active_scopes = RwSignal::new(Vec::new());
     let scopes_collapsed = RwSignal::new(false);
+    let scope_updater = Rc::new({
+        let scroll_container_ref = scroll_container_ref.clone();
+        let line_height = line_height.clone();
+        let scopes = scopes.clone();
+        let active_scopes = active_scopes.clone();
+        let line_count = line_count;
+        move || {
+            if scopes.is_empty() {
+                return;
+            }
+            let height = line_height.get_untracked();
+            if height <= 0.0 {
+                return;
+            }
+            if let Some(container) = scroll_container_ref.get() {
+                let scroll_offset = container.scroll_top() as f64;
+                let viewport_height = container.client_height() as f64;
+                let first_visible = compute_top_line(scroll_offset, height, line_count);
+                let last_visible =
+                    compute_top_line(scroll_offset + viewport_height, height, line_count);
+                active_scopes.set(visible_scope_chain(
+                    &scopes,
+                    first_visible,
+                    last_visible.max(first_visible),
+                ));
+            }
+        }
+    });
 
     let code_ref = code_ref.clone();
     Effect::new(move |_| {
@@ -1128,18 +1157,57 @@ fn FileContent(
     });
 
     {
-        let line_numbers_ref = line_numbers_ref.clone();
         let line_height = line_height.clone();
+        let code_ref = code_ref.clone();
         Effect::new(move |_| {
-            if let Some(div) = line_numbers_ref.get() {
-                let total_height = div.scroll_height() as f64;
-                if line_count > 0 {
-                    let candidate = total_height / line_count.max(1) as f64;
-                    if candidate.is_finite() && candidate > 0.0 {
-                        line_height.set(candidate);
+            if let Some(code_el) = code_ref.get() {
+                let code_element: web_sys::Element = code_el.clone().unchecked_into();
+                let mut updated = false;
+                if line_count > 1 {
+                    if let Ok(Some(first_line)) = code_element.query_selector("[data-line='1']") {
+                        if let Ok(Some(second_line)) =
+                            code_element.query_selector("[data-line='2']")
+                        {
+                            let first_rect = first_line.get_bounding_client_rect();
+                            let second_rect = second_line.get_bounding_client_rect();
+                            let diff = (second_rect.top() - first_rect.top()).abs();
+                            if diff.is_finite() && diff > 0.0 {
+                                line_height.set(diff);
+                                updated = true;
+                            }
+                        }
+                    }
+                }
+
+                if !updated {
+                    let total_height = code_el.scroll_height() as f64;
+                    if line_count > 0 {
+                        let candidate = total_height / line_count.max(1) as f64;
+                        if candidate.is_finite() && candidate > 0.0 {
+                            line_height.set(candidate);
+                        }
                     }
                 }
             }
+        });
+    }
+
+    {
+        let scope_updater = Rc::clone(&scope_updater);
+        let line_height = line_height.clone();
+        Effect::new(move |_| {
+            line_height.get();
+            scope_updater();
+        });
+    }
+
+    {
+        let scope_updater = Rc::clone(&scope_updater);
+        Effect::new(move |_| {
+            use leptos::leptos_dom::helpers::window_event_listener;
+            let updater = Rc::clone(&scope_updater);
+            let handle = window_event_listener(leptos::ev::resize, move |_| updater());
+            on_cleanup(move || handle.remove());
         });
     }
 
@@ -1246,84 +1314,47 @@ fn FileContent(
         });
     }
 
-    {
-        let code_ref = code_ref.clone();
-        let line_height = line_height.clone();
-        let scopes = scopes.clone();
-        let active_scopes = active_scopes.clone();
-        Effect::new(move |_| {
-            if scopes.is_empty() {
-                return;
-            }
-            if line_height.get() <= 0.0 {
-                return;
-            }
-            if code_ref.get().is_none() {
-                return;
-            }
-            use leptos::leptos_dom::helpers::window_event_listener;
-
-            let updater = Rc::new({
-                let code_ref = code_ref.clone();
-                let line_height = line_height.clone();
-                let scopes = scopes.clone();
-                let active_scopes = active_scopes.clone();
-                move || {
-                    if let (Some(window), Some(code_el)) = (web_sys::window(), code_ref.get()) {
-                        let element: web_sys::Element = code_el.unchecked_into();
-                        let top_line =
-                            compute_top_line(&window, &element, line_height.get(), line_count);
-                        active_scopes.set(scope_chain_for_line(&scopes, top_line));
-                    }
-                }
-            });
-
-            updater();
-
-            let scroll_handle = window_event_listener(leptos::ev::scroll, {
-                let updater = Rc::clone(&updater);
-                move |_| updater()
-            });
-            let resize_handle = window_event_listener(leptos::ev::resize, {
-                let updater = Rc::clone(&updater);
-                move |_| updater()
-            });
-            on_cleanup(move || {
-                scroll_handle.remove();
-                resize_handle.remove();
-            });
-        });
-    }
+    let scope_updater_for_scroll = Rc::clone(&scope_updater);
 
     view! {
-        <div class="relative space-y-2">
+        <div class="relative flex flex-col gap-2">
             <Show when=move || has_scopes fallback=move || view! { <></> }>
                 <ScopeBreadcrumbBar
                     current=active_scopes.clone()
                     collapsed=scopes_collapsed.clone()
                 />
             </Show>
-            <div class="flex font-mono text-sm overflow-x-auto">
-                <div class="text-right text-gray-500 pr-4 select-none" node_ref=line_numbers_ref>
-                    {(1..=line_count)
-                        .map(|n| {
-                            let link_id = format!("line-number-{}", n);
-                            view! {
-                                <a
-                                    id=link_id
-                                    href=format!("#L{n}")
-                                    class="block hover:text-blue-400"
-                                >
-                                    {n}
-                                </a>
-                            }
-                        })
-                        .collect_view()}
+            <div
+                class="relative overflow-auto rounded-md"
+                node_ref=scroll_container_ref
+                on:scroll=move |_| scope_updater_for_scroll()
+                style="max-height: calc(100vh - 14rem);"
+            >
+                <div class="flex font-mono text-sm min-w-full">
+                    <div
+                        class="text-right text-gray-500 pr-4 select-none"
+                        node_ref=line_numbers_ref
+                    >
+                        {(1..=line_count)
+                            .map(|n| {
+                                let link_id = format!("line-number-{}", n);
+                                view! {
+                                    <a
+                                        id=link_id
+                                        href=format!("#L{n}")
+                                        class="block hover:text-blue-400"
+                                    >
+                                        {n}
+                                    </a>
+                                }
+                            })
+                            .collect_view()}
+                    </div>
+                    <pre class="flex-grow" tabindex="0" on:mouseup=on_mouse_up>
+                        <code id="code-content" inner_html=html node_ref=code_ref />
+                    </pre>
+                    <LineHighlighter />
                 </div>
-                <pre class="flex-grow" tabindex="0" on:mouseup=on_mouse_up>
-                    <code id="code-content" inner_html=html node_ref=code_ref />
-                </pre>
-                <LineHighlighter />
             </div>
         </div>
     }
@@ -1474,19 +1505,26 @@ fn ScopeBreadcrumbBar(
     collapsed: RwSignal<bool>,
 ) -> impl IntoView {
     view! {
-        <div class="sticky top-0 z-10 bg-white/95 dark:bg-gray-900/95 backdrop-blur border-b border-gray-200 dark:border-gray-700 mb-2 shadow-sm">
+        <div class="bg-white/95 dark:bg-gray-900/95 backdrop-blur border-b border-gray-200 dark:border-gray-700 shadow-sm">
             <div class="flex items-center justify-between gap-3 text-xs px-3 py-2 text-gray-600 dark:text-gray-300">
                 <div class="flex flex-wrap items-center gap-2 overflow-hidden min-h-[1.5rem]">
                     {move || {
                         let stack = current.get();
                         if stack.is_empty() {
-                            view! { <span class="text-gray-500 dark:text-gray-400">"No enclosing scope"</span> }
+                            view! {
+                                <span class="text-gray-500 dark:text-gray-400">
+                                    "No enclosing scope"
+                                </span>
+                            }
                                 .into_any()
                         } else if collapsed.get() {
                             view! {
                                 <span class="text-gray-500 dark:text-gray-400 italic">
-                                    {format!("{} scope{}", stack.len(), if stack.len() == 1 { "" } else { "s" })}
-                                    " hidden"
+                                    {format!(
+                                        "{} scope{}",
+                                        stack.len(),
+                                        if stack.len() == 1 { "" } else { "s" },
+                                    )} " hidden"
                                 </span>
                             }
                                 .into_any()
@@ -1502,14 +1540,16 @@ fn ScopeBreadcrumbBar(
                                             on:click=move |_| scroll_to_line(line)
                                         >
                                             <span class="truncate max-w-[16rem]">{label}</span>
-                                            <span class="text-[10px] text-gray-500 dark:text-gray-400">{"#"}{line}</span>
+                                            <span class="text-[10px] text-gray-500 dark:text-gray-400">
+                                                {"#"}{line}
+                                            </span>
                                         </button>
                                     }
                                 })
                                 .collect_view()
                                 .into_any()
                         }
-                }}
+                    }}
                 </div>
                 <button
                     class="text-[11px] uppercase tracking-wide px-2 py-1 rounded border border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 transition"
@@ -1522,19 +1562,11 @@ fn ScopeBreadcrumbBar(
     }
 }
 
-fn compute_top_line(
-    window: &web_sys::Window,
-    element: &web_sys::Element,
-    line_height: f64,
-    line_count: usize,
-) -> usize {
+fn compute_top_line(scroll_offset: f64, line_height: f64, line_count: usize) -> usize {
     if line_height <= 0.0 {
         return 1;
     }
-    let scroll_y = window.scroll_y().unwrap_or(0.0);
-    let rect = element.get_bounding_client_rect();
-    let absolute_top = rect.top() + scroll_y;
-    let offset = scroll_y - absolute_top;
+    let offset = scroll_offset.max(0.0);
     let line = if offset <= 0.0 {
         1
     } else {
