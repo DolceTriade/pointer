@@ -1394,9 +1394,6 @@
       }
     }
   }
-  .top-0 {
-    top: calc(var(--spacing) * 0);
-  }
   .top-1\/2 {
     top: calc(1/2 * 100%);
   }
@@ -3609,11 +3606,6 @@
       &:focus-visible {
         outline-color: var(--color-sky-400);
       }
-    }
-  }
-  .prose-headings\:text-gray-800 {
-    & :is(:where(h1, h2, h3, h4, h5, h6, th):not(:where([class~="not-prose"],[class~="not-prose"] *))) {
-      color: var(--color-gray-800);
     }
   }
   .prose-headings\:underline {

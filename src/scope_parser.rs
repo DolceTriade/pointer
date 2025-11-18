@@ -132,8 +132,8 @@ fn parse_indentation_scopes(source: &str) -> Vec<ScopeInfo> {
             }
         }
 
-        if line.trim_end().ends_with(':') {
-            let label = line.trim().trim_end_matches(':').to_string();
+        if trimmed.ends_with(':') {
+            let label = trimmed.trim_end_matches(':').to_string();
             let parent = stack.last().map(|entry| entry.1);
             let depth = parent.map(|idx| scopes[idx].depth + 1).unwrap_or(0);
             let scope = ScopeInfo {
