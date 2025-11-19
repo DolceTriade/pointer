@@ -16,6 +16,9 @@ use std::{collections::HashSet, rc::Rc};
 use web_sys::wasm_bindgen::{JsCast, UnwrapThrowExt};
 
 const SYMBOL_HIGHLIGHT_CLASS: &str = "selected-symbol-highlight";
+const BREADCRUMB_BAR_ID: &str = "scope-breadcrumb-bar";
+const CODE_SCROLL_CONTAINER_ID: &str = "code-scroll-container";
+const STICKY_SCROLL_PADDING: f64 = 12.0;
 
 #[derive(Params, PartialEq, Clone, Debug)]
 pub struct FileViewerParams {
@@ -961,10 +964,7 @@ fn LineHighlighter() -> impl IntoView {
                         }
                     }
                     element.class_list().add_1("line-highlight").unwrap_throw();
-                    let options = web_sys::ScrollIntoViewOptions::new();
-                    options.set_behavior(web_sys::ScrollBehavior::Auto);
-                    options.set_block(web_sys::ScrollLogicalPosition::Start);
-                    element.scroll_into_view_with_scroll_into_view_options(&options);
+                    scroll_with_sticky_offset(&element);
                 }
                 Err(e) => {
                     tracing::warn!("Element not found: {e:#?}");
@@ -1089,6 +1089,7 @@ fn FileContent(
     let scopes_collapsed = RwSignal::new(false);
     let scope_updater = Rc::new({
         let scroll_container_ref = scroll_container_ref.clone();
+        let line_numbers_ref = line_numbers_ref.clone();
         let line_height = line_height.clone();
         let scopes = scopes.clone();
         let active_scopes = active_scopes.clone();
@@ -1101,18 +1102,48 @@ fn FileContent(
             if height <= 0.0 {
                 return;
             }
+
+            let mut first_visible = 1;
+            let mut last_visible = line_count.max(1);
+            let mut updated = false;
+
             if let Some(container) = scroll_container_ref.get() {
-                let scroll_offset = container.scroll_top() as f64;
-                let viewport_height = container.client_height() as f64;
-                let first_visible = compute_top_line(scroll_offset, height, line_count);
-                let last_visible =
-                    compute_top_line(scroll_offset + viewport_height, height, line_count);
-                active_scopes.set(visible_scope_chain(
-                    &scopes,
-                    first_visible,
-                    last_visible.max(first_visible),
-                ));
+                let scroll_height = container.scroll_height();
+                let client_height = container.client_height();
+                if scroll_height > client_height + 1 {
+                    let scroll_offset = container.scroll_top() as f64;
+                    let viewport_height = client_height as f64;
+                    first_visible = compute_top_line(scroll_offset, height, line_count);
+                    last_visible =
+                        compute_top_line(scroll_offset + viewport_height, height, line_count);
+                    updated = true;
+                }
             }
+
+            if !updated {
+                if let Some(line_numbers) = line_numbers_ref.get() {
+                    if let Some(window) = web_sys::window() {
+                        let element: web_sys::Element = line_numbers.unchecked_into();
+                        let rect = element.get_bounding_client_rect();
+                        let viewport_height = window
+                            .inner_height()
+                            .ok()
+                            .and_then(|value| value.as_f64())
+                            .filter(|value| *value > 0.0)
+                            .unwrap_or(rect.height());
+                        let offset = (-rect.top()).max(0.0);
+                        first_visible = compute_top_line(offset, height, line_count);
+                        last_visible =
+                            compute_top_line(offset + viewport_height, height, line_count);
+                    }
+                }
+            }
+
+            active_scopes.set(visible_scope_chain(
+                &scopes,
+                first_visible,
+                last_visible.max(first_visible),
+            ));
         }
     });
 
@@ -1207,6 +1238,16 @@ fn FileContent(
             use leptos::leptos_dom::helpers::window_event_listener;
             let updater = Rc::clone(&scope_updater);
             let handle = window_event_listener(leptos::ev::resize, move |_| updater());
+            on_cleanup(move || handle.remove());
+        });
+    }
+
+    {
+        let scope_updater = Rc::clone(&scope_updater);
+        Effect::new(move |_| {
+            use leptos::leptos_dom::helpers::window_event_listener;
+            let updater = Rc::clone(&scope_updater);
+            let handle = window_event_listener(leptos::ev::scroll, move |_| updater());
             on_cleanup(move || handle.remove());
         });
     }
@@ -1325,12 +1366,12 @@ fn FileContent(
                 />
             </Show>
             <div
-                class="relative overflow-auto rounded-md"
+                id=CODE_SCROLL_CONTAINER_ID
+                class="relative rounded-md"
                 node_ref=scroll_container_ref
                 on:scroll=move |_| scope_updater_for_scroll()
-                style="max-height: calc(100vh - 14rem);"
             >
-                <div class="flex font-mono text-sm min-w-full">
+                <div class="flex font-mono overflow-x-auto text-sm min-w-full">
                     <div
                         class="text-right text-gray-500 pr-4 select-none"
                         node_ref=line_numbers_ref
@@ -1342,7 +1383,7 @@ fn FileContent(
                                     <a
                                         id=link_id
                                         href=format!("#L{n}")
-                                        class="block hover:text-blue-400"
+                                        class="block hover:text-blue-400 scroll-mt-20"
                                     >
                                         {n}
                                     </a>
@@ -1350,9 +1391,9 @@ fn FileContent(
                             })
                             .collect_view()}
                     </div>
-                    <pre class="flex-grow" tabindex="0" on:mouseup=on_mouse_up>
+                    <div class="flex-grow" tabindex="0" on:mouseup=on_mouse_up>
                         <code id="code-content" inner_html=html node_ref=code_ref />
-                    </pre>
+                    </div>
                     <LineHighlighter />
                 </div>
             </div>
@@ -1505,7 +1546,10 @@ fn ScopeBreadcrumbBar(
     collapsed: RwSignal<bool>,
 ) -> impl IntoView {
     view! {
-        <div class="bg-white/95 dark:bg-gray-900/95 backdrop-blur border-b border-gray-200 dark:border-gray-700 shadow-sm">
+        <div
+            id=BREADCRUMB_BAR_ID
+            class="sticky top-0 z-20 bg-white/95 dark:bg-gray-900/95 backdrop-blur border-b border-gray-200 dark:border-gray-700 shadow-sm"
+        >
             <div class="flex items-center justify-between gap-3 text-xs px-3 py-2 text-gray-600 dark:text-gray-300">
                 <div class="flex flex-wrap items-center gap-2 overflow-hidden min-h-[1.5rem]">
                     {move || {
@@ -1580,8 +1624,42 @@ fn scroll_to_line(line: usize) {
         if let Some(document) = window.document() {
             let target_id = format!("line-number-{}", line);
             if let Some(target) = document.get_element_by_id(&target_id) {
-                target.scroll_into_view();
+                scroll_with_sticky_offset(&target);
             }
+        }
+    }
+}
+
+fn sticky_breadcrumb_offset(document: &web_sys::Document) -> f64 {
+    document
+        .get_element_by_id(BREADCRUMB_BAR_ID)
+        .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
+        .map(|element| element.offset_height() as f64 + STICKY_SCROLL_PADDING)
+        .unwrap_or(0.0)
+}
+
+fn scroll_with_sticky_offset(target: &web_sys::Element) {
+    if let Some(window) = web_sys::window() {
+        if let Some(document) = window.document() {
+            let offset = sticky_breadcrumb_offset(&document);
+            if let Some(container) = document.get_element_by_id(CODE_SCROLL_CONTAINER_ID) {
+                if let Some(container_el) = container.dyn_ref::<web_sys::HtmlElement>() {
+                    let scroll_height = container_el.scroll_height();
+                    let client_height = container_el.client_height();
+                    if scroll_height > client_height + 1 {
+                        let element_rect = target.get_bounding_client_rect();
+                        let container_rect = container_el.get_bounding_client_rect();
+                        let relative_top = element_rect.top() - container_rect.top();
+                        let desired = relative_top + container_el.scroll_top() as f64 - offset;
+                        container_el.set_scroll_top(desired.max(0.0).round() as i32);
+                        return;
+                    }
+                }
+            }
+
+            let rect = target.get_bounding_client_rect();
+            let delta = rect.top() - offset;
+            window.scroll_by_with_x_and_y(0.0, delta);
         }
     }
 }
