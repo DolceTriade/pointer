@@ -111,7 +111,7 @@ pub fn CodeIntelPanel(
     let insights_scroll_container = NodeRef::<Div>::new();
 
     view! {
-        <aside class="w-80 flex-shrink-0 bg-white/95 dark:bg-slate-950/70 text-slate-900 dark:text-slate-100 rounded-lg shadow border border-slate-200 dark:border-slate-800 p-4 sticky top-20 max-h-[calc(100vh-6rem)] overflow-visible backdrop-blur">
+        <aside class="w-80 flex-shrink-0 bg-white/95 dark:bg-slate-950/70 text-slate-900 dark:text-slate-100 rounded-lg shadow border border-slate-200 dark:border-slate-800 p-4 sticky top-20 max-h-[calc(100vh-6rem)] overflow-x-auto overflow-y-auto backdrop-blur">
             <h2 class="text-xl font-semibold mb-4 text-slate-900 dark:text-white">
                 "Code Intelligence"
             </h2>
@@ -567,7 +567,7 @@ pub fn CodeIntelPanel(
                                                                                 attr:class="text-sm text-blue-600 dark:text-blue-400 hover:underline font-mono"
                                                                                 attr:title=display_title.clone()
                                                                             >
-                                                                                <span class="inline-flex max-w-[10rem] md:max-w-[14rem] xl:max-w-[18rem] text-ellipsis overflow-hidden whitespace-nowrap">
+                                                                                <span class="inline-flex min-w-0 flex-1 text-ellipsis overflow-hidden break-all">
                                                                                     {display_text}
                                                                                 </span>
                                                                             </A>
@@ -636,7 +636,7 @@ pub fn CodeIntelPanel(
                                                                                                         <details class="border border-slate-200 dark:border-slate-800 rounded bg-white/90 dark:bg-slate-950/40">
                                                                                                             <summary class="flex items-center justify-between gap-2 px-3 py-2 cursor-pointer select-none hover:bg-slate-100 dark:hover:bg-slate-800 rounded text-slate-900 dark:text-slate-100">
                                                                                                                 <span
-                                                                                                                    class="min-w-0 text-sm text-blue-600 dark:text-blue-400 text-ellipsis overflow-hidden whitespace-nowrap"
+                                                                                                                    class="min-w-0 text-sm text-blue-600 dark:text-blue-400 text-ellipsis overflow-hidden whitespace-nowrap flex-1"
                                                                                                                     title=summary_label_title
                                                                                                                 >
                                                                                                                     {summary_label_text}
@@ -670,7 +670,7 @@ pub fn CodeIntelPanel(
                                                                                                                                             attr:class="text-sm text-blue-600 dark:text-blue-400 hover:underline block"
                                                                                                                                             attr:title=reference_title.clone()
                                                                                                                                         >
-                                                                                                                                            <span class="block text-ellipsis overflow-hidden whitespace-nowrap max-w-[12rem]">
+                                                                                                                                            <span class="block text-ellipsis overflow-hidden whitespace-nowrap flex-1 min-w-0">
                                                                                                                                                 {reference_label.clone()}
                                                                                                                                             </span>
                                                                                                                                         </A>
@@ -694,7 +694,7 @@ pub fn CodeIntelPanel(
                                                                                                                                         let highlight_line = snippet.highlight_line;
                                                                                                                                         let start_line = snippet.start_line;
                                                                                                                                         view! {
-                                                                                                                                            <div class="bg-slate-50/80 dark:bg-slate-900/60 border-t border-slate-200 dark:border-slate-800 px-3 py-2 text-xs font-mono text-slate-900 dark:text-slate-100">
+                                                                                                                                            <div class="bg-slate-50/80 dark:bg-slate-900/60 border-t border-slate-200 dark:border-slate-800 px-3 py-2 text-xs font-mono text-slate-900 dark:text-slate-100 overflow-x-auto">
                                                                                                                                                 {snippet
                                                                                                                                                     .lines
                                                                                                                                                     .into_iter()
@@ -712,7 +712,9 @@ pub fn CodeIntelPanel(
                                                                                                                                                                 <span class="w-12 text-right text-[10px] text-slate-500 dark:text-slate-300">
                                                                                                                                                                     {current_line}
                                                                                                                                                                 </span>
-                                                                                                                                                                <span class="whitespace-pre-wrap break-words">{text}</span>
+                                                                                                                                                                <span class="flex-1 overflow-x-auto overflow-hidden whitespace-pre flex-shrink-0 min-w-0">
+                                                                                                                                                                    {text}
+                                                                                                                                                                </span>
                                                                                                                                                             </div>
                                                                                                                                                         }
                                                                                                                                                     })

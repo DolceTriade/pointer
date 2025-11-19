@@ -2346,8 +2346,14 @@
   .min-w-0 {
     min-width: calc(var(--spacing) * 0);
   }
+  .min-w-80 {
+    min-width: calc(var(--spacing) * 80);
+  }
   .min-w-full {
     min-width: 100%;
+  }
+  .min-w-max {
+    min-width: max-content;
   }
   .flex-1 {
     flex: 1;
@@ -2827,6 +2833,9 @@
   }
   .whitespace-nowrap {
     white-space: nowrap;
+  }
+  .whitespace-pre {
+    white-space: pre;
   }
   .whitespace-pre-wrap {
     white-space: pre-wrap;
