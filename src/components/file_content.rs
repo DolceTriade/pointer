@@ -3,6 +3,7 @@ use crate::scope_parser::visible_scope_chain;
 use crate::scope_parser::{ScopeBreadcrumb, ScopeInfo, extract_scopes};
 use leptos::html::{Code, Div};
 use leptos::prelude::*;
+use leptos_router::hooks::use_location;
 use std::rc::Rc;
 use web_sys::wasm_bindgen::JsCast;
 use web_sys::wasm_bindgen::UnwrapThrowExt;
@@ -207,6 +208,7 @@ pub fn FileContent(
                     <div class="flex-grow" tabindex="0" on:mouseup=on_mouse_up>
                         <code id="code-content" inner_html=html node_ref=code_ref />
                     </div>
+                    <LineHighlighter />
                 </div>
             </div>
         </div>
@@ -590,4 +592,53 @@ fn apply_symbol_highlights(document: &web_sys::Document, root: &web_sys::Element
 
     let root_node: web_sys::Node = root.clone().into();
     highlight_text_nodes(document, &root_node, needle);
+}
+
+#[component]
+pub fn LineHighlighter() -> impl IntoView {
+    let location = use_location();
+    let refresh = RwSignal::new(());
+    Effect::new(move |_| {
+        let hash = location.hash.get();
+        // Mega-Hack: The inner_html code view doesn't render by the time this effect runs. So,
+        // keep retrying until it appears.
+        refresh.get();
+        if document().get_element_by_id("code-content").is_none() {
+            set_timeout(
+                move || {
+                    refresh.set(());
+                },
+                std::time::Duration::from_millis(100),
+            );
+        }
+        if hash.starts_with("#L") {
+            let line_id = &hash[2..];
+            match document().query_selector(&format!("[data-line='{line_id}']")) {
+                Ok(Some(element)) => {
+                    let highlighted = document()
+                        .query_selector_all(".line-highlight")
+                        .unwrap_throw();
+                    for i in 0..highlighted.length() {
+                        if let Some(el) = highlighted
+                            .item(i)
+                            .and_then(|n| n.dyn_into::<web_sys::Element>().ok())
+                        {
+                            el.class_list().remove_1("line-highlight").unwrap_throw();
+                        }
+                    }
+                    element.class_list().add_1("line-highlight").unwrap_throw();
+                    scroll_with_sticky_offset(&element);
+                }
+                Err(e) => {
+                    tracing::warn!("Element not found: {e:#?}");
+                }
+                _ => {
+                    tracing::warn!("Element not found: {hash}");
+                }
+            }
+        }
+    });
+
+    // This component doesn't render anything itself
+    view! { <div id="mehigh" class="hidden"></div> }
 }

@@ -12,7 +12,9 @@ pub use breadcrumbs::Breadcrumbs;
 pub use code_intel_panel::{
     CodeIntelPanel, SymbolInsightsResponse, SymbolMatch, SymbolReferenceWithSnippet,
 };
-pub use file_content::{FileContent, ScopeBreadcrumbBar, scroll_with_sticky_offset};
+pub use file_content::{
+    FileContent, LineHighlighter, ScopeBreadcrumbBar, scroll_with_sticky_offset,
+};
 pub use file_tree::{DirectoryIcon, FileIcon, FileTreeNode, FileTreeNodes};
 pub use header::Header;
 pub use path_filter_actions::PathFilterActions;
