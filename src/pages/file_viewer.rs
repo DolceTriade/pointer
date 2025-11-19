@@ -4,7 +4,9 @@ use crate::db::{
     SnippetResponse, TreeEntry,
     models::{FileReference, SymbolResult},
 };
-use crate::scope_parser::{ScopeBreadcrumb, extract_scopes, visible_scope_chain};
+use crate::scope_parser::{ScopeBreadcrumb, ScopeInfo, extract_scopes};
+#[cfg(all(feature = "hydrate", target_arch = "wasm32"))]
+use crate::scope_parser::visible_scope_chain;
 use leptos::either::{Either, EitherOf4};
 use leptos::html::{Code, Details, Div};
 use leptos::prelude::*;
@@ -13,7 +15,15 @@ use leptos_router::hooks::{use_location, use_params};
 use leptos_router::params::Params;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, rc::Rc};
+
+#[cfg(all(feature = "hydrate", target_arch = "wasm32"))]
+use std::{cell::RefCell, collections::BTreeSet};
+
 use web_sys::wasm_bindgen::{JsCast, UnwrapThrowExt};
+#[cfg(all(feature = "hydrate", target_arch = "wasm32"))]
+use wasm_bindgen::closure::Closure;
+#[cfg(all(feature = "hydrate", target_arch = "wasm32"))]
+use web_sys::{js_sys::Array, IntersectionObserver, IntersectionObserverEntry, IntersectionObserverInit};
 
 const SYMBOL_HIGHLIGHT_CLASS: &str = "selected-symbol-highlight";
 const BREADCRUMB_BAR_ID: &str = "scope-breadcrumb-bar";
@@ -1080,72 +1090,12 @@ fn FileContent(
     language: Option<String>,
 ) -> impl IntoView {
     let code_ref = NodeRef::<Code>::new();
-    let line_numbers_ref = NodeRef::<Div>::new();
     let scroll_container_ref = NodeRef::<Div>::new();
-    let line_height = RwSignal::new(16.0);
     let scopes = Rc::new(extract_scopes(&content, language.as_deref()));
     let has_scopes = !scopes.is_empty();
-    let active_scopes = RwSignal::new(Vec::new());
+    let active_scopes =
+        use_scope_visibility_tracker(code_ref.clone(), scroll_container_ref.clone(), scopes.clone());
     let scopes_collapsed = RwSignal::new(false);
-    let scope_updater = Rc::new({
-        let scroll_container_ref = scroll_container_ref.clone();
-        let line_numbers_ref = line_numbers_ref.clone();
-        let line_height = line_height.clone();
-        let scopes = scopes.clone();
-        let active_scopes = active_scopes.clone();
-        let line_count = line_count;
-        move || {
-            if scopes.is_empty() {
-                return;
-            }
-            let height = line_height.get_untracked();
-            if height <= 0.0 {
-                return;
-            }
-
-            let mut first_visible = 1;
-            let mut last_visible = line_count.max(1);
-            let mut updated = false;
-
-            if let Some(container) = scroll_container_ref.get() {
-                let scroll_height = container.scroll_height();
-                let client_height = container.client_height();
-                if scroll_height > client_height + 1 {
-                    let scroll_offset = container.scroll_top() as f64;
-                    let viewport_height = client_height as f64;
-                    first_visible = compute_top_line(scroll_offset, height, line_count);
-                    last_visible =
-                        compute_top_line(scroll_offset + viewport_height, height, line_count);
-                    updated = true;
-                }
-            }
-
-            if !updated {
-                if let Some(line_numbers) = line_numbers_ref.get() {
-                    if let Some(window) = web_sys::window() {
-                        let element: web_sys::Element = line_numbers.unchecked_into();
-                        let rect = element.get_bounding_client_rect();
-                        let viewport_height = window
-                            .inner_height()
-                            .ok()
-                            .and_then(|value| value.as_f64())
-                            .filter(|value| *value > 0.0)
-                            .unwrap_or(rect.height());
-                        let offset = (-rect.top()).max(0.0);
-                        first_visible = compute_top_line(offset, height, line_count);
-                        last_visible =
-                            compute_top_line(offset + viewport_height, height, line_count);
-                    }
-                }
-            }
-
-            active_scopes.set(visible_scope_chain(
-                &scopes,
-                first_visible,
-                last_visible.max(first_visible),
-            ));
-        }
-    });
 
     let code_ref = code_ref.clone();
     Effect::new(move |_| {
@@ -1186,71 +1136,6 @@ fn FileContent(
 
         on_cleanup(move || handle.remove());
     });
-
-    {
-        let line_height = line_height.clone();
-        let code_ref = code_ref.clone();
-        Effect::new(move |_| {
-            if let Some(code_el) = code_ref.get() {
-                let code_element: web_sys::Element = code_el.clone().unchecked_into();
-                let mut updated = false;
-                if line_count > 1 {
-                    if let Ok(Some(first_line)) = code_element.query_selector("[data-line='1']") {
-                        if let Ok(Some(second_line)) =
-                            code_element.query_selector("[data-line='2']")
-                        {
-                            let first_rect = first_line.get_bounding_client_rect();
-                            let second_rect = second_line.get_bounding_client_rect();
-                            let diff = (second_rect.top() - first_rect.top()).abs();
-                            if diff.is_finite() && diff > 0.0 {
-                                line_height.set(diff);
-                                updated = true;
-                            }
-                        }
-                    }
-                }
-
-                if !updated {
-                    let total_height = code_el.scroll_height() as f64;
-                    if line_count > 0 {
-                        let candidate = total_height / line_count.max(1) as f64;
-                        if candidate.is_finite() && candidate > 0.0 {
-                            line_height.set(candidate);
-                        }
-                    }
-                }
-            }
-        });
-    }
-
-    {
-        let scope_updater = Rc::clone(&scope_updater);
-        let line_height = line_height.clone();
-        Effect::new(move |_| {
-            line_height.get();
-            scope_updater();
-        });
-    }
-
-    {
-        let scope_updater = Rc::clone(&scope_updater);
-        Effect::new(move |_| {
-            use leptos::leptos_dom::helpers::window_event_listener;
-            let updater = Rc::clone(&scope_updater);
-            let handle = window_event_listener(leptos::ev::resize, move |_| updater());
-            on_cleanup(move || handle.remove());
-        });
-    }
-
-    {
-        let scope_updater = Rc::clone(&scope_updater);
-        Effect::new(move |_| {
-            use leptos::leptos_dom::helpers::window_event_listener;
-            let updater = Rc::clone(&scope_updater);
-            let handle = window_event_listener(leptos::ev::scroll, move |_| updater());
-            on_cleanup(move || handle.remove());
-        });
-    }
 
     let on_mouse_up = {
         let selected_symbol = selected_symbol.clone();
@@ -1355,8 +1240,6 @@ fn FileContent(
         });
     }
 
-    let scope_updater_for_scroll = Rc::clone(&scope_updater);
-
     view! {
         <div class="relative flex flex-col gap-2">
             <Show when=move || has_scopes fallback=move || view! { <></> }>
@@ -1369,12 +1252,10 @@ fn FileContent(
                 id=CODE_SCROLL_CONTAINER_ID
                 class="relative rounded-md"
                 node_ref=scroll_container_ref
-                on:scroll=move |_| scope_updater_for_scroll()
             >
                 <div class="flex font-mono overflow-x-auto text-sm min-w-full">
                     <div
                         class="text-right text-gray-500 pr-4 select-none"
-                        node_ref=line_numbers_ref
                     >
                         {(1..=line_count)
                             .map(|n| {
@@ -1606,19 +1487,6 @@ fn ScopeBreadcrumbBar(
     }
 }
 
-fn compute_top_line(scroll_offset: f64, line_height: f64, line_count: usize) -> usize {
-    if line_height <= 0.0 {
-        return 1;
-    }
-    let offset = scroll_offset.max(0.0);
-    let line = if offset <= 0.0 {
-        1
-    } else {
-        (offset / line_height).floor() as usize + 1
-    };
-    line.clamp(1, line_count.max(1))
-}
-
 fn scroll_to_line(line: usize) {
     if let Some(window) = web_sys::window() {
         if let Some(document) = window.document() {
@@ -1629,6 +1497,178 @@ fn scroll_to_line(line: usize) {
         }
     }
 }
+
+fn use_scope_visibility_tracker(
+    code_ref: NodeRef<Code>,
+    scroll_container_ref: NodeRef<Div>,
+    scopes: Rc<Vec<ScopeInfo>>,
+) -> RwSignal<Vec<ScopeBreadcrumb>> {
+    let active_scopes = RwSignal::new(Vec::new());
+
+    #[cfg(not(all(feature = "hydrate", target_arch = "wasm32")))]
+    {
+        let _ = code_ref;
+        let _ = scroll_container_ref;
+        let _ = scopes;
+    }
+
+    #[cfg(all(feature = "hydrate", target_arch = "wasm32"))]
+    {
+        let code_ref = code_ref.clone();
+        let scroll_container_ref = scroll_container_ref.clone();
+        let scopes = scopes.clone();
+        let active_scopes_handle = active_scopes.clone();
+        Effect::new(move |_| {
+            if scopes.is_empty() {
+                return;
+            }
+            let Some(code_el) = code_ref.get() else {
+                return;
+            };
+            let Some(window) = web_sys::window() else {
+                return;
+            };
+            let Some(document) = window.document() else {
+                return;
+            };
+            let node_list = match code_el.query_selector_all("[data-line]") {
+                Ok(nodes) => nodes,
+                Err(_) => return,
+            };
+            if node_list.length() == 0 {
+                return;
+            }
+
+            let sticky_offset = sticky_breadcrumb_offset(&document);
+            let options = IntersectionObserverInit::new();
+            options.set_root_margin(&format!("-{}px 0px 0px 0px", sticky_offset));
+            if let Some(container) = scroll_container_ref.get() {
+                if container.scroll_height() > container.client_height() + 1 {
+                    let element: web_sys::Element = container.clone().unchecked_into();
+                    options.set_root(Some(&element));
+                }
+            }
+
+            let visible_lines = Rc::new(RefCell::new(BTreeSet::new()));
+            let scopes_for_update = scopes.clone();
+            let active_scopes = active_scopes_handle.clone();
+
+            let callback_visible = Rc::clone(&visible_lines);
+            let callback_scopes = scopes_for_update.clone();
+            let callback_signal = active_scopes.clone();
+            let callback = Closure::wrap(
+                Box::new(move |entries: Array, _observer: IntersectionObserver| {
+                    if update_visible_lines(&entries, &callback_visible) {
+                        apply_scope_update(&callback_visible, &callback_scopes, &callback_signal);
+                    }
+                }) as Box<dyn FnMut(Array, IntersectionObserver)>,
+            );
+
+            let observer = match IntersectionObserver::new_with_options(
+                callback.as_ref().unchecked_ref(),
+                &options,
+            ) {
+                Ok(observer) => observer,
+                Err(_) => return,
+            };
+            for idx in 0..node_list.length() {
+                if let Some(node) = node_list.item(idx) {
+                    if let Ok(element) = node.dyn_into::<web_sys::Element>() {
+                        let _ = observer.observe(&element);
+                    }
+                }
+            }
+
+            let initial = observer.take_records();
+            if update_visible_lines(&initial, &visible_lines) {
+                apply_scope_update(&visible_lines, &scopes_for_update, &active_scopes);
+            }
+
+            let handle = IntersectionObserverHandle::new(observer, callback);
+            on_cleanup(move || drop(handle));
+        });
+    }
+
+    active_scopes
+}
+
+#[cfg(all(feature = "hydrate", target_arch = "wasm32"))]
+fn update_visible_lines(entries: &Array, visible_lines: &Rc<RefCell<BTreeSet<usize>>>) -> bool {
+    let mut changed = false;
+    {
+        let mut set = visible_lines.borrow_mut();
+        for entry in entries.iter() {
+            if let Ok(entry) = entry.dyn_into::<IntersectionObserverEntry>() {
+                if let Ok(target) = entry.target().dyn_into::<web_sys::Element>() {
+                    if let Some(line_attr) = target.get_attribute("data-line") {
+                        if let Ok(line_no) = line_attr.parse::<usize>() {
+                            if entry.is_intersecting() && entry.intersection_ratio() > 0.0 {
+                                if set.insert(line_no) {
+                                    changed = true;
+                                }
+                            } else if set.remove(&line_no) {
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    changed
+}
+
+#[cfg(all(feature = "hydrate", target_arch = "wasm32"))]
+fn apply_scope_update(
+    visible_lines: &Rc<RefCell<BTreeSet<usize>>>,
+    scopes: &Vec<ScopeInfo>,
+    active_scopes: &RwSignal<Vec<ScopeBreadcrumb>>,
+) {
+    let set = visible_lines.borrow();
+    if set.is_empty() {
+        return;
+    }
+    let first = *set.iter().next().unwrap();
+    let last = *set.iter().next_back().unwrap_or(&first);
+    drop(set);
+
+    active_scopes.set(visible_scope_chain(
+        scopes,
+        first,
+        last.max(first),
+    ));
+}
+
+#[cfg(all(feature = "hydrate", target_arch = "wasm32"))]
+struct IntersectionObserverHandle {
+    observer: IntersectionObserver,
+    _callback: Closure<dyn FnMut(Array, IntersectionObserver)>,
+}
+
+#[cfg(all(feature = "hydrate", target_arch = "wasm32"))]
+impl IntersectionObserverHandle {
+    fn new(
+        observer: IntersectionObserver,
+        callback: Closure<dyn FnMut(Array, IntersectionObserver)>,
+    ) -> Self {
+        Self {
+            observer,
+            _callback: callback,
+        }
+    }
+}
+
+#[cfg(all(feature = "hydrate", target_arch = "wasm32"))]
+impl Drop for IntersectionObserverHandle {
+    fn drop(&mut self) {
+        self.observer.disconnect();
+    }
+}
+
+#[cfg(all(feature = "hydrate", target_arch = "wasm32"))]
+unsafe impl Send for IntersectionObserverHandle {}
+#[cfg(all(feature = "hydrate", target_arch = "wasm32"))]
+unsafe impl Sync for IntersectionObserverHandle {}
 
 fn sticky_breadcrumb_offset(document: &web_sys::Document) -> f64 {
     document

@@ -65,9 +65,50 @@ fn parse_brace_scopes(source: &str) -> Vec<ScopeInfo> {
             }
         }
 
-        for ch in line.chars() {
+        let mut opened_scope_this_line = false;
+        let mut chars = line.chars().peekable();
+        let mut in_block_comment = false;
+        let mut in_string: Option<char> = None;
+        while let Some(ch) = chars.next() {
+            if let Some(delim) = in_string {
+                if ch == '\\' {
+                    chars.next();
+                    continue;
+                }
+                if ch == delim {
+                    in_string = None;
+                }
+                continue;
+            }
+            if in_block_comment {
+                if ch == '*' {
+                    if matches!(chars.peek().copied(), Some('/')) {
+                        chars.next();
+                        in_block_comment = false;
+                    }
+                }
+                continue;
+            }
+            match ch {
+                '/' => {
+                    if matches!(chars.peek().copied(), Some('/')) {
+                        break;
+                    }
+                    if matches!(chars.peek().copied(), Some('*')) {
+                        chars.next();
+                        in_block_comment = true;
+                        continue;
+                    }
+                }
+                '"' | '\'' => {
+                    in_string = Some(ch);
+                    continue;
+                }
+                _ => {}
+            }
             match ch {
                 '{' => {
+                    opened_scope_this_line = true;
                     if let Some(p) = pending.take() {
                         push_scope(&mut scopes, &stack, p.label, p.start_line);
                         stack.push(Some(scopes.len() - 1));
@@ -76,6 +117,7 @@ fn parse_brace_scopes(source: &str) -> Vec<ScopeInfo> {
                     }
                 }
                 '}' => {
+                    opened_scope_this_line = true;
                     if let Some(entry) = stack.pop() {
                         if let Some(idx) = entry {
                             let end_line = line_no.max(scopes[idx].start_line);
@@ -87,7 +129,16 @@ fn parse_brace_scopes(source: &str) -> Vec<ScopeInfo> {
             }
         }
 
-        previous_line_continues = line_continues_to_next(trimmed);
+        let line_continues = line_continues_to_next(trimmed);
+        if !opened_scope_this_line
+            && !line_continues
+            && pending.is_some()
+            && line_ends_with_semicolon(trimmed)
+        {
+            pending = None;
+        }
+
+        previous_line_continues = line_continues;
     }
 
     while let Some(entry) = stack.pop() {
@@ -328,6 +379,63 @@ fn line_continues_to_next(line: &str) -> bool {
     trimmed.ends_with("->") || trimmed.ends_with("=>")
 }
 
+fn line_ends_with_semicolon(line: &str) -> bool {
+    matches!(last_code_char_before_comment(line), Some(';'))
+}
+
+fn last_code_char_before_comment(line: &str) -> Option<char> {
+    let mut chars = line.chars().peekable();
+    let mut last = None;
+    let mut in_block_comment = false;
+    let mut in_string: Option<char> = None;
+
+    while let Some(ch) = chars.next() {
+        if let Some(delim) = in_string {
+            if ch == '\\' {
+                chars.next();
+                continue;
+            }
+            if ch == delim {
+                in_string = None;
+            }
+            continue;
+        }
+        if in_block_comment {
+            if ch == '*' {
+                if matches!(chars.peek().copied(), Some('/')) {
+                    chars.next();
+                    in_block_comment = false;
+                }
+            }
+            continue;
+        }
+
+        match ch {
+            '/' => {
+                if matches!(chars.peek().copied(), Some('/')) {
+                    break;
+                }
+                if matches!(chars.peek().copied(), Some('*')) {
+                    chars.next();
+                    in_block_comment = true;
+                    continue;
+                }
+            }
+            '"' | '\'' => {
+                in_string = Some(ch);
+                continue;
+            }
+            _ => {}
+        }
+
+        if !ch.is_whitespace() {
+            last = Some(ch);
+        }
+    }
+
+    last
+}
+
 fn update_multiline_state(line: &str, state: &mut Option<&'static str>) {
     let bytes = line.as_bytes();
     let mut idx = 0;
@@ -517,6 +625,13 @@ def get_default_config_dir() -> str:
     return os.path.join(data_dir, CONFIG_DIR_NAME)
 "#;
 
+    fn cpp_scope_labels(source: &str) -> Vec<String> {
+        extract_scopes(source, Some("cpp"))
+            .into_iter()
+            .map(|scope| scope.label)
+            .collect()
+    }
+
     #[test]
     fn detects_nested_brace_scopes() {
         let source = r#"
@@ -664,6 +779,61 @@ fn bar() {}
                 label: "fn outer()".to_string(),
                 start_line: 1
             }]
+        );
+    }
+
+    #[test]
+    fn brace_parser_discards_semicolon_statements_with_trailing_comments() {
+        let source = r#"
+void Example() {
+    if (condition) {
+        glCullFace(GL_FRONT); // comment mentioning {
+    } else {
+        glCullFace(GL_BACK);
+    }
+}
+"#;
+        let labels = cpp_scope_labels(source);
+        assert!(
+            labels.iter().any(|label| label.contains("Example")),
+            "function scope missing in {:?}",
+            labels
+        );
+        assert!(
+            !labels.iter().any(|label| label.contains("glCullFace")),
+            "function calls were incorrectly promoted to scopes: {:?}",
+            labels
+        );
+    }
+
+    #[test]
+    fn brace_parser_keeps_pending_label_for_multiline_signatures() {
+        let source = r#"
+static
+void ComplexFunction(
+    int a,
+    int b
+)
+{
+    if (a > b) {
+        return;
+    }
+}
+"#;
+        let labels = cpp_scope_labels(source);
+        assert!(
+            labels.iter().any(|label| label.contains("ComplexFunction")),
+            "multiline signature did not produce a scope: {:?}",
+            labels
+        );
+    }
+
+    #[test]
+    fn semicolon_detection_ignores_trailing_comments() {
+        let line = "    glCullFace( GL_FRONT ); // comment mentioning {";
+        assert!(
+            line_ends_with_semicolon(line),
+            "line should be treated as semicolon-terminated"
         );
     }
 
