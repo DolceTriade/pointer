@@ -1,4 +1,4 @@
-#[cfg(all(feature = "hydrate", target_arch = "wasm32"))]
+#[cfg(feature = "hydrate")]
 use crate::scope_parser::visible_scope_chain;
 use crate::scope_parser::{ScopeBreadcrumb, ScopeInfo, extract_scopes};
 use leptos::html::{Code, Div};
@@ -306,7 +306,7 @@ pub fn use_scope_visibility_tracker(
         let _ = scopes;
     }
 
-    #[cfg(all(feature = "hydrate", target_arch = "wasm32"))]
+    #[cfg(feature = "hydrate")]
     {
         use std::{cell::RefCell, collections::BTreeSet};
         let code_ref = code_ref.clone();
@@ -388,7 +388,7 @@ pub fn use_scope_visibility_tracker(
     active_scopes
 }
 
-#[cfg(all(feature = "hydrate", target_arch = "wasm32"))]
+#[cfg(feature = "hydrate")]
 fn update_visible_lines(
     entries: &web_sys::js_sys::Array,
     visible_lines: &Rc<std::cell::RefCell<std::collections::BTreeSet<usize>>>,
@@ -417,7 +417,7 @@ fn update_visible_lines(
     changed
 }
 
-#[cfg(all(feature = "hydrate", target_arch = "wasm32"))]
+#[cfg(feature = "hydrate")]
 fn apply_scope_update(
     visible_lines: &Rc<std::cell::RefCell<std::collections::BTreeSet<usize>>>,
     scopes: &Vec<ScopeInfo>,
@@ -434,7 +434,7 @@ fn apply_scope_update(
     active_scopes.set(visible_scope_chain(scopes, first, last.max(first)));
 }
 
-#[cfg(all(feature = "hydrate", target_arch = "wasm32"))]
+#[cfg(feature = "hydrate")]
 struct IntersectionObserverHandle {
     observer: web_sys::IntersectionObserver,
     _callback: wasm_bindgen::closure::Closure<
@@ -442,7 +442,7 @@ struct IntersectionObserverHandle {
     >,
 }
 
-#[cfg(all(feature = "hydrate", target_arch = "wasm32"))]
+#[cfg(feature = "hydrate")]
 impl IntersectionObserverHandle {
     fn new(
         observer: web_sys::IntersectionObserver,
@@ -457,16 +457,16 @@ impl IntersectionObserverHandle {
     }
 }
 
-#[cfg(all(feature = "hydrate", target_arch = "wasm32"))]
+#[cfg(feature = "hydrate")]
 impl Drop for IntersectionObserverHandle {
     fn drop(&mut self) {
         self.observer.disconnect();
     }
 }
 
-#[cfg(all(feature = "hydrate", target_arch = "wasm32"))]
+#[cfg(feature = "hydrate")]
 unsafe impl Send for IntersectionObserverHandle {}
-#[cfg(all(feature = "hydrate", target_arch = "wasm32"))]
+#[cfg(feature = "hydrate")]
 unsafe impl Sync for IntersectionObserverHandle {}
 
 fn sticky_breadcrumb_offset(document: &web_sys::Document) -> f64 {
