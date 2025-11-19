@@ -4,6 +4,7 @@ use leptos::prelude::*;
 pub mod file_viewer;
 pub mod repo_detail;
 pub mod search;
+pub use file_viewer::FileViewer;
 pub use repo_detail::RepoDetailPage;
 pub use search::SearchPage;
 
