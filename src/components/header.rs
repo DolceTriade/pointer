@@ -1,15 +1,20 @@
 use crate::components::search_bar::SearchBar;
+use leptos::leptos_dom::helpers::window_event_listener;
 use leptos::tachys::dom::event_target_checked;
 use leptos::{either::Either, prelude::*};
 use leptos_darkmode::Darkmode;
 use leptos_router::hooks::{use_query, use_url};
+use std::rc::Rc;
 use urlencoding::decode;
+use web_sys::{self, HtmlElement, wasm_bindgen::JsCast};
 
 #[component]
 pub fn Header() -> impl IntoView {
     let mut darkmode = use_context::<Darkmode>();
     let route = use_url();
     let query_struct = use_query::<crate::pages::search::SearchParams>();
+    let (show_search_overlay, set_show_search_overlay) = signal(false);
+
     let contextual_defaults = Memo::new(move |_| {
         let url = route.read();
         contextual_query_for_path(url.path())
@@ -22,6 +27,46 @@ pub fn Header() -> impl IntoView {
             .and_then(|q| q.q.clone())
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| contextual_defaults.get())
+    });
+
+    // Global "/" to open the search overlay, Esc to dismiss
+    Effect::new({
+        let show_search_overlay = show_search_overlay.clone();
+        let set_show_search_overlay = set_show_search_overlay.clone();
+        move |_| {
+            let handle =
+                window_event_listener(leptos::ev::keydown, move |ev: web_sys::KeyboardEvent| {
+                    if ev.key() == "Escape" && show_search_overlay.get_untracked() {
+                        ev.prevent_default();
+                        set_show_search_overlay.set(false);
+                        return;
+                    }
+
+                    if ev.key() != "/" || ev.ctrl_key() || ev.meta_key() || ev.alt_key() {
+                        return;
+                    }
+
+                    if let Some(target) = ev.target() {
+                        let is_form_field = target.dyn_ref::<web_sys::HtmlInputElement>().is_some()
+                            || target.dyn_ref::<web_sys::HtmlTextAreaElement>().is_some()
+                            || target.dyn_ref::<web_sys::HtmlSelectElement>().is_some();
+
+                        if is_form_field {
+                            return;
+                        }
+
+                        if let Some(el) = target.dyn_ref::<HtmlElement>() {
+                            if el.is_content_editable() {
+                                return;
+                            }
+                        }
+                    }
+
+                    ev.prevent_default();
+                    set_show_search_overlay.set(true);
+                });
+            on_cleanup(move || handle.remove());
+        }
     });
 
     view! {
@@ -96,6 +141,44 @@ pub fn Header() -> impl IntoView {
                 </details>
             </div>
         </header>
+        {move || {
+            if show_search_overlay.get() {
+                let close_overlay = {
+                    let set_show_search_overlay = set_show_search_overlay.clone();
+                    move || set_show_search_overlay.set(false)
+                };
+                let close_overlay_cb: Rc<dyn Fn()> = Rc::new(close_overlay);
+                view! {
+                    <div
+                        class="fixed inset-0 z-50 flex items-start justify-center bg-black/50 backdrop-blur-sm"
+                        on:click=move |_| set_show_search_overlay.set(false)
+                    >
+                        <div
+                            class="mt-16 w-full max-w-3xl px-4"
+                            on:click=|ev| ev.stop_propagation()
+                        >
+                            <div class="flex justify-end mb-3">
+                                <button
+                                    class="text-sm text-slate-200 hover:text-white transition-colors"
+                                    on:click=move |_| set_show_search_overlay.set(false)
+                                >
+                                    "Esc to close"
+                                </button>
+                            </div>
+                            <SearchBar
+                                initial_query=query.get()
+                                auto_focus=true
+                                on_complete=close_overlay_cb.clone()
+                                open_in_new_tab=true
+                            />
+                        </div>
+                    </div>
+                }
+                    .into_any()
+            } else {
+                view! { <div /> }.into_any()
+            }
+        }}
     }
 }
 
