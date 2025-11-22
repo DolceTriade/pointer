@@ -37,7 +37,6 @@ pub fn SearchBar(#[prop(optional)] initial_query: String) -> impl IntoView {
         ("file:", "Search in specific files"),
         ("lang:", "Search in specific language"),
         ("content:", "Search in file content"),
-        ("sym:", "Search for symbols"),
         ("branch:", "Search in specific branch"),
         ("regex:", "Search with regex pattern"),
         ("historical:", "Include historical commits (historical:yes)"),
@@ -47,7 +46,6 @@ pub fn SearchBar(#[prop(optional)] initial_query: String) -> impl IntoView {
     let example_queries = vec![
         "repo:myrepo lang:rust",
         "content:\"async fn\" file:*.rs",
-        "sym:MyFunction lang:go",
         "file:README.md content:install historical:yes",
     ];
 
