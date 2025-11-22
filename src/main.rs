@@ -38,6 +38,7 @@ async fn main() -> anyhow::Result<()> {
     use leptos_axum::{LeptosRoutes, generate_route_list_with_exclusions_and_ssg_and_context};
     use pointer::app::*;
     use sqlx::postgres::PgPoolOptions;
+    use tower_http::compression::CompressionLayer;
 
     let pool = PgPoolOptions::new()
         .max_connections(config.max_connections)
@@ -72,7 +73,8 @@ async fn main() -> anyhow::Result<()> {
             move || provide_context(file_state.clone()),
             shell,
         ))
-        .with_state(leptos_options);
+        .with_state(leptos_options)
+        .layer(CompressionLayer::new());
 
     tracing::info!("listening on http://{}", &addr);
 

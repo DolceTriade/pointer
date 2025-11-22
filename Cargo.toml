@@ -82,6 +82,7 @@ lazy_static = { version = "1.5.0", optional = true }
 autumnus = { git = "https://github.com/DolceTriade/autumnus.git", rev = "47da177d4af2a6faa1668a2948204d635eb54d10", optional = true, features = ["all-languages"] }
 
 thiserror = { version = "1.0.63", optional = true }
+tower-http = { version = "0.6.6", optional = true, features = ["compression-gzip", "compression-zstd"] }
 
 
 [features]
@@ -120,6 +121,7 @@ ssr = [
     "sqlx/runtime-tokio",
     "sqlx/chrono",
     "dep:thiserror",
+    "dep:tower-http",
 ]
 tracing-web = ["dep:tracing-web"]
 dotenvy = ["dep:dotenvy"]
