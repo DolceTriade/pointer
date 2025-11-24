@@ -1,0 +1,81 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  DATABASE_URL: postgresql://pointer:pointer@postgres:5432/pointer
+
+jobs:
+  build-musl:
+    runs-on: ubuntu-latest
+    container: ghcr.io/messense/rust-musl-cross:x86_64-musl
+    services:
+      postgres:
+        image: postgres:16
+        ports:
+          - 5432:5432
+        env:
+          POSTGRES_USER: pointer
+          POSTGRES_PASSWORD: pointer
+          POSTGRES_DB: pointer
+        options: >-
+          --health-cmd="pg_isready -U pointer -d pointer"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tooling
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y pkg-config postgresql-client
+          rustup target add x86_64-unknown-linux-musl
+
+      - name: Cache cargo data
+        uses: Swatinem/rust-cache@v2
+
+      - name: Wait for Postgres
+        run: pg_isready -h postgres -p 5432 -U pointer -d pointer
+        env:
+          PGUSER: pointer
+          PGPASSWORD: pointer
+
+      - name: Apply migrations
+        run: |
+          for migration in backend/migrations/*.sql; do
+            psql "$DATABASE_URL" -f "$migration"
+          done
+        env:
+          PGUSER: pointer
+          PGPASSWORD: pointer
+
+      - name: Build pointer (musl)
+        run: cargo build --locked --release --target x86_64-unknown-linux-musl -p pointer --bin pointer --features ssr
+
+      - name: Build pointer-backend (musl)
+        run: cargo build --locked --release --target x86_64-unknown-linux-musl -p pointer-backend
+
+      - name: Build pointer-indexer (musl)
+        run: cargo build --locked --release --target x86_64-unknown-linux-musl -p pointer-indexer
+
+      - name: Package artifacts
+        run: |
+          mkdir -p artifacts
+          for bin in pointer pointer-backend pointer-indexer; do
+            src="target/x86_64-unknown-linux-musl/release/${bin}"
+            dest="artifacts/${bin}-x86_64-unknown-linux-musl"
+            cp "$src" "$dest"
+            tar -czf "${dest}.tar.gz" -C artifacts "$(basename "$dest")"
+          done
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pointer-musl-binaries
+          path: artifacts/*.tar.gz

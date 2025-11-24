@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo data
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-leptos
+        run: cargo install --locked cargo-leptos
+
+      - name: cargo leptos test
+        run: cargo leptos test
+
+      - name: Backend tests
+        run: cargo test
+        working-directory: backend
+
+      - name: Indexer tests
+        run: cargo test
+        working-directory: indexer
