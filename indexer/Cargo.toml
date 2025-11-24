@@ -40,5 +40,10 @@ tree-sitter-glsl = "0.2.0"
 crossbeam-channel = "0.5"
 humantime = "2.1"
 
+[features]
+vendored = [
+    "git2/vendored-openssl"
+]
+
 [dev-dependencies]
 pretty_assertions = "1"

@@ -134,6 +134,7 @@ thiserror = ["dep:thiserror"]
 
 server_fn_macro_default = ["dep:server_fn_macro_default"]
 autumnus = ["dep:autumnus"]
+vendored = ["pointer-indexer/vendored"]
 
 # Defines a size-optimized profile for the WASM bundle in release mode
 [profile.wasm-release]
