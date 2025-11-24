@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  DATABASE_URL: postgresql://pointer:pointer@localhost:5432/pointer
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        ports:
+          - 5432:5432
+        env:
+          POSTGRES_USER: pointer
+          POSTGRES_PASSWORD: pointer
+          POSTGRES_DB: pointer
+        options: >-
+          --health-cmd="pg_isready -U pointer -d pointer"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo data
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install build tooling
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql-client
+
+      - name: Install cargo-leptos (prebuilt)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-leptos
+
+      - name: Cache sqlx-cli
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/sqlx
+          key: ${{ runner.os }}-sqlx-cli-${{ hashFiles('Cargo.lock', 'backend/Cargo.lock') }}
+
+      - name: Install sqlx-cli
+        run: |
+          if ! command -v sqlx >/dev/null; then
+            cargo install --locked sqlx-cli --no-default-features --features postgres,rustls
+          fi
+
+      - name: Wait for Postgres
+        run: pg_isready -h localhost -p 5432 -U pointer -d pointer
+        env:
+          PGUSER: pointer
+          PGPASSWORD: pointer
+
+      - name: Apply migrations
+        working-directory: backend
+        run: sqlx migrate run --source migrations
+        env:
+          PGUSER: pointer
+          PGPASSWORD: pointer
+
+      - name: cargo leptos test
+        run: cargo leptos test
+
+      - name: Backend tests
+        run: cargo test
+        working-directory: backend
+
+      - name: Indexer tests
+        run: cargo test
+        working-directory: indexer

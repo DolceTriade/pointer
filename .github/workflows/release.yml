@@ -1,0 +1,110 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  DATABASE_URL: postgresql://pointer:pointer@localhost:5432/pointer
+
+jobs:
+  build-musl:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        ports:
+          - 5432:5432
+        env:
+          POSTGRES_USER: pointer
+          POSTGRES_PASSWORD: pointer
+          POSTGRES_DB: pointer
+        options: >-
+          --health-cmd="pg_isready -U pointer -d pointer"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: wasm32-unknown-unknown,x86_64-unknown-linux-musl
+
+      - name: Cache cargo data
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install build tooling
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql-client build-essential musl-tools
+
+      - name: Install cargo-leptos (prebuilt)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-leptos
+
+      - name: Cache sqlx-cli
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-sqlx
+          key: ${{ runner.os }}-sqlx-cli-${{ hashFiles('Cargo.lock', 'backend/Cargo.lock') }}
+
+      - name: Install sqlx-cli
+        run: |
+          if ! command -v sqlx >/dev/null; then
+            cargo install --locked sqlx-cli --no-default-features --features postgres,rustls
+          fi
+
+      - name: Wait for Postgres
+        run: pg_isready -h localhost -p 5432 -U pointer -d pointer
+        env:
+          PGUSER: pointer
+          PGPASSWORD: pointer
+
+      - name: Apply migrations
+        working-directory: backend
+        run: sqlx migrate run --source migrations
+        env:
+          PGUSER: pointer
+          PGPASSWORD: pointer
+
+      - name: Build pointer (wasm + binary)
+        env:
+          LEPTOS_BIN_TARGET_TRIPLE: x86_64-unknown-linux-musl
+        run: cargo leptos build --release -P --bin-features vendored,ssr
+
+      - name: Build pointer-backend
+        run: cargo build --locked --release -p pointer-backend --target x86_64-unknown-linux-musl --features vendored
+
+      - name: Build pointer-indexer
+        run: cargo build --locked --release -p pointer-indexer --target x86_64-unknown-linux-musl --features vendored
+
+      - name: Package artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts pointer/target
+
+          # Package pointer assets + binary
+          POINTER_BIN="$(find target -path '*/release/pointer' -type f | head -n1)"
+          cp "$POINTER_BIN" pointer/pointer
+          cp -r target/site pointer/target/site
+          cp Cargo.toml pointer/Cargo.toml
+          tar -czf artifacts/pointer.tar.gz -C pointer .
+
+          # Package backend and indexer binaries
+          for bin in pointer-backend pointer-indexer; do
+            BIN_PATH="$(find target -path "*/release/${bin}" -type f | head -n1)"
+            cp "$BIN_PATH" "artifacts/${bin}"
+            tar -czf "artifacts/${bin}.tar.gz" -C artifacts "${bin}"
+          done
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pointer-release-artifacts
+          path: artifacts/*.tar.gz
