@@ -16,7 +16,7 @@ jobs:
     container: ghcr.io/messense/rust-musl-cross:x86_64-musl
     services:
       postgres:
-        image: postgres:16
+        image: postgres:18
         ports:
           - 5432:5432
         env:
@@ -35,10 +35,21 @@ jobs:
         run: |
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y pkg-config postgresql-client
-          rustup target add x86_64-unknown-linux-musl
+          rustup target add x86_64-unknown-linux-musl wasm32-unknown-unknown
 
       - name: Cache cargo data
         uses: Swatinem/rust-cache@v2
+
+      - name: Install sqlx-cli (prebuilt)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: sqlx-cli
+          features: postgres,rustls
+
+      - name: Install cargo-leptos (prebuilt)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-leptos
 
       - name: Wait for Postgres
         run: pg_isready -h postgres -p 5432 -U pointer -d pointer
@@ -47,35 +58,42 @@ jobs:
           PGPASSWORD: pointer
 
       - name: Apply migrations
-        run: |
-          for migration in backend/migrations/*.sql; do
-            psql "$DATABASE_URL" -f "$migration"
-          done
+        working-directory: backend
+        run: cargo sqlx migrate run --source migrations
         env:
           PGUSER: pointer
           PGPASSWORD: pointer
 
-      - name: Build pointer (musl)
-        run: cargo build --locked --release --target x86_64-unknown-linux-musl -p pointer --bin pointer --features ssr
+      - name: Build pointer (wasm + binary)
+        run: cargo leptos build --release -P --features ssr
 
-      - name: Build pointer-backend (musl)
-        run: cargo build --locked --release --target x86_64-unknown-linux-musl -p pointer-backend
+      - name: Build pointer-backend
+        run: cargo build --locked --release -p pointer-backend
 
-      - name: Build pointer-indexer (musl)
-        run: cargo build --locked --release --target x86_64-unknown-linux-musl -p pointer-indexer
+      - name: Build pointer-indexer
+        run: cargo build --locked --release -p pointer-indexer
 
       - name: Package artifacts
         run: |
-          mkdir -p artifacts
-          for bin in pointer pointer-backend pointer-indexer; do
-            src="target/x86_64-unknown-linux-musl/release/${bin}"
-            dest="artifacts/${bin}-x86_64-unknown-linux-musl"
-            cp "$src" "$dest"
-            tar -czf "${dest}.tar.gz" -C artifacts "$(basename "$dest")"
+          set -euo pipefail
+          mkdir -p artifacts pointer
+
+          # Package pointer assets + binary
+          POINTER_BIN="$(find target -path '*/release/pointer' -type f | head -n1)"
+          cp "$POINTER_BIN" pointer/pointer
+          cp -r target/site pointer/site
+          cp Cargo.toml pointer/Cargo.toml
+          tar -czf artifacts/pointer.tar.gz -C pointer .
+
+          # Package backend and indexer binaries
+          for bin in pointer-backend pointer-indexer; do
+            BIN_PATH="$(find target -path "*/release/${bin}" -type f | head -n1)"
+            cp "$BIN_PATH" "artifacts/${bin}"
+            tar -czf "artifacts/${bin}.tar.gz" -C artifacts "${bin}"
           done
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: pointer-musl-binaries
+          name: pointer-release-artifacts
           path: artifacts/*.tar.gz

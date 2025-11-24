@@ -7,10 +7,25 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  DATABASE_URL: postgresql://pointer:pointer@localhost:5432/pointer
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        ports:
+          - 5432:5432
+        env:
+          POSTGRES_USER: pointer
+          POSTGRES_PASSWORD: pointer
+          POSTGRES_DB: pointer
+        options: >-
+          --health-cmd="pg_isready -U pointer -d pointer"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
     steps:
       - uses: actions/checkout@v4
 
@@ -22,8 +37,34 @@ jobs:
       - name: Cache cargo data
         uses: Swatinem/rust-cache@v2
 
-      - name: Install cargo-leptos
-        run: cargo install --locked cargo-leptos
+      - name: Install build tooling
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql-client
+
+      - name: Install cargo-leptos (prebuilt)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-leptos
+
+      - name: Install sqlx-cli (prebuilt)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: sqlx-cli
+          features: postgres,rustls
+
+      - name: Wait for Postgres
+        run: pg_isready -h localhost -p 5432 -U pointer -d pointer
+        env:
+          PGUSER: pointer
+          PGPASSWORD: pointer
+
+      - name: Apply migrations
+        working-directory: backend
+        run: cargo sqlx migrate run --source migrations
+        env:
+          PGUSER: pointer
+          PGPASSWORD: pointer
 
       - name: cargo leptos test
         run: cargo leptos test
