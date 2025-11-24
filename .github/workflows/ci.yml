@@ -67,7 +67,7 @@ jobs:
 
       - name: Apply migrations
         working-directory: backend
-        run: cargo sqlx migrate run --source migrations
+        run: sqlx migrate run --source migrations
         env:
           PGUSER: pointer
           PGPASSWORD: pointer

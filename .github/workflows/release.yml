@@ -54,7 +54,7 @@ jobs:
       - name: Cache sqlx-cli
         uses: actions/cache@v4
         with:
-          path: ~/.cargo/bin/sqlx
+          path: ~/.cargo/bin/cargo-sqlx
           key: ${{ runner.os }}-sqlx-cli-${{ hashFiles('Cargo.lock', 'backend/Cargo.lock') }}
 
       - name: Install sqlx-cli
@@ -71,7 +71,7 @@ jobs:
 
       - name: Apply migrations
         working-directory: backend
-        run: cargo sqlx migrate run --source migrations
+        run: sqlx migrate run --source migrations
         env:
           PGUSER: pointer
           PGPASSWORD: pointer
