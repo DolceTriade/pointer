@@ -44,7 +44,7 @@ jobs:
       - name: Install build tooling
         run: |
           sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql-client musl-gcc
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql-client build-essential musl-tools
 
       - name: Install cargo-leptos (prebuilt)
         uses: taiki-e/install-action@v2
