@@ -77,13 +77,15 @@ jobs:
           PGPASSWORD: pointer
 
       - name: Build pointer (wasm + binary)
-        run: cargo leptos build --release -P --bin-cargo-args="--target=x86_64-unknown-linux-musl" --bin-features vendored
+        env:
+          LEPTOS_BIN_TARGET_TRIPLE: x86_64-unknown-linux-musl
+        run: cargo leptos build --release -P --bin-features vendored,ssr
 
       - name: Build pointer-backend
         run: cargo build --locked --release -p pointer-backend --target x86_64-unknown-linux-musl
 
       - name: Build pointer-indexer
-        run: cargo build --locked --release -p pointer-indexer --target x86_64-unknown-linux-musl
+        run: cargo build --locked --release -p pointer-indexer --target x86_64-unknown-linux-musl --features vendored
 
       - name: Package artifacts
         run: |
