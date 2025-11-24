@@ -16,7 +16,6 @@ env:
 jobs:
   build-musl:
     runs-on: ubuntu-latest
-    container: ghcr.io/messense/rust-musl-cross:x86_64-musl
     services:
       postgres:
         image: postgres:18
