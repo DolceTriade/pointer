@@ -11,7 +11,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  DATABASE_URL: postgresql://pointer:pointer@postgres:5432/pointer
+  DATABASE_URL: postgresql://pointer:pointer@localhost:5432/pointer
 
 jobs:
   build-musl:
