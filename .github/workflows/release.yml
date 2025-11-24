@@ -87,12 +87,12 @@ jobs:
       - name: Package artifacts
         run: |
           set -euo pipefail
-          mkdir -p artifacts pointer
+          mkdir -p artifacts pointer/target
 
           # Package pointer assets + binary
           POINTER_BIN="$(find target -path '*/release/pointer' -type f | head -n1)"
           cp "$POINTER_BIN" pointer/pointer
-          cp -r target/site pointer/site
+          cp -r target/site pointer/target/site
           cp Cargo.toml pointer/Cargo.toml
           tar -czf artifacts/pointer.tar.gz -C pointer .
 
