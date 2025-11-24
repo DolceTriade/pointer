@@ -34,25 +34,35 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install build tooling
-        run: |
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y pkg-config postgresql-client
-          rustup target add x86_64-unknown-linux-musl wasm32-unknown-unknown
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
 
       - name: Cache cargo data
         uses: Swatinem/rust-cache@v2
 
-      - name: Install sqlx-cli (prebuilt)
-        uses: taiki-e/install-action@v2
-        with:
-          tool: sqlx-cli
-          features: postgres,rustls
+      - name: Install build tooling
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql-client
 
       - name: Install cargo-leptos (prebuilt)
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-leptos
+
+      - name: Cache sqlx-cli
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/sqlx
+          key: ${{ runner.os }}-sqlx-cli-${{ hashFiles('Cargo.lock', 'backend/Cargo.lock') }}
+
+      - name: Install sqlx-cli
+        run: |
+          if ! command -v sqlx >/dev/null; then
+            cargo install --locked sqlx-cli --no-default-features --features postgres,rustls
+          fi
 
       - name: Wait for Postgres
         run: pg_isready -h postgres -p 5432 -U pointer -d pointer
@@ -68,7 +78,7 @@ jobs:
           PGPASSWORD: pointer
 
       - name: Build pointer (wasm + binary)
-        run: cargo leptos build --release -P --features ssr
+        run: cargo leptos build --release -P
 
       - name: Build pointer-backend
         run: cargo build --locked --release -p pointer-backend
