@@ -6,6 +6,9 @@ on:
       - "v*"
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 env:
   CARGO_TERM_COLOR: always
   DATABASE_URL: postgresql://pointer:pointer@localhost:5432/pointer
@@ -100,11 +103,12 @@ jobs:
           for bin in pointer-backend pointer-indexer; do
             BIN_PATH="$(find target -path "*/release/${bin}" -type f | head -n1)"
             cp "$BIN_PATH" "artifacts/${bin}"
-            tar -czf "artifacts/${bin}.tar.gz" -C artifacts "${bin}"
           done
+          tar -czf "artifacts/pointer-linux-amd64.tar.gz" -C artifacts .
 
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: pointer-release-artifacts
-          path: artifacts/*.tar.gz
+      - name: Release
+            uses: softprops/action-gh-release@v2
+            if: github.ref_type == 'tag'
+            with:
+              files: artifacts/pointer-linux-amd64.tar.gz
+              generate_release_notes: true
