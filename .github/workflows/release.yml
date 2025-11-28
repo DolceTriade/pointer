@@ -107,8 +107,8 @@ jobs:
           tar -czf "artifacts/pointer-linux-amd64.tar.gz" -C artifacts .
 
       - name: Release
-            uses: softprops/action-gh-release@v2
-            if: github.ref_type == 'tag'
-            with:
-              files: artifacts/pointer-linux-amd64.tar.gz
-              generate_release_notes: true
+        uses: softprops/action-gh-release@v2
+        if: github.ref_type == 'tag'
+        with:
+          files: artifacts/pointer-linux-amd64.tar.gz
+          generate_release_notes: true
