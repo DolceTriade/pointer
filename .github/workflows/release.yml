@@ -104,11 +104,11 @@ jobs:
             BIN_PATH="$(find target -path "*/release/${bin}" -type f | head -n1)"
             cp "$BIN_PATH" "artifacts/${bin}"
           done
-          tar -czf "artifacts/pointer-linux-amd64.tar.gz" -C artifacts .
+          tar -czf "pointer-linux-amd64.tar.gz" -C artifacts .
 
       - name: Release
         uses: softprops/action-gh-release@v2
         if: github.ref_type == 'tag'
         with:
-          files: artifacts/pointer-linux-amd64.tar.gz
+          files: pointer-linux-amd64.tar.gz
           generate_release_notes: true
