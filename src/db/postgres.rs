@@ -1141,7 +1141,37 @@ ORDER BY idx
         let file_limit = fetch_limit.min(200);
         let plan_row_limit: i64 = 5000;
 
-        let mut qb = QueryBuilder::new("WITH plan_results AS (");
+        let needs_live_branch_filter = request
+            .plans
+            .iter()
+            .any(|plan| plan.branches.is_empty() && !plan.include_historical);
+
+        let mut qb = QueryBuilder::new("WITH ");
+
+        if needs_live_branch_filter {
+            qb.push(
+                "
+                live_repos AS (
+                    SELECT DISTINCT repository
+                    FROM repo_live_branches
+                ),
+                live_commits AS (
+                    SELECT DISTINCT bs.repository, bs.commit_sha
+                    FROM repo_live_branches lb
+                    JOIN branch_snapshots bs
+                      ON bs.repository = lb.repository
+                     AND bs.branch = lb.branch
+                    UNION
+                    SELECT DISTINCT b.repository, b.commit_sha
+                    FROM repo_live_branches lb
+                    JOIN branches b
+                      ON b.repository = lb.repository
+                     AND b.branch = lb.branch
+                ),",
+            );
+        }
+
+        qb.push("plan_results AS (");
 
         for (idx, plan) in request.plans.iter().enumerate() {
             if idx > 0 {
@@ -1155,13 +1185,10 @@ ORDER BY idx
             qb.push(
                 "
                 SELECT
-                    files.repository,
-                    files.commit_sha,
-                    files.file_path,
+                    files.id AS file_id,
                     files.content_hash,
-                    hits.chunk_line_count AS line_count,
-                    hits.text_content,
-                    hits.chunk_index,
+                    cbc.chunk_line_count AS line_count,
+                    cbc.chunk_index,
                 ",
             );
             qb.push_bind(&plan.highlight_pattern);
@@ -1179,8 +1206,7 @@ ORDER BY idx
                 " AS include_historical
                 FROM (
                     SELECT
-                        c.chunk_hash,
-                        c.text_content
+                        c.chunk_hash
                     FROM
                         chunks c
                     WHERE
@@ -1204,17 +1230,26 @@ ORDER BY idx
                 "
                 ) chunk_hits
                 JOIN content_blob_chunks cbc ON cbc.chunk_hash = chunk_hits.chunk_hash
-                JOIN files ON files.content_hash = cbc.content_hash
-                JOIN content_blobs cb ON cb.hash = files.content_hash
-                CROSS JOIN LATERAL (
-                    SELECT
-                        chunk_hits.text_content,
-                        cbc.content_hash,
-                        cbc.chunk_index,
-                        cbc.chunk_line_count
-                ) hits
-                WHERE TRUE",
+                JOIN files ON files.content_hash = cbc.content_hash",
             );
+
+            let needs_live_branch_filter_for_plan =
+                plan.branches.is_empty() && !plan.include_historical;
+            if needs_live_branch_filter_for_plan {
+                qb.push(
+                    " LEFT JOIN live_repos lr ON lr.repository = files.repository
+                      LEFT JOIN live_commits lc
+                        ON lc.repository = files.repository
+                       AND lc.commit_sha = files.commit_sha",
+                );
+            }
+
+            let needs_language = !plan.langs.is_empty() || !plan.excluded_langs.is_empty();
+            if needs_language {
+                qb.push(" JOIN content_blobs cb ON cb.hash = files.content_hash");
+            }
+
+            qb.push(" WHERE TRUE");
 
             if !plan.repos.is_empty() {
                 qb.push(" AND files.repository = ANY(");
@@ -1271,36 +1306,8 @@ ORDER BY idx
                 qb.push_bind(&plan.excluded_branches);
                 qb.push(")))");
             }
-            if plan.branches.is_empty() && !plan.include_historical {
-                qb.push(
-                    "
-                    AND (
-                        NOT EXISTS (
-                            SELECT 1 FROM repo_live_branches lb WHERE lb.repository = files.repository
-                        )
-                        OR EXISTS (
-                            SELECT 1
-                            FROM repo_live_branches lb
-                            WHERE lb.repository = files.repository
-                              AND (
-                                  EXISTS (
-                                      SELECT 1
-                                      FROM branch_snapshots bs
-                                      WHERE bs.repository = lb.repository
-                                        AND bs.branch = lb.branch
-                                        AND bs.commit_sha = files.commit_sha
-                                  )
-                                  OR EXISTS (
-                                      SELECT 1
-                                      FROM branches b
-                                      WHERE b.repository = lb.repository
-                                        AND b.branch = lb.branch
-                                        AND b.commit_sha = files.commit_sha
-                                  )
-                              )
-                        )
-                    )",
-                );
+            if needs_live_branch_filter_for_plan {
+                qb.push(" AND (lr.repository IS NULL OR lc.commit_sha IS NOT NULL)");
             }
             qb.push(
                 "
@@ -1312,12 +1319,9 @@ ORDER BY idx
             "),
             limited_plan AS (
                 SELECT
-                    pr.repository,
-                    pr.commit_sha,
-                    pr.file_path,
+                    pr.file_id,
                     pr.content_hash,
                     pr.line_count,
-                    pr.text_content,
                     pr.chunk_index,
                     pr.highlight_pattern,
                     pr.highlight_case_sensitive,
@@ -1325,9 +1329,7 @@ ORDER BY idx
                 FROM
                     plan_results pr
                 ORDER BY
-                    pr.repository,
-                    pr.commit_sha,
-                    pr.file_path,
+                    pr.file_id,
                     pr.chunk_index
                 LIMIT ",
         );
@@ -1337,9 +1339,7 @@ ORDER BY idx
             ),
             scored_files AS (
                 SELECT
-                    repository,
-                    commit_sha,
-                    file_path,
+                    file_id,
                     content_hash,
                     include_historical,
                     SUM(
@@ -1350,7 +1350,7 @@ ORDER BY idx
                     ) AS score,
                     MIN(chunk_index) AS min_chunk_index
                 FROM limited_plan
-                GROUP BY repository, commit_sha, file_path, content_hash, include_historical
+                GROUP BY file_id, content_hash, include_historical
             ),",
         );
 
@@ -1364,9 +1364,7 @@ ORDER BY idx
                 "
             top_files AS (
                 SELECT
-                    sf.repository,
-                    sf.commit_sha,
-                    sf.file_path,
+                    sf.file_id,
                     sf.content_hash,
                     sf.include_historical,
                     sf.score::FLOAT8 AS total_score
@@ -1380,9 +1378,7 @@ ORDER BY idx
                 "
             symbol_scores AS (
                 SELECT
-                    sf.repository,
-                    sf.commit_sha,
-                    sf.file_path,
+                    sf.file_id,
                     sf.content_hash,
                     MAX(
                         CASE
@@ -1400,21 +1396,17 @@ ORDER BY idx
             qb.push(
                 ") AS term
                 WHERE POSITION(term IN LOWER(s.name)) > 0
-                GROUP BY sf.repository, sf.commit_sha, sf.file_path, sf.content_hash
+                GROUP BY sf.file_id, sf.content_hash
             ),
             top_files AS (
                 SELECT
-                    sf.repository,
-                    sf.commit_sha,
-                    sf.file_path,
+                    sf.file_id,
                     sf.content_hash,
                     sf.include_historical,
                     (sf.score::FLOAT8 + COALESCE(ss.score, 0)::FLOAT8) AS total_score
                 FROM scored_files sf
                 LEFT JOIN symbol_scores ss
-                  ON ss.repository = sf.repository
-                 AND ss.commit_sha = sf.commit_sha
-                 AND ss.file_path = sf.file_path
+                  ON ss.file_id = sf.file_id
                  AND ss.content_hash = sf.content_hash
                 LIMIT ",
             );
@@ -1426,140 +1418,197 @@ ORDER BY idx
             ),
             final_plan AS (
                 SELECT
+                    f.repository,
+                    f.commit_sha,
+                    f.file_path,
+                    lp.content_hash,
+                    lp.chunk_index,
+                    lp.line_count,
+                    c.text_content,
+                    lp.highlight_pattern,
+                    lp.highlight_case_sensitive,
+                    lp.include_historical,
+                    tf.total_score
+                FROM limited_plan lp
+                JOIN top_files tf
+                  ON lp.file_id = tf.file_id
+                 AND lp.content_hash = tf.content_hash
+                 AND lp.include_historical = tf.include_historical
+                JOIN files f
+                  ON f.id = lp.file_id
+                JOIN content_blob_chunks cbc
+                  ON cbc.content_hash = lp.content_hash
+                 AND cbc.chunk_index = lp.chunk_index
+                JOIN chunks c
+                  ON c.chunk_hash = cbc.chunk_hash
+            ),
+            ranked_base AS (
+                SELECT
                     lp.repository,
                     lp.commit_sha,
                     lp.file_path,
                     lp.content_hash,
                     lp.chunk_index,
                     lp.line_count,
-                    lp.text_content,
-                    lp.highlight_pattern,
-                    lp.highlight_case_sensitive,
-                    lp.include_historical,
-                    tf.total_score,
-                    1 + COALESCE(
-                        SUM(
-                            lp.line_count
-                            - CASE
-                                WHEN RIGHT(lp.text_content, 1) = E'\n' OR lp.text_content = '' THEN 0
-                                ELSE 1
-                              END
-                        ) OVER (
-                            PARTITION BY lp.content_hash
-                            ORDER BY lp.chunk_index
-                            ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
-                        ),
-                        0
-                    ) AS start_line
-                FROM limited_plan lp
-                JOIN top_files tf
-                  ON lp.repository = tf.repository
-                 AND lp.commit_sha = tf.commit_sha
-                 AND lp.file_path = tf.file_path
-                 AND lp.content_hash = tf.content_hash
-                 AND lp.include_historical = tf.include_historical
-            )
-            SELECT
-                ranked.repository,
-                ranked.commit_sha,
-                ranked.file_path,
-                ranked.content_hash,
-                ranked.start_line,
-                ranked.line_count,
-                ranked.content_text,
-                ranked.match_line_number,
-                ranked.branches,
-                ranked.live_branches,
-                ranked.snapshot_indexed_at,
-                ranked.is_historical
-            FROM (
-                SELECT
-                    lp.repository,
-                    lp.commit_sha,
-                    lp.file_path,
-                    lp.content_hash,
-                    lp.start_line,
-                    lp.line_count,
-                    ctx.context_snippet AS content_text,
-                    ctx.match_line_number,
                     lp.total_score::FLOAT8 AS total_score,
-                    COALESCE(branch_match.branches, branch_fallback.fallback_branches, ARRAY[]::TEXT[]) AS branches,
-                    COALESCE(
-                        live_branch_match.live_branches,
-                        live_branch_fallback.live_branches,
-                        ARRAY[]::TEXT[]
-                    ) AS live_branches,
-                    branch_match.snapshot_indexed_at AS snapshot_indexed_at,
-                    CASE
-                        WHEN live_repo.repo_live_branches IS NULL THEN FALSE
-                        WHEN COALESCE(
-                                array_length(
-                                    COALESCE(
-                                        live_branch_match.live_branches,
-                                        live_branch_fallback.live_branches,
-                                        ARRAY[]::TEXT[]
-                                    ),
-                                    1
-                                ),
-                                0
-                            ) = 0 THEN TRUE
-                        ELSE FALSE
-                    END AS is_historical,
+                    lp.include_historical,
                     ROW_NUMBER() OVER (
                         PARTITION BY lp.repository, lp.commit_sha, lp.file_path
-                        ORDER BY lp.total_score DESC, lp.start_line, ctx.match_line_number
+                        ORDER BY lp.total_score DESC, lp.chunk_index
                     ) AS rn
                 FROM
                     final_plan lp
-                CROSS JOIN LATERAL extract_context_with_highlight(
-                    lp.text_content,
-                    lp.highlight_pattern,
-                    3,
-                    lp.highlight_case_sensitive
-                ) ctx
-                LEFT JOIN LATERAL (
-                    SELECT
-                        array_agg(DISTINCT bs.branch) AS branches,
-                        MAX(bs.indexed_at) AS snapshot_indexed_at
-                    FROM branch_snapshots bs
-                    WHERE bs.repository = lp.repository AND bs.commit_sha = lp.commit_sha
-                ) branch_match ON TRUE
-                LEFT JOIN LATERAL (
-                    SELECT array_agg(DISTINCT b.branch) AS fallback_branches
-                    FROM branches b
-                    WHERE b.repository = lp.repository AND b.commit_sha = lp.commit_sha
-                ) branch_fallback ON TRUE
-                LEFT JOIN LATERAL (
-                    SELECT array_agg(lb.branch) AS live_branches
-                    FROM repo_live_branches lb
-                    JOIN branch_snapshots bs
-                      ON bs.repository = lb.repository
-                     AND bs.branch = lb.branch
-                    WHERE lb.repository = lp.repository
-                      AND bs.commit_sha = lp.commit_sha
-                ) live_branch_match ON TRUE
-                LEFT JOIN LATERAL (
-                    SELECT array_agg(lb.branch) AS live_branches
-                    FROM repo_live_branches lb
-                    JOIN branches b
-                      ON b.repository = lb.repository
-                     AND b.branch = lb.branch
-                    WHERE lb.repository = lp.repository
-                      AND b.commit_sha = lp.commit_sha
-                ) live_branch_fallback ON TRUE
-                LEFT JOIN LATERAL (
-                    SELECT array_agg(lb.branch) AS repo_live_branches
-                    FROM repo_live_branches lb
-                    WHERE lb.repository = lp.repository
-                ) live_repo ON TRUE
-                WHERE
-                    lp.include_historical
-                    OR live_repo.repo_live_branches IS NULL
+            ),
+            ranked_top AS (
+                SELECT
+                    rb.repository,
+                    rb.commit_sha,
+                    rb.file_path,
+                    rb.content_hash,
+                    rb.chunk_index,
+                    rb.line_count,
+                    rb.total_score,
+                    rb.include_historical
+                FROM ranked_base rb
+                WHERE rb.rn = 1
+            ),
+            ranked_keys AS (
+                SELECT DISTINCT repository, commit_sha
+                FROM ranked_top
+            ),
+            branch_match AS (
+                SELECT
+                    bs.repository,
+                    bs.commit_sha,
+                    array_agg(DISTINCT bs.branch) AS branches,
+                    MAX(bs.indexed_at) AS snapshot_indexed_at
+                FROM branch_snapshots bs
+                JOIN ranked_keys rk
+                  ON rk.repository = bs.repository
+                 AND rk.commit_sha = bs.commit_sha
+                GROUP BY bs.repository, bs.commit_sha
+            ),
+            branch_fallback AS (
+                SELECT
+                    b.repository,
+                    b.commit_sha,
+                    array_agg(DISTINCT b.branch) AS fallback_branches
+                FROM branches b
+                JOIN ranked_keys rk
+                  ON rk.repository = b.repository
+                 AND rk.commit_sha = b.commit_sha
+                GROUP BY b.repository, b.commit_sha
+            ),
+            live_branch_match AS (
+                SELECT
+                    rk.repository,
+                    rk.commit_sha,
+                    array_agg(lb.branch) AS live_branches
+                FROM ranked_keys rk
+                JOIN repo_live_branches lb
+                  ON lb.repository = rk.repository
+                JOIN branch_snapshots bs
+                  ON bs.repository = lb.repository
+                 AND bs.branch = lb.branch
+                 AND bs.commit_sha = rk.commit_sha
+                GROUP BY rk.repository, rk.commit_sha
+            ),
+            live_branch_fallback AS (
+                SELECT
+                    rk.repository,
+                    rk.commit_sha,
+                    array_agg(lb.branch) AS live_branches
+                FROM ranked_keys rk
+                JOIN repo_live_branches lb
+                  ON lb.repository = rk.repository
+                JOIN branches b
+                  ON b.repository = lb.repository
+                 AND b.branch = lb.branch
+                 AND b.commit_sha = rk.commit_sha
+                GROUP BY rk.repository, rk.commit_sha
+            ),
+            live_repo AS (
+                SELECT
+                    rk.repository,
+                    array_agg(lb.branch) AS repo_live_branches
+                FROM ranked_keys rk
+                LEFT JOIN repo_live_branches lb
+                  ON lb.repository = rk.repository
+                GROUP BY rk.repository
+            )
+            SELECT
+                rt.repository,
+                rt.commit_sha,
+                rt.file_path,
+                rt.content_hash,
+                sl.start_line,
+                rt.line_count,
+                ctx.context_snippet AS content_text,
+                ctx.match_line_number,
+                COALESCE(bm.branches, bf.fallback_branches, ARRAY[]::TEXT[]) AS branches,
+                COALESCE(
+                    lbm.live_branches,
+                    lbf.live_branches,
+                    ARRAY[]::TEXT[]
+                ) AS live_branches,
+                bm.snapshot_indexed_at AS snapshot_indexed_at,
+                CASE
+                    WHEN lr.repo_live_branches IS NULL THEN FALSE
+                    WHEN COALESCE(
+                            array_length(
+                                COALESCE(
+                                    lbm.live_branches,
+                                    lbf.live_branches,
+                                    ARRAY[]::TEXT[]
+                                ),
+                                1
+                            ),
+                            0
+                        ) = 0 THEN TRUE
+                    ELSE FALSE
+                    END AS is_historical
+            FROM ranked_top rt
+            JOIN final_plan fp
+              ON fp.repository = rt.repository
+             AND fp.commit_sha = rt.commit_sha
+             AND fp.file_path = rt.file_path
+             AND fp.content_hash = rt.content_hash
+             AND fp.chunk_index = rt.chunk_index
+            CROSS JOIN LATERAL extract_context_with_highlight(
+                fp.text_content,
+                fp.highlight_pattern,
+                3,
+                fp.highlight_case_sensitive
+            ) ctx
+            LEFT JOIN LATERAL (
+                SELECT
+                    1 + COALESCE(SUM(cbc.chunk_line_count), 0) AS start_line
+                FROM content_blob_chunks cbc
+                WHERE cbc.content_hash = rt.content_hash
+                  AND cbc.chunk_index < rt.chunk_index
+            ) sl ON TRUE
+            LEFT JOIN branch_match bm
+              ON bm.repository = rt.repository
+             AND bm.commit_sha = rt.commit_sha
+            LEFT JOIN branch_fallback bf
+              ON bf.repository = rt.repository
+             AND bf.commit_sha = rt.commit_sha
+            LEFT JOIN live_branch_match lbm
+              ON lbm.repository = rt.repository
+             AND lbm.commit_sha = rt.commit_sha
+            LEFT JOIN live_branch_fallback lbf
+              ON lbf.repository = rt.repository
+             AND lbf.commit_sha = rt.commit_sha
+            LEFT JOIN live_repo lr
+              ON lr.repository = rt.repository
+            WHERE
+                rt.include_historical
+                OR lr.repo_live_branches IS NULL
                     OR COALESCE(
                         array_length(
                             COALESCE(
-                                live_branch_match.live_branches,
-                                live_branch_fallback.live_branches,
+                                lbm.live_branches,
+                                lbf.live_branches,
                                 ARRAY[]::TEXT[]
                             ),
                             1
@@ -1569,23 +1618,21 @@ ORDER BY idx
                     OR COALESCE(
                         array_length(
                             COALESCE(
-                                branch_match.branches,
-                                branch_fallback.fallback_branches,
+                                bm.branches,
+                                bf.fallback_branches,
                                 ARRAY[]::TEXT[]
                             ),
                             1
                         ),
                         0
                     ) > 0
-            ) ranked
-            WHERE ranked.rn = 1
             ORDER BY
-                ranked.total_score DESC,
-                ranked.repository,
-                ranked.commit_sha,
-                ranked.file_path,
-                ranked.start_line,
-                ranked.match_line_number
+                rt.total_score DESC,
+                rt.repository,
+                rt.commit_sha,
+                rt.file_path,
+                rt.chunk_index,
+                ctx.match_line_number
             LIMIT ",
         );
         qb.push_bind(fetch_limit);
