@@ -981,6 +981,20 @@ fn glob_to_sql_like(input: &str) -> String {
     pattern
 }
 
+pub fn escape_sql_like_literal(input: &str) -> String {
+    let mut escaped = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '%' | '_' | '\\' => {
+                escaped.push('\\');
+                escaped.push(ch);
+            }
+            other => escaped.push(other),
+        }
+    }
+    escaped
+}
+
 fn dedup_vec(values: &mut Vec<String>) {
     let mut seen = HashSet::new();
     values.retain(|val| seen.insert(val.clone()));
@@ -1131,5 +1145,11 @@ mod tests {
             }
             other => panic!("expected parentheses error, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn escape_sql_like_literal_escapes_wildcards() {
+        let escaped = escape_sql_like_literal("100%_done\\");
+        assert_eq!(escaped, "100\\%\\_done\\\\");
     }
 }

@@ -7,7 +7,9 @@ use crate::db::{
     RepoTreeQuery, SearchRequest, SearchResponse, SearchResult, SnippetRequest, SnippetResponse,
     SymbolReferenceRequest, SymbolReferenceResponse, SymbolResult, TreeEntry, TreeResponse,
 };
-use crate::dsl::{CaseSensitivity, ContentPredicate, TextSearchPlan, TextSearchRequest};
+use crate::dsl::{
+    escape_sql_like_literal, CaseSensitivity, ContentPredicate, TextSearchPlan, TextSearchRequest,
+};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sqlx::{Execute, PgPool, Postgres, QueryBuilder, Transaction, types::Json};
@@ -1076,11 +1078,12 @@ ORDER BY idx
 
             match predicate {
                 ContentPredicate::Plain(value) => {
+                    let escaped = escape_sql_like_literal(value);
                     qb.push("c.text_content");
                     qb.push(like_op);
                     qb.push("'%' || ");
-                    qb.push_bind(value.clone());
-                    qb.push(" || '%'");
+                    qb.push_bind(escaped);
+                    qb.push(" || '%' ESCAPE '\\'");
                 }
                 ContentPredicate::Regex(pattern) => {
                     qb.push("c.text_content");
