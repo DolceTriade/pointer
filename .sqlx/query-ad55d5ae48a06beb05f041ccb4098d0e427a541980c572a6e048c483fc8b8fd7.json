@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT\n                b.branch,\n                b.commit_sha,\n                lb.branch IS NOT NULL AS is_live,\n                COALESCE(snapshot.latest_indexed_at, b.indexed_at) AS indexed_at\n            FROM branches b\n            LEFT JOIN repo_live_branches lb\n              ON lb.repository = b.repository\n             AND lb.branch = b.branch\n            LEFT JOIN LATERAL (\n                SELECT MAX(indexed_at) AS latest_indexed_at\n                FROM branch_snapshots bs\n                WHERE bs.repository = b.repository AND bs.branch = b.branch\n            ) snapshot ON TRUE\n            WHERE b.repository = $1\n            ORDER BY b.branch\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "branch",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "commit_sha",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "is_live",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 3,
+        "name": "indexed_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      null,
+      null
+    ]
+  },
+  "hash": "ad55d5ae48a06beb05f041ccb4098d0e427a541980c572a6e048c483fc8b8fd7"
+}

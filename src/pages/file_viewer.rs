@@ -168,30 +168,29 @@ pub async fn get_file_viewer_data(
         // For text files, we'll add line numbers.
         let line_count = file_content.content.lines().count();
 
-        use autumnus::{HtmlInlineBuilder, formatter::Formatter, languages::Language, themes};
+        use autumnus::{highlight, OptionsBuilder, HtmlInlineBuilder, languages::Language, themes};
+
         let lang = p
             .file_name()
             .and_then(|file| file.to_str())
-            .map(|file| Language::guess(file, &file_content.content))
+            .map(|file| Language::guess(Some(file), &file_content.content))
             .unwrap_or(Language::PlainText);
         let theme = themes::get("catppuccin_mocha").ok();
-
         let formatter = HtmlInlineBuilder::new()
-            .source(&file_content.content)
             .lang(lang)
             .theme(theme)
+            .pre_class(Some("code-block"))
             .italic(false)
             .include_highlights(false)
             .build()
-            .map_err(|e| ServerFnError::new(format!("failed to build formatter: {e:#?}")))?;
+            .unwrap();
 
-        let mut output = Vec::new();
-        formatter
-            .format(&mut output)
-            .map_err(|e| ServerFnError::new(format!("failed to format: {e:#?}")))?;
+        let options = OptionsBuilder::new()
+            .formatter(Box::new(formatter))
+            .build()
+            .unwrap();
 
-        let html = String::from_utf8(output)
-            .map_err(|e| ServerFnError::new(format!("Failed to convert to utf8: {e:#?}")))?;
+        let html = highlight(&file_content.content, options);
 
         Ok(FileViewerData::File {
             html,

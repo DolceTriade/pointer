@@ -1138,7 +1138,7 @@ ORDER BY idx
         let fetch_limit_u64 = base_limit.max(minimum).saturating_add(1);
         let mut fetch_limit = fetch_limit_u64.min(i64::MAX as u64) as i64;
         fetch_limit = fetch_limit.min(5000);
-        let file_limit = fetch_limit.min(200);
+        let file_limit = fetch_limit.min(25000);
         let plan_row_limit: i64 = 5000;
 
         let needs_live_branch_filter = request
