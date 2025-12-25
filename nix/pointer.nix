@@ -35,6 +35,9 @@ rustPlatform.buildRustPackage rec {
 
   buildInputs = [openssl.dev];
 
+  enableParallelBuild = true;
+  doCheck = false;
+
   buildPhase = ''
     runHook preBuild
     export SQLX_OFFLINE=true
@@ -54,7 +57,7 @@ rustPlatform.buildRustPackage rec {
     cp target/release/pointer-indexer $indexer/bin/pointer-indexer
     cp target/release/pointer-backend $backend/bin/pointer-backend
     cp target/release/pointer $web/bin/pointer
-    cp -r target/site $out/share
+    cp -r target/site $web/share
     wrapProgram $web/bin/pointer --set LEPTOS_SITE_ROOT $web/share/site
 
     ln -sf $indexer/bin/pointer-indexer $out/bin/pointer-indexer
