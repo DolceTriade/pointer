@@ -13,6 +13,7 @@
   outputs = inputs @ {flake-parts, ...}:
     flake-parts.lib.mkFlake {inherit inputs;} {
       imports = [
+        inputs.flake-parts.flakeModules.easyOverlay
         # To import an internal flake module: ./other.nix
         # To import an external flake module:
         #   1. Add foo to inputs
@@ -49,11 +50,15 @@
             inherit rustPlatform;
           };
         packages.default = self'.packages.pointer;
+        overlayAttrs = {
+          pointer = self'.packages.pointer;
+        };
       };
       flake = {
         # The usual flake attributes can be defined here, including system-
         # agnostic ones like nixosModule and system-enumerating ones, although
         # those are more easily expressed in perSystem.
+        nixosModules.pointer = import ./nix/pointer-module.nix;
       };
     };
 }
