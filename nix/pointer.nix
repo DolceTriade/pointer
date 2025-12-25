@@ -24,6 +24,9 @@ rustPlatform.buildRustPackage rec {
     allowBuiltinFetchGit = true;
   };
 
+  doCheck = false;
+  enableParallelBuild = true;
+
   nativeBuildInputs = [
     wasm-bindgen-cli_0_2_104
     binaryen
