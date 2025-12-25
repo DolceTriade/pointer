@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                SELECT commit_sha, indexed_at\n                FROM branch_snapshots\n                WHERE repository = $1 AND branch = $2\n                ORDER BY indexed_at DESC\n                ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "commit_sha",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "indexed_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "10507b58f6dd3561bd5847fec923afc9f4b4443868ce6b4e1d6e1d5795a26776"
+}

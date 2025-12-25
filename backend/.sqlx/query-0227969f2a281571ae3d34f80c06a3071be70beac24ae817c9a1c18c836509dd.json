@@ -1,0 +1,38 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT repository, branch, interval_seconds, keep_count\n            FROM branch_snapshot_policies\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "repository",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "branch",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "interval_seconds",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "keep_count",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "0227969f2a281571ae3d34f80c06a3071be70beac24ae817c9a1c18c836509dd"
+}

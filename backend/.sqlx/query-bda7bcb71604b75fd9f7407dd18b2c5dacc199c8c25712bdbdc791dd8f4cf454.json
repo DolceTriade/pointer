@@ -1,0 +1,32 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT repository, branch, latest_keep_count\n            FROM branch_policies\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "repository",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "branch",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "latest_keep_count",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "bda7bcb71604b75fd9f7407dd18b2c5dacc199c8c25712bdbdc791dd8f4cf454"
+}

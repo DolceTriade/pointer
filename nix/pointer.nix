@@ -13,6 +13,7 @@
 rustPlatform.buildRustPackage rec {
   pname = "pointer";
   version = "0.1.0";
+  outputs = ["out" "web" "backend" "indexer"];
 
   src = lib.cleanSource ../.;
 
@@ -37,7 +38,11 @@ rustPlatform.buildRustPackage rec {
   buildPhase = ''
     runHook preBuild
     export SQLX_OFFLINE=true
+    export SQLX_OFFLINE_DIR=$PWD/.sqlx
     cargo leptos build --release
+    export SQLX_OFFLINE_DIR=$PWD/backend/.sqlx
+    cargo build --release --package pointer-backend --bin pointer-backend
+    cargo build --release --package pointer-indexer --bin pointer-indexer
 
     runHook postBuild
   '';
@@ -45,10 +50,16 @@ rustPlatform.buildRustPackage rec {
   installPhase = ''
     runHook preInstall
 
-    mkdir -p $out/bin $out/share
-    cp target/release/pointer $out/bin
-    cp -r target/site $out/share
-    wrapProgram $out/bin/pointer --set LEPTOS_SITE_ROOT $out/share/site
+    mkdir -p $out/bin $web/bin $web/share $backend/bin $indexer/bin
+    cp target/release/pointer-indexer $indexer/bin/pointer-indexer
+    cp target/release/pointer-backend $backend/bin/pointer-backend
+    cp target/release/pointer $web/bin/pointer
+    cp -r target/site $web/share/site
+    wrapProgram $web/bin/pointer --chdir $web/share
+
+    ln -sf $indexer/bin/pointer-indexer $out/bin/pointer-indexer
+    ln -sf $backend/bin/pointer-backend $out/bin/pointer-backend
+    ln -sf $web/bin/pointer $out/bin/pointer
 
     runHook postInstall
   '';
