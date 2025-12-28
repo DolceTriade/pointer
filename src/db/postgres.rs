@@ -1395,6 +1395,19 @@ ORDER BY idx
             } else {
                 qb.push(
                     "
+            symbol_term_matches AS MATERIALIZED (
+                SELECT
+                    term,
+                    sn.id,
+                    sn.name_lc
+                FROM UNNEST(",
+                );
+                qb.push_bind(symbol_terms);
+                qb.push(
+                    ") AS term
+                JOIN symbol_names sn
+                  ON sn.name_lc LIKE '%' || term || '%'
+            ),
             symbol_scores AS (
                 SELECT
                     sf.file_id,
@@ -1402,20 +1415,14 @@ ORDER BY idx
                     MAX(
                         CASE
                             -- Strongly favor exact symbol matches, then namespace-prefixed, then loose substring
-                            WHEN sn.name_lc = term THEN 50.0
-                            WHEN sn.name_lc LIKE term || '::%' THEN 25.0
-                            ELSE 1.0 / (1 + ABS(LENGTH(sn.name_lc) - LENGTH(term)))
+                            WHEN stm.name_lc = stm.term THEN 50.0
+                            WHEN stm.name_lc LIKE stm.term || '::%' THEN 25.0
+                            ELSE 1.0 / (1 + ABS(LENGTH(stm.name_lc) - LENGTH(stm.term)))
                         END
                     ) AS score
-                FROM scored_files sf
-                JOIN symbol_name_refs snr ON snr.content_hash = sf.content_hash
-                JOIN symbol_names sn ON sn.id = snr.symbol_name_id
-                CROSS JOIN LATERAL UNNEST(",
-                );
-                qb.push_bind(symbol_terms);
-                qb.push(
-                    ") AS term
-                WHERE sn.name_lc LIKE '%' || term || '%'
+                FROM symbol_term_matches stm
+                JOIN symbol_name_refs snr ON snr.symbol_name_id = stm.id
+                JOIN scored_files sf ON sf.content_hash = snr.content_hash
                 GROUP BY sf.file_id, sf.content_hash
             ),
             top_files AS (
