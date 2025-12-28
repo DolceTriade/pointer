@@ -1402,19 +1402,20 @@ ORDER BY idx
                     MAX(
                         CASE
                             -- Strongly favor exact symbol matches, then namespace-prefixed, then loose substring
-                            WHEN LOWER(s.name) = LOWER(term) THEN 50.0
-                            WHEN LOWER(s.name) LIKE LOWER(term) || '::%' THEN 25.0
-                            ELSE 1.0 / (1 + ABS(LENGTH(LOWER(s.name)) - LENGTH(term)))
+                            WHEN sn.name_lc = term THEN 50.0
+                            WHEN sn.name_lc LIKE term || '::%' THEN 25.0
+                            ELSE 1.0 / (1 + ABS(LENGTH(sn.name_lc) - LENGTH(term)))
                         END
                     ) AS score
                 FROM scored_files sf
-                JOIN symbols s ON s.content_hash = sf.content_hash
+                JOIN symbol_name_refs snr ON snr.content_hash = sf.content_hash
+                JOIN symbol_names sn ON sn.id = snr.symbol_name_id
                 CROSS JOIN LATERAL UNNEST(",
                 );
                 qb.push_bind(symbol_terms);
                 qb.push(
                     ") AS term
-                WHERE POSITION(term IN LOWER(s.name)) > 0
+                WHERE sn.name_lc LIKE '%' || term || '%'
                 GROUP BY sf.file_id, sf.content_hash
             ),
             top_files AS (
