@@ -1398,15 +1398,14 @@ ORDER BY idx
             symbol_term_matches AS MATERIALIZED (
                 SELECT
                     term,
-                    sn.id,
-                    sn.name_lc
+                    us.name_lc
                 FROM UNNEST(",
                 );
                 qb.push_bind(symbol_terms);
                 qb.push(
                     ") AS term
-                JOIN symbol_names sn
-                  ON sn.name_lc LIKE '%' || term || '%'
+                JOIN unique_symbols us
+                  ON us.name_lc LIKE '%' || term || '%'
             ),
             symbol_scores AS (
                 SELECT
@@ -1421,8 +1420,8 @@ ORDER BY idx
                         END
                     ) AS score
                 FROM symbol_term_matches stm
-                JOIN symbol_name_refs snr ON snr.symbol_name_id = stm.id
-                JOIN scored_files sf ON sf.content_hash = snr.content_hash
+                JOIN symbols s ON s.name_lc = stm.name_lc
+                JOIN scored_files sf ON sf.content_hash = s.content_hash
                 GROUP BY sf.file_id, sf.content_hash
             ),
             top_files AS (
@@ -2085,9 +2084,12 @@ impl PostgresDb {
         });
 
         for chunk in deduped.chunks(INSERT_BATCH_SIZE) {
-            let mut qb = QueryBuilder::new("INSERT INTO symbols (content_hash, name) ");
+            let mut qb = QueryBuilder::new("INSERT INTO symbols (content_hash, name, name_lc) ");
             qb.push_values(chunk.iter().copied(), |mut b, symbol| {
-                b.push_bind(&symbol.content_hash).push_bind(&symbol.name);
+                let name_lc = symbol.name.to_lowercase();
+                b.push_bind(&symbol.content_hash)
+                    .push_bind(&symbol.name)
+                    .push_bind(name_lc);
             });
             qb.push(" ON CONFLICT (content_hash, name) DO NOTHING");
 

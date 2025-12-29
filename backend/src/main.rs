@@ -27,7 +27,7 @@ use pointer_indexer::models::{
 };
 use serde::{Deserialize, Serialize, de::IgnoredAny};
 use sqlx::postgres::PgPoolOptions;
-use sqlx::{Acquire, PgPool, Postgres, QueryBuilder, Transaction};
+use sqlx::{Acquire, PgConnection, PgPool, Postgres, QueryBuilder, Transaction};
 use tempfile::Builder;
 use thiserror::Error;
 use tokio::fs::File as TokioFile;
@@ -36,8 +36,11 @@ use tokio::net::TcpListener;
 use tokio::{signal, time};
 use tracing::info;
 
-use crate::gc::{GarbageCollector, is_latest_commit_on_any_branch, prune_commit_data};
+use crate::gc::{
+    GarbageCollector, is_latest_commit_on_any_branch, prune_commit_data, prune_repository_data,
+};
 use zstd::stream::read::Decoder;
+use chrono::Utc;
 
 #[derive(Debug, Parser)]
 struct ServerConfig {
@@ -92,6 +95,7 @@ impl From<ApiErrorKind> for AppError {
     fn from(kind: ApiErrorKind) -> Self {
         match kind {
             ApiErrorKind::Database(err) => {
+                tracing::error!(error = ?err, "database error");
                 AppError::new(StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
             }
             ApiErrorKind::Serde(err) => AppError::new(StatusCode::BAD_REQUEST, err.to_string()),
@@ -99,6 +103,7 @@ impl From<ApiErrorKind> for AppError {
                 AppError::new(StatusCode::BAD_REQUEST, err.to_string())
             }
             ApiErrorKind::Internal(err) => {
+                tracing::error!(error = ?err, "internal error");
                 AppError::new(StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
             }
         }
@@ -248,8 +253,18 @@ async fn main() -> Result<()> {
         // Pruning routes
         .route("/api/v1/prune/commit", post(prune_commit_handler))
         .route("/api/v1/prune/branch", post(prune_branch_handler))
+        .route("/api/v1/prune/repo", post(prune_repo_handler))
         .route("/api/v1/prune/policy", post(apply_retention_policy_handler))
         .route("/api/v1/admin/gc", post(run_gc_handler))
+        .route("/api/v1/admin/rebuild_symbol_cache", post(rebuild_symbol_cache_handler))
+        .route(
+            "/api/v1/admin/cleanup_symbol_cache",
+            post(cleanup_symbol_cache_handler),
+        )
+        .route(
+            "/api/v1/admin/refresh_symbol_cache",
+            post(refresh_symbol_cache_handler),
+        )
         .route("/healthz", get(health_check))
         .with_state(app_state)
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024));
@@ -933,14 +948,19 @@ async fn insert_symbol_records_batch(
         return Ok(());
     }
 
-    let mut qb = QueryBuilder::new("INSERT INTO symbols (content_hash, name) ");
-    qb.push_values(chunk.iter(), |mut b, symbol| {
-        b.push_bind(&symbol.content_hash).push_bind(&symbol.name);
-    });
-    qb.push(" ON CONFLICT (content_hash, name) DO NOTHING");
+    let mut conn = pool.acquire().await.map_err(ApiErrorKind::from)?;
 
-    qb.build()
-        .execute(&pool)
+    let mut symbol_qb = QueryBuilder::new("INSERT INTO symbols (content_hash, name, name_lc) ");
+    symbol_qb.push_values(chunk.iter(), |mut b, symbol| {
+        let name_lc = symbol.name.to_lowercase();
+        b.push_bind(&symbol.content_hash)
+            .push_bind(&symbol.name)
+            .push_bind(name_lc);
+    });
+    symbol_qb.push(" ON CONFLICT (content_hash, name) DO NOTHING");
+    symbol_qb
+        .build()
+        .execute(&mut *conn)
         .await
         .map_err(ApiErrorKind::from)?;
 
@@ -1247,6 +1267,21 @@ struct PruneCommitResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct PruneRepoRequest {
+    repository: String,
+    #[serde(default = "default_prune_repo_batch_size")]
+    batch_size: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct PruneRepoResponse {
+    repository: String,
+    pruned: bool,
+    deleted_rows: i64,
+    message: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct PruneBranchRequest {
     repository: String,
     branch: String,
@@ -1265,6 +1300,43 @@ struct GcResponse {
     branches_evaluated: usize,
     snapshots_removed: usize,
     commits_pruned: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct CleanupSymbolCacheRequest {
+    #[serde(default = "default_symbol_cache_batch_size")]
+    batch_size: i64,
+    #[serde(default = "default_symbol_cache_max_batches")]
+    max_batches: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct CleanupSymbolCacheResponse {
+    refs_deleted: i64,
+    names_deleted: i64,
+    batches_run: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RefreshSymbolCacheRequest {
+    #[serde(default = "default_symbol_cache_batch_size")]
+    batch_size: i64,
+    #[serde(default = "default_symbol_cache_max_batches")]
+    max_batches: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct RefreshSymbolCacheResponse {
+    names_inserted: i64,
+    batches_run: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct RebuildSymbolCacheResponse {
+    message: String,
+    shard_count: usize,
+    inserted_names: u64,
+    inserted_refs: u64,
 }
 
 // Manual prune for a specific commit
@@ -1351,6 +1423,26 @@ async fn prune_branch_handler(
     }))
 }
 
+async fn prune_repo_handler(
+    State(state): State<AppState>,
+    Json(payload): Json<PruneRepoRequest>,
+) -> ApiResult<Json<PruneRepoResponse>> {
+    let deleted_rows =
+        prune_repository_data(&state.pool, &payload.repository, payload.batch_size).await?;
+    let pruned = deleted_rows > 0;
+
+    Ok(Json(PruneRepoResponse {
+        repository: payload.repository,
+        pruned,
+        deleted_rows,
+        message: if pruned {
+            "Repository data successfully pruned".to_string()
+        } else {
+            "No data found for the specified repository".to_string()
+        },
+    }))
+}
+
 async fn run_gc_handler(State(state): State<AppState>) -> ApiResult<Json<GcResponse>> {
     let collector = GarbageCollector::new(state.pool.clone());
     let outcome = collector.run_once().await?;
@@ -1359,6 +1451,241 @@ async fn run_gc_handler(State(state): State<AppState>) -> ApiResult<Json<GcRespo
         snapshots_removed: outcome.snapshots_removed,
         commits_pruned: outcome.commits_pruned,
     }))
+}
+
+async fn cleanup_symbol_cache_handler(
+    State(state): State<AppState>,
+    Json(payload): Json<CleanupSymbolCacheRequest>,
+) -> ApiResult<Json<CleanupSymbolCacheResponse>> {
+    let batch_size = payload.batch_size.max(1);
+    let max_batches = payload.max_batches.max(1);
+    let mut names_deleted = 0_i64;
+    let mut batches_run = 0_i64;
+
+    let mut conn = state.pool.acquire().await.map_err(ApiErrorKind::from)?;
+
+    for _ in 0..max_batches {
+        let result = sqlx::query(
+            "
+            WITH doomed AS (
+                SELECT us.name_lc
+                FROM unique_symbols us
+                LEFT JOIN symbols s ON s.name_lc = us.name_lc
+                WHERE s.name_lc IS NULL
+                LIMIT $1
+            )
+            DELETE FROM unique_symbols us
+            USING doomed
+            WHERE us.name_lc = doomed.name_lc
+            ",
+        )
+        .bind(batch_size)
+        .execute(&mut *conn)
+        .await
+        .map_err(ApiErrorKind::from)?;
+
+        let deleted = result.rows_affected() as i64;
+        names_deleted = names_deleted.saturating_add(deleted);
+        batches_run = batches_run.saturating_add(1);
+        if deleted == 0 {
+            break;
+        }
+    }
+
+    Ok(Json(CleanupSymbolCacheResponse {
+        refs_deleted: 0,
+        names_deleted,
+        batches_run,
+    }))
+}
+
+async fn refresh_symbol_cache_handler(
+    State(state): State<AppState>,
+    Json(payload): Json<RefreshSymbolCacheRequest>,
+) -> ApiResult<Json<RefreshSymbolCacheResponse>> {
+    let batch_size = payload.batch_size.max(1);
+    let max_batches = payload.max_batches.max(1);
+    let mut names_inserted = 0_i64;
+    let mut batches_run = 0_i64;
+
+    let mut conn = state.pool.acquire().await.map_err(ApiErrorKind::from)?;
+
+    for _ in 0..max_batches {
+        let result = sqlx::query(
+            "
+            WITH missing AS (
+                SELECT s.name_lc, MIN(s.name) AS name
+                FROM symbols s
+                LEFT JOIN unique_symbols us ON us.name_lc = s.name_lc
+                WHERE us.name_lc IS NULL
+                GROUP BY s.name_lc
+                LIMIT $1
+            )
+            INSERT INTO unique_symbols (name_lc, name)
+            SELECT missing.name_lc, missing.name
+            FROM missing
+            ON CONFLICT (name_lc) DO NOTHING
+            ",
+        )
+        .bind(batch_size)
+        .execute(&mut *conn)
+        .await
+        .map_err(ApiErrorKind::from)?;
+
+        let inserted = result.rows_affected() as i64;
+        names_inserted = names_inserted.saturating_add(inserted);
+        batches_run = batches_run.saturating_add(1);
+        if inserted == 0 {
+            break;
+        }
+    }
+
+    Ok(Json(RefreshSymbolCacheResponse {
+        names_inserted,
+        batches_run,
+    }))
+}
+
+async fn rebuild_symbol_cache_handler(
+    State(state): State<AppState>,
+) -> ApiResult<Json<RebuildSymbolCacheResponse>> {
+    const MAX_SYMBOL_CACHE_WORKERS: usize = 8;
+    let shard_count = std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(1)
+        .min(MAX_SYMBOL_CACHE_WORKERS)
+        .max(1);
+
+    let mut lock_conn = state.pool.acquire().await.map_err(ApiErrorKind::from)?;
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(983_475_023_i64)
+        .execute(&mut *lock_conn)
+        .await
+        .map_err(ApiErrorKind::from)?;
+
+    sqlx::query("CREATE TABLE IF NOT EXISTS unique_symbols_new (LIKE unique_symbols INCLUDING ALL)")
+        .execute(&mut *lock_conn)
+        .await
+        .map_err(ApiErrorKind::from)?;
+    sqlx::query("TRUNCATE unique_symbols_new")
+        .execute(&mut *lock_conn)
+        .await
+        .map_err(ApiErrorKind::from)?;
+
+    let mut tasks = FuturesUnordered::new();
+    for shard in 0..shard_count {
+        let pool = state.pool.clone();
+        tasks.push(tokio::spawn(async move {
+            let mut conn = pool.acquire().await?;
+            let names_result = sqlx::query(
+                "
+                INSERT INTO unique_symbols_new (name_lc, name)
+                SELECT
+                    name_lc,
+                    MIN(name) AS name
+                FROM (
+                    SELECT
+                        name,
+                        name_lc
+                    FROM symbols
+                    WHERE MOD(ABS(hashtext(name_lc)), $1) = $2
+                ) t
+                GROUP BY name_lc
+                ",
+            )
+            .bind(shard_count as i64)
+            .bind(shard as i64)
+            .execute(&mut *conn)
+            .await?;
+
+            Ok::<_, sqlx::Error>(names_result.rows_affected())
+        }));
+    }
+
+    let mut inserted_names = 0_u64;
+    while let Some(result) = tasks.try_next().await.map_err(|err| {
+        AppError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("symbol cache rebuild task join failed: {}", err),
+        )
+    })? {
+        let names = result.map_err(ApiErrorKind::from)?;
+        inserted_names = inserted_names.saturating_add(names);
+    }
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS unique_symbols_new_name_lc_trgm ON unique_symbols_new USING gin (name_lc gin_trgm_ops)",
+    )
+    .execute(&mut *lock_conn)
+    .await
+    .map_err(ApiErrorKind::from)?;
+    sqlx::query("ANALYZE unique_symbols_new")
+        .execute(&mut *lock_conn)
+        .await
+        .map_err(ApiErrorKind::from)?;
+
+    let suffix = Utc::now().format("%Y%m%d%H%M%S").to_string();
+    rename_table_if_exists(
+        &mut *lock_conn,
+        "unique_symbols_old",
+        &format!("unique_symbols_old_{}", suffix),
+    )
+    .await?;
+
+    sqlx::query("ALTER TABLE unique_symbols RENAME TO unique_symbols_old")
+        .execute(&mut *lock_conn)
+        .await
+        .map_err(ApiErrorKind::from)?;
+    sqlx::query("ALTER TABLE unique_symbols_new RENAME TO unique_symbols")
+        .execute(&mut *lock_conn)
+        .await
+        .map_err(ApiErrorKind::from)?;
+
+    sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(983_475_023_i64)
+        .execute(&mut *lock_conn)
+        .await
+        .map_err(ApiErrorKind::from)?;
+
+    Ok(Json(RebuildSymbolCacheResponse {
+        message: "rebuilt symbol cache".to_string(),
+        shard_count,
+        inserted_names,
+        inserted_refs: 0,
+    }))
+}
+
+async fn rename_table_if_exists(
+    conn: &mut PgConnection,
+    from: &str,
+    to: &str,
+) -> std::result::Result<(), ApiErrorKind> {
+    let full_name = format!("public.{}", from);
+    let exists: Option<String> = sqlx::query_scalar("SELECT to_regclass($1)")
+        .bind(full_name)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(ApiErrorKind::from)?;
+    if exists.is_some() {
+        let sql = format!("ALTER TABLE {} RENAME TO {}", from, to);
+        sqlx::query(&sql)
+            .execute(&mut *conn)
+            .await
+            .map_err(ApiErrorKind::from)?;
+    }
+    Ok(())
+}
+
+fn default_symbol_cache_batch_size() -> i64 {
+    10_000
+}
+
+fn default_symbol_cache_max_batches() -> i64 {
+    50
+}
+
+fn default_prune_repo_batch_size() -> i64 {
+    10_000
 }
 
 // Retention Policy Structures

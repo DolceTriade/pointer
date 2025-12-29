@@ -8,6 +8,7 @@ use humantime::parse_duration;
 use tracing::info;
 
 use crate::config::{BranchPolicyConfig, IndexerConfig, SnapshotPolicyConfig};
+use crate::admin;
 use crate::engine::Indexer;
 use crate::output;
 use crate::upload;
@@ -32,6 +33,8 @@ pub struct Cli {
 pub enum Commands {
     /// Index a repository and produce/upload search metadata.
     Index(IndexArgs),
+    /// Administrative actions against the backend service.
+    Admin(AdminArgs),
 }
 
 #[derive(Debug, Args)]
@@ -77,6 +80,7 @@ pub fn run() -> Result<()> {
 
     match cli.command {
         Commands::Index(args) => run_index(args),
+        Commands::Admin(args) => admin::run_admin(args),
     }
 }
 
@@ -194,4 +198,86 @@ fn resolve_output_dir(path: &Path) -> Result<PathBuf> {
     } else {
         Ok(env::current_dir()?.join(path))
     }
+}
+
+#[derive(Debug, Args)]
+pub struct AdminArgs {
+    /// Base URL for the backend admin API (e.g. http://localhost:8080/api/v1).
+    #[arg(long, env = "POINTER_BACKEND_URL")]
+    pub backend_url: Option<String>,
+    /// API key used when calling the backend (sent as a Bearer token).
+    #[arg(long)]
+    pub api_key: Option<String>,
+    #[command(subcommand)]
+    pub command: AdminCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AdminCommand {
+    /// Run garbage collection.
+    Gc,
+    /// Rebuild the symbol name cache.
+    RebuildSymbolCache,
+    /// Cleanup orphaned symbol cache rows.
+    CleanupSymbolCache(CleanupSymbolCacheArgs),
+    /// Incrementally refresh unique symbol names.
+    RefreshSymbolCache(RefreshSymbolCacheArgs),
+    /// Prune all data for a specific commit.
+    PruneCommit(PruneCommitArgs),
+    /// Prune all historical commits for a branch (keeps latest).
+    PruneBranch(PruneBranchArgs),
+    /// Prune all data for a repository.
+    PruneRepo(PruneRepoArgs),
+    /// Apply retention policy for a repository.
+    PrunePolicy(PrunePolicyArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct PruneCommitArgs {
+    #[arg(long)]
+    pub repository: String,
+    #[arg(long)]
+    pub commit_sha: String,
+}
+
+#[derive(Debug, Args)]
+pub struct PruneBranchArgs {
+    #[arg(long)]
+    pub repository: String,
+    #[arg(long)]
+    pub branch: String,
+}
+
+#[derive(Debug, Args)]
+pub struct PruneRepoArgs {
+    #[arg(long)]
+    pub repository: String,
+    #[arg(long, default_value_t = 10_000)]
+    pub batch_size: i64,
+}
+
+#[derive(Debug, Args)]
+pub struct PrunePolicyArgs {
+    #[arg(long)]
+    pub repository: String,
+    #[arg(long, default_value_t = true)]
+    pub keep_latest: bool,
+    #[arg(long)]
+    pub max_commits_to_keep: Option<i32>,
+}
+
+#[derive(Debug, Args)]
+pub struct CleanupSymbolCacheArgs {
+    #[arg(long, default_value_t = 10_000)]
+    pub batch_size: i64,
+    #[arg(long, default_value_t = 50)]
+    pub max_batches: i64,
+}
+
+#[derive(Debug, Args)]
+pub struct RefreshSymbolCacheArgs {
+    #[arg(long, default_value_t = 10_000)]
+    pub batch_size: i64,
+    #[arg(long, default_value_t = 50)]
+    pub max_batches: i64,
 }
