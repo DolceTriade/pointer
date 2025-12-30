@@ -1843,7 +1843,17 @@ ORDER BY idx
 
             aggregates
                 .into_iter()
-                .map(|agg| {
+                .map(|mut agg| {
+    agg.entries.sort_by(|a, b| {
+        let (marks_a, signal_a) = snippet_signal_score(&a.content_text);
+        let (marks_b, signal_b) = snippet_signal_score(&b.content_text);
+        marks_b
+            .cmp(&marks_a)
+            .then_with(|| signal_b.cmp(&signal_a))
+            .then_with(|| a.match_line_number.cmp(&b.match_line_number))
+            .then_with(|| a.start_line.cmp(&b.start_line))
+    });
+
                     let mut entries_iter = agg.entries.into_iter();
                     let best_row = entries_iter
                         .next()
@@ -2315,6 +2325,15 @@ struct FileAggregate {
 }
 
 const FACET_LIMIT: usize = 8;
+
+fn snippet_signal_score(text: &str) -> (i32, i32) {
+    let mark_count = text.matches("<mark>").count() as i32;
+    let signal_count = text
+        .bytes()
+        .filter(|byte| matches!(byte, b':' | b'=' | b'(' | b')'))
+        .count() as i32;
+    (mark_count, signal_count)
+}
 
 fn build_search_stats(rows: &[RankedFileRow]) -> SearchResultsStats {
     let mut directory_counts: HashMap<String, u32> = HashMap::new();

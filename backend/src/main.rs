@@ -1329,6 +1329,7 @@ struct RefreshSymbolCacheRequest {
 struct RefreshSymbolCacheResponse {
     names_inserted: i64,
     batches_run: i64,
+    shard_count: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -1505,44 +1506,82 @@ async fn refresh_symbol_cache_handler(
 ) -> ApiResult<Json<RefreshSymbolCacheResponse>> {
     let batch_size = payload.batch_size.max(1);
     let max_batches = payload.max_batches.max(1);
+    let shard_count = 1_usize;
+
+    let mut tx = state.pool.begin().await.map_err(ApiErrorKind::from)?;
+
+    sqlx::query(
+        "
+        CREATE TEMP TABLE missing_unique_symbols (
+            name_lc TEXT PRIMARY KEY
+        ) ON COMMIT DROP
+        ",
+    )
+    .execute(&mut *tx)
+    .await
+    .map_err(ApiErrorKind::from)?;
+
+    sqlx::query(
+        "
+        INSERT INTO missing_unique_symbols (name_lc)
+        SELECT DISTINCT ON (s.name_lc)
+            s.name_lc
+        FROM symbols s
+        LEFT JOIN unique_symbols us ON us.name_lc = s.name_lc
+        WHERE us.name_lc IS NULL
+        ",
+    )
+    .execute(&mut *tx)
+    .await
+    .map_err(ApiErrorKind::from)?;
+
     let mut names_inserted = 0_i64;
     let mut batches_run = 0_i64;
 
-    let mut conn = state.pool.acquire().await.map_err(ApiErrorKind::from)?;
-
     for _ in 0..max_batches {
-        let result = sqlx::query(
+        let batch_counts: RefreshBatchCounts = sqlx::query_as(
             "
-            WITH missing AS (
-                SELECT s.name_lc, MIN(s.name) AS name
-                FROM symbols s
-                LEFT JOIN unique_symbols us ON us.name_lc = s.name_lc
-                WHERE us.name_lc IS NULL
-                GROUP BY s.name_lc
+            WITH batch AS (
+                SELECT name_lc
+                FROM missing_unique_symbols
+                ORDER BY name_lc
                 LIMIT $1
             )
-            INSERT INTO unique_symbols (name_lc, name)
-            SELECT missing.name_lc, missing.name
-            FROM missing
-            ON CONFLICT (name_lc) DO NOTHING
+            , ins AS (
+                INSERT INTO unique_symbols (name_lc)
+                SELECT batch.name_lc
+                FROM batch
+                ON CONFLICT (name_lc) DO NOTHING
+                RETURNING 1
+            ), del AS (
+                DELETE FROM missing_unique_symbols mus
+                USING batch
+                WHERE mus.name_lc = batch.name_lc
+                RETURNING 1
+            )
+            SELECT
+                COALESCE((SELECT COUNT(*) FROM ins), 0) AS inserted,
+                COALESCE((SELECT COUNT(*) FROM del), 0) AS deleted
             ",
         )
         .bind(batch_size)
-        .execute(&mut *conn)
+        .fetch_one(&mut *tx)
         .await
         .map_err(ApiErrorKind::from)?;
 
-        let inserted = result.rows_affected() as i64;
-        names_inserted = names_inserted.saturating_add(inserted);
+        names_inserted = names_inserted.saturating_add(batch_counts.inserted);
         batches_run = batches_run.saturating_add(1);
-        if inserted == 0 {
+        if batch_counts.deleted == 0 {
             break;
         }
     }
 
+    tx.commit().await.map_err(ApiErrorKind::from)?;
+
     Ok(Json(RefreshSymbolCacheResponse {
         names_inserted,
         batches_run,
+        shard_count,
     }))
 }
 
@@ -1579,13 +1618,11 @@ async fn rebuild_symbol_cache_handler(
             let mut conn = pool.acquire().await?;
             let names_result = sqlx::query(
                 "
-                INSERT INTO unique_symbols_new (name_lc, name)
+                INSERT INTO unique_symbols_new (name_lc)
                 SELECT
-                    name_lc,
-                    MIN(name) AS name
+                    name_lc
                 FROM (
                     SELECT
-                        name,
                         name_lc
                     FROM symbols
                     WHERE MOD(ABS(hashtext(name_lc)), $1) = $2
@@ -1686,6 +1723,12 @@ fn default_symbol_cache_max_batches() -> i64 {
 
 fn default_prune_repo_batch_size() -> i64 {
     10_000
+}
+
+#[derive(sqlx::FromRow)]
+struct RefreshBatchCounts {
+    inserted: i64,
+    deleted: i64,
 }
 
 // Retention Policy Structures
