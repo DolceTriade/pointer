@@ -197,6 +197,24 @@ pub trait Database: Clone + Send + Sync + 'static {
         term: &str,
         limit: i64,
     ) -> Result<Vec<String>, DbError>;
+    async fn autocomplete_files(
+        &self,
+        repositories: &[String],
+        term: &str,
+        limit: i64,
+    ) -> Result<Vec<String>, DbError>;
+    async fn autocomplete_languages(
+        &self,
+        repositories: &[String],
+        term: &str,
+        limit: i64,
+    ) -> Result<Vec<String>, DbError>;
+    async fn autocomplete_branches(
+        &self,
+        repositories: &[String],
+        term: &str,
+        limit: i64,
+    ) -> Result<Vec<String>, DbError>;
     async fn autocomplete_symbols(&self, term: &str, limit: i64) -> Result<Vec<String>, DbError>;
     async fn health_check(&self) -> Result<String, DbError>;
 }

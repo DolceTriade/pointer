@@ -70,3 +70,63 @@ pub async fn autocomplete_symbols(term: String, limit: i64) -> Result<Vec<String
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))
 }
+
+#[server]
+pub async fn autocomplete_languages(
+    term: String,
+    repositories: Vec<String>,
+    limit: i64,
+) -> Result<Vec<String>, ServerFnError> {
+    let state = expect_context::<crate::server::GlobalAppState>();
+    let state = state.lock().await;
+    let db = PostgresDb::new(state.pool.clone());
+    let normalized_limit = limit.max(1).min(50);
+    let repos: Vec<String> = repositories
+        .into_iter()
+        .map(|repo| repo.trim().to_string())
+        .filter(|repo| !repo.is_empty())
+        .collect();
+    db.autocomplete_languages(&repos, term.trim(), normalized_limit)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))
+}
+
+#[server]
+pub async fn autocomplete_branches(
+    term: String,
+    repositories: Vec<String>,
+    limit: i64,
+) -> Result<Vec<String>, ServerFnError> {
+    let state = expect_context::<crate::server::GlobalAppState>();
+    let state = state.lock().await;
+    let db = PostgresDb::new(state.pool.clone());
+    let normalized_limit = limit.max(1).min(50);
+    let repos: Vec<String> = repositories
+        .into_iter()
+        .map(|repo| repo.trim().to_string())
+        .filter(|repo| !repo.is_empty())
+        .collect();
+    db.autocomplete_branches(&repos, term.trim(), normalized_limit)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))
+}
+
+#[server]
+pub async fn autocomplete_files(
+    term: String,
+    repositories: Vec<String>,
+    limit: i64,
+) -> Result<Vec<String>, ServerFnError> {
+    let state = expect_context::<crate::server::GlobalAppState>();
+    let state = state.lock().await;
+    let db = PostgresDb::new(state.pool.clone());
+    let normalized_limit = limit.max(1).min(50);
+    let repos: Vec<String> = repositories
+        .into_iter()
+        .map(|repo| repo.trim().to_string())
+        .filter(|repo| !repo.is_empty())
+        .collect();
+    db.autocomplete_files(&repos, term.trim(), normalized_limit)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))
+}

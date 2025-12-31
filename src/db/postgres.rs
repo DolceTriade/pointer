@@ -2003,6 +2003,106 @@ ORDER BY idx
         Ok(rows)
     }
 
+    async fn autocomplete_files(
+        &self,
+        repositories: &[String],
+        term: &str,
+        limit: i64,
+    ) -> Result<Vec<String>, DbError> {
+        let escaped = escape_sql_like_literal(term);
+        let pattern = format!("%{}%", escaped);
+
+        let mut qb = QueryBuilder::new(
+            "SELECT DISTINCT file_path \
+             FROM files \
+             WHERE TRUE",
+        );
+        if !repositories.is_empty() {
+            qb.push(" AND repository = ANY(");
+            qb.push_bind(repositories);
+            qb.push(")");
+        }
+        qb.push(" AND file_path ILIKE ");
+        qb.push_bind(pattern);
+        qb.push(" ESCAPE '\\' ORDER BY file_path LIMIT ");
+        qb.push_bind(limit);
+
+        let rows: Vec<String> = qb
+            .build_query_scalar()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| DbError::Database(e.to_string()))?;
+
+        Ok(rows)
+    }
+
+    async fn autocomplete_languages(
+        &self,
+        repositories: &[String],
+        term: &str,
+        limit: i64,
+    ) -> Result<Vec<String>, DbError> {
+        let escaped = escape_sql_like_literal(term);
+        let pattern = format!("%{}%", escaped);
+
+        let mut qb = QueryBuilder::new(
+            "SELECT DISTINCT cb.language \
+             FROM content_blobs cb \
+             JOIN files f ON f.content_hash = cb.hash \
+             WHERE TRUE",
+        );
+        if !repositories.is_empty() {
+            qb.push(" AND f.repository = ANY(");
+            qb.push_bind(repositories);
+            qb.push(")");
+        }
+        qb.push(" AND cb.language IS NOT NULL AND cb.language ILIKE ");
+        qb.push_bind(pattern);
+        qb.push(" ESCAPE '\\' ORDER BY cb.language LIMIT ");
+        qb.push_bind(limit);
+
+        let rows: Vec<Option<String>> = qb
+            .build_query_scalar()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| DbError::Database(e.to_string()))?;
+
+        Ok(rows.into_iter().flatten().collect())
+    }
+
+    async fn autocomplete_branches(
+        &self,
+        repositories: &[String],
+        term: &str,
+        limit: i64,
+    ) -> Result<Vec<String>, DbError> {
+        let escaped = escape_sql_like_literal(term);
+        let pattern = format!("%{}%", escaped);
+
+        let mut qb = QueryBuilder::new(
+            "SELECT DISTINCT branch \
+             FROM branches \
+             WHERE TRUE",
+        );
+        if !repositories.is_empty() {
+            qb.push(" AND repository = ANY(");
+            qb.push_bind(repositories);
+            qb.push(")");
+        }
+        qb.push(" AND branch ILIKE ");
+        qb.push_bind(pattern);
+        qb.push(" ESCAPE '\\' ORDER BY branch LIMIT ");
+        qb.push_bind(limit);
+
+        let rows: Vec<String> = qb
+            .build_query_scalar()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| DbError::Database(e.to_string()))?;
+
+        Ok(rows)
+    }
+
     async fn autocomplete_symbols(&self, term: &str, limit: i64) -> Result<Vec<String>, DbError> {
         let escaped = escape_sql_like_literal(term);
         let pattern = format!("%{}%", escaped);

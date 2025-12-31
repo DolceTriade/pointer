@@ -1,12 +1,12 @@
 use crate::dsl::{parse_query, tokenize_for_autocomplete};
 use crate::services::search_service::{
-    autocomplete_paths, autocomplete_repositories, autocomplete_symbols,
+    autocomplete_branches, autocomplete_files, autocomplete_languages, autocomplete_paths,
+    autocomplete_repositories, autocomplete_symbols,
 };
 use leptos::either::Either;
 use leptos::prelude::*;
 use leptos_router::hooks::use_navigate;
 use std::rc::Rc;
-use std::sync::Arc;
 use web_sys;
 
 #[component]
@@ -20,10 +20,6 @@ pub fn SearchBar(
     let input_ref = NodeRef::<leptos::html::Input>::new();
     let navigate = use_navigate();
     let on_complete_cb = on_complete.clone();
-
-    let on_input = move |ev| {
-        set_query.set(event_target_value(&ev));
-    };
 
     let on_search = move || {
         let q = query.get().trim().to_string();
@@ -95,10 +91,6 @@ pub fn SearchBar(
             description: "Search in specific language",
         },
         DslHint {
-            syntax: "content:",
-            description: "Search in file content",
-        },
-        DslHint {
             syntax: "branch:",
             description: "Search in specific branch",
         },
@@ -111,10 +103,6 @@ pub fn SearchBar(
             description: "Control case sensitivity (case:yes/no/auto)",
         },
         DslHint {
-            syntax: "type:",
-            description: "Filter result type (type:filematch)",
-        },
-        DslHint {
             syntax: "historical:",
             description: "Include historical commits (historical:yes)",
         },
@@ -123,14 +111,14 @@ pub fn SearchBar(
     // Example queries for users
     let example_queries = vec![
         "repo:myrepo lang:rust",
-        "content:\"async fn\" path:*.rs",
-        "path:README.md content:install historical:yes",
+        "path:*.rs regex:async",
+        "path:README.md lang:markdown historical:yes",
     ];
 
     let autocomplete_state = Memo::new(move |_| build_autocomplete_state(&query.get()));
-    let autocomplete_resource = Resource::new(
-        move || autocomplete_state.get(),
-        |state| async move {
+    let autocomplete_resource = LocalResource::new(move || {
+        let state = autocomplete_state.get();
+        async move {
             let limit = 20;
             match state.mode {
                 AutocompleteMode::RepoValue => autocomplete_repositories(state.term, limit)
@@ -155,10 +143,34 @@ pub fn SearchBar(
                             ..AutocompleteResults::default()
                         })
                 }
+                AutocompleteMode::LangValue => {
+                    autocomplete_languages(state.term, state.repo_filters, limit)
+                        .await
+                        .map(|langs| AutocompleteResults {
+                            langs,
+                            ..AutocompleteResults::default()
+                        })
+                }
+                AutocompleteMode::BranchValue => {
+                    autocomplete_branches(state.term, state.repo_filters, limit)
+                        .await
+                        .map(|branches| AutocompleteResults {
+                            branches,
+                            ..AutocompleteResults::default()
+                        })
+                }
+                AutocompleteMode::FileValue => {
+                    autocomplete_files(state.term, state.repo_filters, limit)
+                        .await
+                        .map(|files| AutocompleteResults {
+                            files,
+                            ..AutocompleteResults::default()
+                        })
+                }
                 _ => Ok(AutocompleteResults::default()),
             }
-        },
-    );
+        }
+    });
 
     let dsl_suggestions = Memo::new({
         let dsl_hints = dsl_hints.clone();
@@ -166,7 +178,14 @@ pub fn SearchBar(
             let state = autocomplete_state.get();
             if matches!(
                 state.mode,
-                AutocompleteMode::RepoValue | AutocompleteMode::PathValue | AutocompleteMode::None
+                AutocompleteMode::RepoValue
+                    | AutocompleteMode::PathValue
+                    | AutocompleteMode::LangValue
+                    | AutocompleteMode::BranchValue
+                    | AutocompleteMode::FileValue
+                    | AutocompleteMode::CaseValue
+                    | AutocompleteMode::HistoricalValue
+                    | AutocompleteMode::None
             ) {
                 return Vec::new();
             }
@@ -192,6 +211,229 @@ pub fn SearchBar(
     });
 
     let show_autocomplete = Memo::new(move |_| !query.get().trim().is_empty());
+    let active_index = RwSignal::new(Option::<usize>::None);
+
+    let suggestion_groups = Memo::new(move |_| {
+        let state = autocomplete_state.get();
+        let results: AutocompleteResults = autocomplete_resource
+            .get()
+            .and_then(|result| result.ok())
+            .unwrap_or_default();
+        let mut groups = Vec::new();
+        let mut index = 0;
+
+        let active_key = state.active_key.clone().unwrap_or_default();
+        let repo_key = if active_key.is_empty() {
+            "repo".to_string()
+        } else {
+            active_key.clone()
+        };
+        let path_key = if active_key.is_empty() {
+            "path".to_string()
+        } else {
+            active_key
+        };
+
+        match state.mode {
+            AutocompleteMode::RepoValue => {
+                let items = results
+                    .repos
+                    .into_iter()
+                    .map(|repo| {
+                        let item = SuggestionItem {
+                            label: repo.clone(),
+                            replacement: format!("{}:{}", repo_key, repo),
+                            index,
+                        };
+                        index += 1;
+                        item
+                    })
+                    .collect();
+                groups.push(SuggestionGroup {
+                    title: "Repositories",
+                    items,
+                });
+            }
+            AutocompleteMode::PathValue => {
+                let items = results
+                    .paths
+                    .into_iter()
+                    .map(|path| {
+                        let item = SuggestionItem {
+                            label: path.clone(),
+                            replacement: format!("{}:{}", path_key, path),
+                            index,
+                        };
+                        index += 1;
+                        item
+                    })
+                    .collect();
+                groups.push(SuggestionGroup { title: "Paths", items });
+            }
+            AutocompleteMode::DslKey => {
+                let items = dsl_suggestions
+                    .get()
+                    .into_iter()
+                    .map(|hint| {
+                        let item = SuggestionItem {
+                            label: hint.syntax.to_string(),
+                            replacement: hint.syntax.to_string(),
+                            index,
+                        };
+                        index += 1;
+                        item
+                    })
+                    .collect();
+                groups.push(SuggestionGroup { title: "DSL", items });
+            }
+            AutocompleteMode::Symbol => {
+                let dsl_items = dsl_suggestions
+                    .get()
+                    .into_iter()
+                    .map(|hint| {
+                        let item = SuggestionItem {
+                            label: hint.syntax.to_string(),
+                            replacement: hint.syntax.to_string(),
+                            index,
+                        };
+                        index += 1;
+                        item
+                    })
+                    .collect();
+                groups.push(SuggestionGroup {
+                    title: "DSL",
+                    items: dsl_items,
+                });
+
+                let symbol_items = results
+                    .symbols
+                    .into_iter()
+                    .map(|symbol| {
+                        let item = SuggestionItem {
+                            label: symbol.clone(),
+                            replacement: symbol,
+                            index,
+                        };
+                        index += 1;
+                        item
+                    })
+                    .collect();
+                groups.push(SuggestionGroup {
+                    title: "Symbols",
+                    items: symbol_items,
+                });
+            }
+            AutocompleteMode::LangValue => {
+                let items = results
+                    .langs
+                    .into_iter()
+                    .map(|lang| {
+                        let item = SuggestionItem {
+                            label: lang.clone(),
+                            replacement: format!("lang:{}", lang),
+                            index,
+                        };
+                        index += 1;
+                        item
+                    })
+                    .collect();
+                groups.push(SuggestionGroup {
+                    title: "Languages",
+                    items,
+                });
+            }
+            AutocompleteMode::BranchValue => {
+                let items = results
+                    .branches
+                    .into_iter()
+                    .map(|branch| {
+                        let item = SuggestionItem {
+                            label: branch.clone(),
+                            replacement: format!("branch:{}", branch),
+                            index,
+                        };
+                        index += 1;
+                        item
+                    })
+                    .collect();
+                groups.push(SuggestionGroup { title: "Branches", items });
+            }
+            AutocompleteMode::FileValue => {
+                let items = results
+                    .files
+                    .into_iter()
+                    .map(|file| {
+                        let item = SuggestionItem {
+                            label: file.clone(),
+                            replacement: format!("file:{}", file),
+                            index,
+                        };
+                        index += 1;
+                        item
+                    })
+                    .collect();
+                groups.push(SuggestionGroup { title: "Files", items });
+            }
+            AutocompleteMode::CaseValue => {
+                let term = state.term.to_ascii_lowercase();
+                let options = ["yes", "no", "auto"];
+                let items = options
+                    .iter()
+                    .filter(|opt| term.is_empty() || opt.contains(&term))
+                    .map(|opt| {
+                        let item = SuggestionItem {
+                            label: opt.to_string(),
+                            replacement: format!("case:{}", opt),
+                            index,
+                        };
+                        index += 1;
+                        item
+                    })
+                    .collect();
+                groups.push(SuggestionGroup { title: "Case", items });
+            }
+            AutocompleteMode::HistoricalValue => {
+                let term = state.term.to_ascii_lowercase();
+                let options = ["yes", "no"];
+                let items = options
+                    .iter()
+                    .filter(|opt| term.is_empty() || opt.contains(&term))
+                    .map(|opt| {
+                        let item = SuggestionItem {
+                            label: opt.to_string(),
+                            replacement: format!("historical:{}", opt),
+                            index,
+                        };
+                        index += 1;
+                        item
+                    })
+                    .collect();
+                groups.push(SuggestionGroup {
+                    title: "Historical",
+                    items,
+                });
+            }
+            AutocompleteMode::None => {}
+        }
+
+        groups
+    });
+
+    let flat_suggestions = Memo::new(move |_| {
+        let groups = suggestion_groups.get();
+        let mut items = Vec::new();
+        for group in groups {
+            for item in group.items {
+                items.push(item);
+            }
+        }
+        items
+    });
+
+    let on_input = move |ev| {
+        set_query.set(event_target_value(&ev));
+        active_index.set(None);
+    };
 
     view! {
         <div class="w-full max-w-2xl">
@@ -208,7 +450,59 @@ pub fn SearchBar(
                             let func = on_search.clone();
                             move |ev| {
                                 if ev.key() == "Enter" {
+                                    ev.prevent_default();
+                                    let suggestions = flat_suggestions.get();
+                                    if let Some(idx) = active_index.get() {
+                                        if let Some(suggestion) = suggestions.get(idx) {
+                                            let updated = apply_autocomplete_replacement(
+                                                &query.get(),
+                                                autocomplete_state.get().active_start,
+                                                &suggestion.replacement,
+                                            );
+                                            set_query.set(updated);
+                                            return;
+                                        }
+                                    }
                                     func();
+                                } else if ev.key() == "ArrowDown" {
+                                    ev.prevent_default();
+                                    let suggestions = flat_suggestions.get();
+                                    if !suggestions.is_empty() {
+                                        let next = match active_index.get() {
+                                            Some(idx) => (idx + 1) % suggestions.len(),
+                                            None => 0,
+                                        };
+                                        active_index.set(Some(next));
+                                    }
+                                } else if ev.key() == "ArrowUp" {
+                                    ev.prevent_default();
+                                    let suggestions = flat_suggestions.get();
+                                    if !suggestions.is_empty() {
+                                        let next = match active_index.get() {
+                                            Some(idx) => {
+                                                if idx == 0 {
+                                                    suggestions.len() - 1
+                                                } else {
+                                                    idx - 1
+                                                }
+                                            }
+                                            None => suggestions.len() - 1,
+                                        };
+                                        active_index.set(Some(next));
+                                    }
+                                } else if ev.key() == "Tab" {
+                                    let suggestions = flat_suggestions.get();
+                                    if let Some(idx) = active_index.get() {
+                                        if let Some(suggestion) = suggestions.get(idx) {
+                                            ev.prevent_default();
+                                            let updated = apply_autocomplete_replacement(
+                                                &query.get(),
+                                                autocomplete_state.get().active_start,
+                                                &suggestion.replacement,
+                                            );
+                                            set_query.set(updated);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -359,264 +653,74 @@ pub fn SearchBar(
                         }
                     >
                         {move || {
-                            let state = autocomplete_state.get();
-                            let results = autocomplete_resource
-                                .get()
-                                .and_then(|result| result.ok())
-                                .unwrap_or_default();
-                            let active_start = state.active_start;
-                            let active_key = state.active_key.clone().unwrap_or_default();
-                            let current_query = Arc::new(query.get());
-                            let dsl_items = Arc::new(dsl_suggestions.get());
-                            let show_repo = matches!(state.mode, AutocompleteMode::RepoValue);
-                            let show_path = matches!(state.mode, AutocompleteMode::PathValue);
-                            let show_dsl = matches!(
-                                state.mode,
-                                AutocompleteMode::DslKey | AutocompleteMode::Symbol
-                            );
-                            let show_symbols = matches!(state.mode, AutocompleteMode::Symbol);
-                            let repos = Arc::new(results.repos.clone());
-                            let paths = Arc::new(results.paths.clone());
-                            let symbols = Arc::new(results.symbols.clone());
-                            let repo_query = current_query.clone();
-                            let path_query = current_query.clone();
-                            let dsl_query = current_query.clone();
-                            let symbol_query = current_query.clone();
-                            let repo_key = Arc::new(
-                                if active_key.is_empty() {
-                                    "repo".to_string()
-                                } else {
-                                    active_key.clone()
-                                },
-                            );
-                            let path_key = Arc::new(
-                                if active_key.is_empty() {
-                                    "path".to_string()
-                                } else {
-                                    active_key.clone()
-                                },
-                            );
+                            let groups = suggestion_groups.get();
+                            let active_idx = active_index.get();
+                            let active_start = autocomplete_state.get().active_start;
+                            let current_query = query.get();
 
                             view! {
                                 <div class="p-3 text-sm text-gray-600 dark:text-gray-300">
-                                    <Show when=move || show_repo fallback=move || view! { <></> }>
-                                        <div class="mb-3">
-                                            <p class="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-2">
-                                                "Repositories"
-                                            </p>
-                                            <div class="space-y-1">
-                                                {if repos.is_empty() {
-                                                    Either::Left(
-                                                        view! {
-                                                            <div class="contents">
-                                                                <div class="text-xs text-gray-500 dark:text-gray-400">
-                                                                    "No repository matches."
-                                                                </div>
-                                                            </div>
-                                                        },
-                                                    )
-                                                } else {
-                                                    let repos = repos.clone();
-                                                    let repo_key = repo_key.clone();
-                                                    let repo_query = repo_query.clone();
-                                                    Either::Right(
-                                                        view! {
-                                                            <div class="contents">
-                                                                <For
-                                                                    each=move || (*repos).clone()
-                                                                    key=|repo| repo.clone()
-                                                                    children=move |repo| {
-                                                                        let replacement = format!("{}:{}", repo_key.as_str(), repo);
-                                                                        view! {
-                                                                            <div
-                                                                                class="flex cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700 p-2 rounded"
-                                                                                on:mousedown={
-                                                                                    let query = repo_query.clone();
-                                                                                    move |ev| {
-                                                                                        ev.prevent_default();
-                                                                                        let updated = apply_autocomplete_replacement(
-                                                                                            query.as_str(),
-                                                                                            active_start,
-                                                                                            &replacement,
-                                                                                        );
-                                                                                        set_query.set(updated);
-                                                                                    }
-                                                                                }
-                                                                            >
-                                                                                <span class="font-mono text-sm text-gray-900 dark:text-gray-100">
-                                                                                    {repo}
-                                                                                </span>
-                                                                            </div>
-                                                                        }
-                                                                    }
-                                                                />
-                                                            </div>
-                                                        },
-                                                    )
-                                                }}
-                                            </div>
-                                        </div>
-                                    </Show>
-
-                                    <Show when=move || show_path fallback=move || view! { <></> }>
-                                        <div class="mb-3">
-                                            <p class="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-2">
-                                                "Paths"
-                                            </p>
-                                            <div class="space-y-1">
-                                                {if paths.is_empty() {
-                                                    Either::Left(
-                                                        view! {
-                                                            <div class="contents">
-                                                                <div class="text-xs text-gray-500 dark:text-gray-400">
-                                                                    "No path matches."
-                                                                </div>
-                                                            </div>
-                                                        },
-                                                    )
-                                                } else {
-                                                    let paths = paths.clone();
-                                                    let path_key = path_key.clone();
-                                                    let path_query = path_query.clone();
-                                                    Either::Right(
-                                                        view! {
-                                                            <div class="contents">
-                                                                <For
-                                                                    each=move || (*paths).clone()
-                                                                    key=|path| path.clone()
-                                                                    children=move |path| {
-                                                                        let replacement = format!("{}:{}", path_key.as_str(), path);
-                                                                        view! {
-                                                                            <div
-                                                                                class="flex cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700 p-2 rounded"
-                                                                                on:mousedown={
-                                                                                    let query = path_query.clone();
-                                                                                    move |ev| {
-                                                                                        ev.prevent_default();
-                                                                                        let updated = apply_autocomplete_replacement(
-                                                                                            query.as_str(),
-                                                                                            active_start,
-                                                                                            &replacement,
-                                                                                        );
-                                                                                        set_query.set(updated);
-                                                                                    }
-                                                                                }
-                                                                            >
-                                                                                <span class="font-mono text-sm text-gray-900 dark:text-gray-100">
-                                                                                    {path}
-                                                                                </span>
-                                                                            </div>
-                                                                        }
-                                                                    }
-                                                                />
-                                                            </div>
-                                                        },
-                                                    )
-                                                }}
-                                            </div>
-                                        </div>
-                                    </Show>
-
-                                    <Show when=move || show_dsl fallback=move || view! { <></> }>
-                                        <div class="mb-3">
-                                            <p class="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-2">
-                                                "DSL"
-                                            </p>
-                                            <div class="grid grid-cols-2 gap-2">
-                                                {dsl_items
-                                                    .as_ref()
-                                                    .iter()
-                                                    .cloned()
-                                                    .map(|hint| {
-                                                        let dsl_query = dsl_query.clone();
-                                                        let replacement = hint.syntax.to_string();
+                                    <For
+                                        each=move || groups.clone()
+                                        key=|group| group.title
+                                        children=move |group| {
+                                            let group_title = group.title;
+                                            let items = group.items;
+                                            let empty_label =
+                                                format!("No {} matches.", group_title.to_lowercase());
+                                            let items_view = if items.is_empty() {
+                                                Either::Left(view! {
+                                                    <div class="text-xs text-gray-500 dark:text-gray-400">
+                                                        {empty_label}
+                                                    </div>
+                                                })
+                                            } else {
+                                                let current_query = current_query.clone();
+                                                let rendered = items
+                                                    .into_iter()
+                                                    .map(|item| {
+                                                        let replacement = item.replacement.clone();
+                                                        let label = item.label.clone();
+                                                        let idx = item.index;
+                                                        let is_active = active_idx == Some(idx);
+                                                        let row_class = if is_active {
+                                                            "flex cursor-pointer bg-gray-200 dark:bg-gray-700 p-2 rounded"
+                                                        } else {
+                                                            "flex cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700 p-2 rounded"
+                                                        };
+                                                        let query_value = current_query.clone();
                                                         view! {
                                                             <div
-                                                                class="flex cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700 p-1 rounded"
+                                                                class=row_class
                                                                 on:mousedown=move |ev| {
                                                                     ev.prevent_default();
                                                                     let updated = apply_autocomplete_replacement(
-                                                                        dsl_query.as_str(),
+                                                                        &query_value,
                                                                         active_start,
                                                                         &replacement,
                                                                     );
                                                                     set_query.set(updated);
                                                                 }
                                                             >
-                                                                <span class="font-mono text-blue-600 dark:text-blue-400 font-semibold mr-2">
-                                                                    {hint.syntax}
-                                                                </span>
-                                                                <span class="text-gray-600 dark:text-gray-400">
-                                                                    {hint.description}
+                                                                <span class="font-mono text-sm text-gray-900 dark:text-gray-100">
+                                                                    {label}
                                                                 </span>
                                                             </div>
                                                         }
                                                     })
-                                                    .collect_view()}
-                                            </div>
-                                        </div>
-                                    </Show>
-
-                                    <Show
-                                        when=move || show_symbols
-                                        fallback=move || view! { <></> }
-                                    >
-                                        <div>
-                                            <p class="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-2">
-                                                "Symbols"
-                                            </p>
-                                            <div class="space-y-1">
-                                                {if symbols.is_empty() {
-                                                    Either::Left(
-                                                        view! {
-                                                            <div class="contents">
-                                                                <div class="text-xs text-gray-500 dark:text-gray-400">
-                                                                    "No symbols matched."
-                                                                </div>
-                                                            </div>
-                                                        },
-                                                    )
-                                                } else {
-                                                    let symbols = symbols.clone();
-                                                    let symbol_query = symbol_query.clone();
-                                                    Either::Right(
-                                                        view! {
-                                                            <div class="contents">
-                                                                <For
-                                                                    each=move || (*symbols).clone()
-                                                                    key=|symbol| symbol.clone()
-                                                                    children=move |symbol| {
-                                                                        let replacement = symbol.clone();
-                                                                        view! {
-                                                                            <div
-                                                                                class="flex cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700 p-2 rounded"
-                                                                                on:mousedown={
-                                                                                    let query = symbol_query.clone();
-                                                                                    move |ev| {
-                                                                                        ev.prevent_default();
-                                                                                        let updated = apply_autocomplete_replacement(
-                                                                                            query.as_str(),
-                                                                                            active_start,
-                                                                                            &replacement,
-                                                                                        );
-                                                                                        set_query.set(updated);
-                                                                                    }
-                                                                                }
-                                                                            >
-                                                                                <span class="font-mono text-sm text-gray-900 dark:text-gray-100">
-                                                                                    {symbol}
-                                                                                </span>
-                                                                            </div>
-                                                                        }
-                                                                    }
-                                                                />
-                                                            </div>
-                                                        },
-                                                    )
-                                                }}
-                                            </div>
-                                        </div>
-                                    </Show>
+                                                    .collect_view();
+                                                Either::Right(view! { <div class="contents">{rendered}</div> })
+                                            };
+                                            view! {
+                                                <div class="mb-3 last:mb-0">
+                                                    <p class="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-2">
+                                                        {group_title}
+                                                    </p>
+                                                    <div class="space-y-1">{items_view}</div>
+                                                </div>
+                                            }
+                                        }
+                                    />
                                 </div>
                             }
                         }}
@@ -645,6 +749,11 @@ enum AutocompleteMode {
     DslKey,
     RepoValue,
     PathValue,
+    LangValue,
+    BranchValue,
+    FileValue,
+    CaseValue,
+    HistoricalValue,
     Symbol,
 }
 
@@ -661,19 +770,33 @@ struct AutocompleteState {
 struct AutocompleteResults {
     repos: Vec<String>,
     paths: Vec<String>,
+    files: Vec<String>,
+    langs: Vec<String>,
+    branches: Vec<String>,
     symbols: Vec<String>,
 }
 
-const DSL_KEYS: [&str; 10] = [
+#[derive(Clone, PartialEq)]
+struct SuggestionItem {
+    label: String,
+    replacement: String,
+    index: usize,
+}
+
+#[derive(Clone, PartialEq)]
+struct SuggestionGroup {
+    title: &'static str,
+    items: Vec<SuggestionItem>,
+}
+
+const DSL_KEYS: [&str; 8] = [
     "repo:",
     "path:",
     "file:",
     "lang:",
-    "content:",
     "branch:",
     "regex:",
     "case:",
-    "type:",
     "historical:",
 ];
 
@@ -725,10 +848,32 @@ fn build_autocomplete_state(query: &str) -> AutocompleteState {
                 mode = AutocompleteMode::RepoValue;
                 term = cleaned.to_string();
                 active_key = Some(key.to_string());
-            } else if key_lc == "file" || key_lc == "f" || key_lc == "path" {
+            } else if key_lc == "path" {
                 mode = AutocompleteMode::PathValue;
                 term = cleaned.trim_end_matches('*').to_string();
                 active_key = Some(key.to_string());
+            } else if key_lc == "file" || key_lc == "f" {
+                mode = AutocompleteMode::FileValue;
+                term = cleaned.to_string();
+                active_key = Some(key.to_string());
+            } else if key_lc == "lang" || key_lc == "l" {
+                mode = AutocompleteMode::LangValue;
+                term = cleaned.to_string();
+                active_key = Some(key.to_string());
+            } else if key_lc == "branch" || key_lc == "b" {
+                mode = AutocompleteMode::BranchValue;
+                term = cleaned.to_string();
+                active_key = Some(key.to_string());
+            } else if key_lc == "case" {
+                mode = AutocompleteMode::CaseValue;
+                term = cleaned.to_string();
+                active_key = Some(key.to_string());
+            } else if key_lc == "historical" {
+                mode = AutocompleteMode::HistoricalValue;
+                term = cleaned.to_string();
+                active_key = Some(key.to_string());
+            } else if key_lc == "regex" || key_lc == "content" || key_lc == "type" {
+                mode = AutocompleteMode::None;
             } else {
                 mode = AutocompleteMode::Symbol;
                 term = token.value;
