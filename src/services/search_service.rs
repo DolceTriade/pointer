@@ -30,7 +30,7 @@ pub async fn autocomplete_repositories(
     let state = expect_context::<crate::server::GlobalAppState>();
     let state = state.lock().await;
     let db = PostgresDb::new(state.pool.clone());
-    let normalized_limit = limit.max(1).min(50);
+    let normalized_limit = limit.max(1).min(20);
     db.autocomplete_repositories(term.trim(), normalized_limit)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))
@@ -45,7 +45,7 @@ pub async fn autocomplete_paths(
     let state = expect_context::<crate::server::GlobalAppState>();
     let state = state.lock().await;
     let db = PostgresDb::new(state.pool.clone());
-    let normalized_limit = limit.max(1).min(50);
+    let normalized_limit = limit.max(1).min(20);
     let repos: Vec<String> = repositories
         .into_iter()
         .map(|repo| repo.trim().to_string())
@@ -68,7 +68,7 @@ pub async fn autocomplete_symbols(
     let state = expect_context::<crate::server::GlobalAppState>();
     let state = state.lock().await;
     let db = PostgresDb::new(state.pool.clone());
-    let normalized_limit = limit.max(1).min(50);
+    let normalized_limit = limit.max(1).min(20);
     db.autocomplete_symbols(trimmed, normalized_limit)
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))
@@ -83,7 +83,7 @@ pub async fn autocomplete_languages(
     let state = expect_context::<crate::server::GlobalAppState>();
     let state = state.lock().await;
     let db = PostgresDb::new(state.pool.clone());
-    let normalized_limit = limit.max(1).min(50);
+    let normalized_limit = limit.max(1).min(20);
     let repos: Vec<String> = repositories
         .into_iter()
         .map(|repo| repo.trim().to_string())
@@ -103,7 +103,7 @@ pub async fn autocomplete_branches(
     let state = expect_context::<crate::server::GlobalAppState>();
     let state = state.lock().await;
     let db = PostgresDb::new(state.pool.clone());
-    let normalized_limit = limit.max(1).min(50);
+    let normalized_limit = limit.max(1).min(20);
     let repos: Vec<String> = repositories
         .into_iter()
         .map(|repo| repo.trim().to_string())
@@ -123,7 +123,7 @@ pub async fn autocomplete_files(
     let state = expect_context::<crate::server::GlobalAppState>();
     let state = state.lock().await;
     let db = PostgresDb::new(state.pool.clone());
-    let normalized_limit = limit.max(1).min(50);
+    let normalized_limit = limit.max(1).min(20);
     let repos: Vec<String> = repositories
         .into_iter()
         .map(|repo| repo.trim().to_string())

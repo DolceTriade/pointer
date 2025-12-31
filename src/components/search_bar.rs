@@ -120,7 +120,7 @@ pub fn SearchBar(
     let autocomplete_resource = LocalResource::new(move || {
         let state = autocomplete_state.get();
         async move {
-            let limit = 20;
+            let limit = 10;
             match state.mode {
                 AutocompleteMode::RepoValue => autocomplete_repositories(state.term, limit)
                     .await
