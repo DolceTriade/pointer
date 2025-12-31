@@ -21,3 +21,52 @@ pub async fn search(query: String, page: u32) -> Result<SearchResultsPage, Serve
         .await
         .map_err(|e| ServerFnError::new(e.to_string()))
 }
+
+#[server]
+pub async fn autocomplete_repositories(
+    term: String,
+    limit: i64,
+) -> Result<Vec<String>, ServerFnError> {
+    let state = expect_context::<crate::server::GlobalAppState>();
+    let state = state.lock().await;
+    let db = PostgresDb::new(state.pool.clone());
+    let normalized_limit = limit.max(1).min(50);
+    db.autocomplete_repositories(term.trim(), normalized_limit)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))
+}
+
+#[server]
+pub async fn autocomplete_paths(
+    term: String,
+    repositories: Vec<String>,
+    limit: i64,
+) -> Result<Vec<String>, ServerFnError> {
+    let state = expect_context::<crate::server::GlobalAppState>();
+    let state = state.lock().await;
+    let db = PostgresDb::new(state.pool.clone());
+    let normalized_limit = limit.max(1).min(50);
+    let repos: Vec<String> = repositories
+        .into_iter()
+        .map(|repo| repo.trim().to_string())
+        .filter(|repo| !repo.is_empty())
+        .collect();
+    db.autocomplete_paths(&repos, term.trim(), normalized_limit)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))
+}
+
+#[server]
+pub async fn autocomplete_symbols(term: String, limit: i64) -> Result<Vec<String>, ServerFnError> {
+    let trimmed = term.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let state = expect_context::<crate::server::GlobalAppState>();
+    let state = state.lock().await;
+    let db = PostgresDb::new(state.pool.clone());
+    let normalized_limit = limit.max(1).min(50);
+    db.autocomplete_symbols(trimmed, normalized_limit)
+        .await
+        .map_err(|e| ServerFnError::new(e.to_string()))
+}

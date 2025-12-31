@@ -375,10 +375,10 @@ fn upload_record_store_shards(
         if !shard_data.is_empty() {
             if tx
                 .send(ManifestShard {
-                index: shard_index,
-                data: shard_data,
-            })
-            .is_err()
+                    index: shard_index,
+                    data: shard_data,
+                })
+                .is_err()
             {
                 drop(tx);
                 if let Err(err) = workers.wait() {
@@ -450,8 +450,12 @@ fn send_manifest_shard(
         data: BASE64.encode(compressed),
     };
 
-    post_json(client, &endpoints.manifest_shard, api_key, &payload)
-        .with_context(|| format!("manifest shard upload failed section={} shard={}", section, shard_index))?;
+    post_json(client, &endpoints.manifest_shard, api_key, &payload).with_context(|| {
+        format!(
+            "manifest shard upload failed section={} shard={}",
+            section, shard_index
+        )
+    })?;
     info!(
         section = section,
         shard = shard_index,

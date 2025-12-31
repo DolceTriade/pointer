@@ -8,7 +8,7 @@ use crate::db::{
     SymbolReferenceRequest, SymbolReferenceResponse, SymbolResult, TreeEntry, TreeResponse,
 };
 use crate::dsl::{
-    escape_sql_like_literal, CaseSensitivity, ContentPredicate, TextSearchPlan, TextSearchRequest,
+    CaseSensitivity, ContentPredicate, TextSearchPlan, TextSearchRequest, escape_sql_like_literal,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -1844,16 +1844,16 @@ ORDER BY idx
             aggregates
                 .into_iter()
                 .map(|mut agg| {
-    agg.entries.sort_by(|a, b| {
-        let (exact_a, marks_a, signal_a) = snippet_signal_score(&a.content_text);
-        let (exact_b, marks_b, signal_b) = snippet_signal_score(&b.content_text);
-        exact_b
-            .cmp(&exact_a)
-            .then_with(|| marks_b.cmp(&marks_a))
-            .then_with(|| signal_b.cmp(&signal_a))
-            .then_with(|| a.match_line_number.cmp(&b.match_line_number))
-            .then_with(|| a.start_line.cmp(&b.start_line))
-    });
+                    agg.entries.sort_by(|a, b| {
+                        let (exact_a, marks_a, signal_a) = snippet_signal_score(&a.content_text);
+                        let (exact_b, marks_b, signal_b) = snippet_signal_score(&b.content_text);
+                        exact_b
+                            .cmp(&exact_a)
+                            .then_with(|| marks_b.cmp(&marks_a))
+                            .then_with(|| signal_b.cmp(&signal_a))
+                            .then_with(|| a.match_line_number.cmp(&b.match_line_number))
+                            .then_with(|| a.start_line.cmp(&b.start_line))
+                    });
 
                     let mut entries_iter = agg.entries.into_iter();
                     let best_row = entries_iter
@@ -1933,6 +1933,93 @@ ORDER BY idx
             query: request.original_query.clone(),
             stats,
         })
+    }
+
+    async fn autocomplete_repositories(
+        &self,
+        term: &str,
+        limit: i64,
+    ) -> Result<Vec<String>, DbError> {
+        let escaped = escape_sql_like_literal(term);
+        let pattern = format!("%{}%", escaped);
+        let rows: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT repository \
+             FROM files \
+             WHERE repository ILIKE $1 ESCAPE '\\' \
+             ORDER BY repository \
+             LIMIT $2",
+        )
+        .bind(pattern)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DbError::Database(e.to_string()))?;
+
+        Ok(rows)
+    }
+
+    async fn autocomplete_paths(
+        &self,
+        repositories: &[String],
+        term: &str,
+        limit: i64,
+    ) -> Result<Vec<String>, DbError> {
+        let escaped = escape_sql_like_literal(term);
+        let pattern = format!("%{}%", escaped);
+
+        let mut qb = QueryBuilder::new(
+            "WITH dirs AS (\
+                SELECT DISTINCT \
+                    CASE \
+                        WHEN position('/' in file_path) > 0 \
+                        THEN regexp_replace(file_path, '/[^/]+$', '') || '/*' \
+                        ELSE '/*' \
+                    END AS dir \
+                FROM files",
+        );
+
+        if !repositories.is_empty() {
+            qb.push(" WHERE repository = ANY(");
+            qb.push_bind(repositories);
+            qb.push(")");
+        }
+
+        qb.push(
+            ") \
+            SELECT dir \
+            FROM dirs \
+            WHERE dir ILIKE ",
+        );
+        qb.push_bind(pattern);
+        qb.push(" ESCAPE '\\' ORDER BY dir LIMIT ");
+        qb.push_bind(limit);
+
+        let rows: Vec<String> = qb
+            .build_query_scalar()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| DbError::Database(e.to_string()))?;
+
+        Ok(rows)
+    }
+
+    async fn autocomplete_symbols(&self, term: &str, limit: i64) -> Result<Vec<String>, DbError> {
+        let escaped = escape_sql_like_literal(term);
+        let pattern = format!("%{}%", escaped);
+        let rows: Vec<String> = sqlx::query_scalar(
+            "SELECT name_lc \
+             FROM unique_symbols \
+             WHERE name_lc ILIKE $1 ESCAPE '\\' \
+             ORDER BY name_lc \
+             LIMIT $2",
+        )
+        .bind(pattern)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| DbError::Database(e.to_string()))?;
+
+        Ok(rows)
     }
 
     async fn health_check(&self) -> Result<String, DbError> {
@@ -2461,10 +2548,7 @@ fn build_snippet_line_map(snippet: &SearchSnippet) -> BTreeMap<i32, (String, i32
     map
 }
 
-fn merge_snippet_line_map(
-    map: &mut BTreeMap<i32, (String, i32)>,
-    snippet: &SearchSnippet,
-) {
+fn merge_snippet_line_map(map: &mut BTreeMap<i32, (String, i32)>, snippet: &SearchSnippet) {
     for (idx, line) in snippet.content_text.split('\n').enumerate() {
         let line_number = snippet.start_line.saturating_add(idx as i32);
         insert_snippet_line(map, line_number, line);
@@ -2578,9 +2662,7 @@ fn build_search_stats(rows: &[RankedFileRow]) -> SearchResultsStats {
         if let Some(directory) = parent_directory(&row.file_path) {
             *directory_counts.entry(directory).or_insert(0) += 1;
         }
-        *repository_counts
-            .entry(row.repository.clone())
-            .or_insert(0) += 1;
+        *repository_counts.entry(row.repository.clone()).or_insert(0) += 1;
 
         if !row.branches.is_empty() {
             let unique_branches: HashSet<&String> = row.branches.iter().collect();

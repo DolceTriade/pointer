@@ -186,6 +186,18 @@ pub trait Database: Clone + Send + Sync + 'static {
     ) -> Result<SymbolReferenceResponse, DbError>;
     async fn search_symbols(&self, request: SearchRequest) -> Result<SearchResponse, DbError>;
     async fn text_search(&self, request: &TextSearchRequest) -> Result<SearchResultsPage, DbError>;
+    async fn autocomplete_repositories(
+        &self,
+        term: &str,
+        limit: i64,
+    ) -> Result<Vec<String>, DbError>;
+    async fn autocomplete_paths(
+        &self,
+        repositories: &[String],
+        term: &str,
+        limit: i64,
+    ) -> Result<Vec<String>, DbError>;
+    async fn autocomplete_symbols(&self, term: &str, limit: i64) -> Result<Vec<String>, DbError>;
     async fn health_check(&self) -> Result<String, DbError>;
 }
 

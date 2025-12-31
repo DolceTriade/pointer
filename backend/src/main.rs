@@ -39,8 +39,8 @@ use tracing::info;
 use crate::gc::{
     GarbageCollector, is_latest_commit_on_any_branch, prune_commit_data, prune_repository_data,
 };
-use zstd::stream::read::Decoder;
 use chrono::Utc;
+use zstd::stream::read::Decoder;
 
 #[derive(Debug, Parser)]
 struct ServerConfig {
@@ -256,7 +256,10 @@ async fn main() -> Result<()> {
         .route("/api/v1/prune/repo", post(prune_repo_handler))
         .route("/api/v1/prune/policy", post(apply_retention_policy_handler))
         .route("/api/v1/admin/gc", post(run_gc_handler))
-        .route("/api/v1/admin/rebuild_symbol_cache", post(rebuild_symbol_cache_handler))
+        .route(
+            "/api/v1/admin/rebuild_symbol_cache",
+            post(rebuild_symbol_cache_handler),
+        )
         .route(
             "/api/v1/admin/cleanup_symbol_cache",
             post(cleanup_symbol_cache_handler),
@@ -1606,10 +1609,12 @@ async fn rebuild_symbol_cache_handler(
         .await
         .map_err(ApiErrorKind::from)?;
 
-    sqlx::query("CREATE TABLE IF NOT EXISTS unique_symbols_new (LIKE unique_symbols INCLUDING ALL)")
-        .execute(&mut *lock_conn)
-        .await
-        .map_err(ApiErrorKind::from)?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS unique_symbols_new (LIKE unique_symbols INCLUDING ALL)",
+    )
+    .execute(&mut *lock_conn)
+    .await
+    .map_err(ApiErrorKind::from)?;
     sqlx::query("TRUNCATE unique_symbols_new")
         .execute(&mut *lock_conn)
         .await

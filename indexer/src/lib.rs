@@ -1,5 +1,5 @@
-mod chunk_store;
 pub mod admin;
+mod chunk_store;
 pub mod cli;
 pub mod config;
 pub mod engine;

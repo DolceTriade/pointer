@@ -7,8 +7,8 @@ use clap::{ArgAction, Args, Parser, Subcommand};
 use humantime::parse_duration;
 use tracing::info;
 
-use crate::config::{BranchPolicyConfig, IndexerConfig, SnapshotPolicyConfig};
 use crate::admin;
+use crate::config::{BranchPolicyConfig, IndexerConfig, SnapshotPolicyConfig};
 use crate::engine::Indexer;
 use crate::output;
 use crate::upload;

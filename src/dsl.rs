@@ -526,6 +526,22 @@ fn tokenize_query(query: &str) -> Vec<Token> {
     final_tokens
 }
 
+#[derive(Debug, Clone)]
+pub struct AutocompleteToken {
+    pub value: String,
+    pub first_colon_in_quotes: bool,
+}
+
+pub fn tokenize_for_autocomplete(query: &str) -> Vec<AutocompleteToken> {
+    tokenize_query(query)
+        .into_iter()
+        .map(|token| AutocompleteToken {
+            value: token.value,
+            first_colon_in_quotes: token.first_colon_in_quotes,
+        })
+        .collect()
+}
+
 pub fn parse_query(query_str: &str) -> Result<QueryNode, ParseError> {
     let parser = QueryParser::new(query_str);
     parser.parse()

@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use crate::cli::{
-    AdminArgs, AdminCommand, CleanupSymbolCacheArgs, PruneBranchArgs, PruneCommitArgs, PruneRepoArgs,
-    PrunePolicyArgs, RefreshSymbolCacheArgs,
+    AdminArgs, AdminCommand, CleanupSymbolCacheArgs, PruneBranchArgs, PruneCommitArgs,
+    PrunePolicyArgs, PruneRepoArgs, RefreshSymbolCacheArgs,
 };
 
 const REQUEST_TIMEOUT_SECS: u64 = 3600;
@@ -110,14 +110,10 @@ fn rebuild_symbol_cache(
     endpoints: &AdminEndpoints,
     api_key: Option<&str>,
 ) -> Result<()> {
-    let response: RebuildSymbolCacheResponse = post_json(
-        client,
-        &endpoints.rebuild_symbol_cache,
-        api_key,
-        &(),
-    )?
-    .json()
-    .context("failed to deserialize rebuild response")?;
+    let response: RebuildSymbolCacheResponse =
+        post_json(client, &endpoints.rebuild_symbol_cache, api_key, &())?
+            .json()
+            .context("failed to deserialize rebuild response")?;
 
     info!(
         shard_count = response.shard_count,
@@ -152,14 +148,10 @@ fn cleanup_symbol_cache(
         batch_size: payload.batch_size,
         max_batches: payload.max_batches,
     };
-    let response: CleanupSymbolCacheResponse = post_json(
-        client,
-        &endpoints.cleanup_symbol_cache,
-        api_key,
-        &request,
-    )?
-    .json()
-    .context("failed to deserialize cleanup response")?;
+    let response: CleanupSymbolCacheResponse =
+        post_json(client, &endpoints.cleanup_symbol_cache, api_key, &request)?
+            .json()
+            .context("failed to deserialize cleanup response")?;
 
     info!(
         refs_deleted = response.refs_deleted,
@@ -192,14 +184,10 @@ fn refresh_symbol_cache(
         batch_size: payload.batch_size,
         max_batches: payload.max_batches,
     };
-    let response: RefreshSymbolCacheResponse = post_json(
-        client,
-        &endpoints.refresh_symbol_cache,
-        api_key,
-        &request,
-    )?
-    .json()
-    .context("failed to deserialize refresh response")?;
+    let response: RefreshSymbolCacheResponse =
+        post_json(client, &endpoints.refresh_symbol_cache, api_key, &request)?
+            .json()
+            .context("failed to deserialize refresh response")?;
 
     info!(
         names_inserted = response.names_inserted,
@@ -233,14 +221,10 @@ fn prune_commit(
         repository: payload.repository,
         commit_sha: payload.commit_sha,
     };
-    let response: PruneCommitResponse = post_json(
-        client,
-        &endpoints.prune_commit,
-        api_key,
-        &request,
-    )?
-    .json()
-    .context("failed to deserialize prune commit response")?;
+    let response: PruneCommitResponse =
+        post_json(client, &endpoints.prune_commit, api_key, &request)?
+            .json()
+            .context("failed to deserialize prune commit response")?;
 
     info!(
         repository = response.repository,
@@ -276,14 +260,10 @@ fn prune_branch(
         repository: payload.repository,
         branch: payload.branch,
     };
-    let response: PruneBranchResponse = post_json(
-        client,
-        &endpoints.prune_branch,
-        api_key,
-        &request,
-    )?
-    .json()
-    .context("failed to deserialize prune branch response")?;
+    let response: PruneBranchResponse =
+        post_json(client, &endpoints.prune_branch, api_key, &request)?
+            .json()
+            .context("failed to deserialize prune branch response")?;
 
     info!(
         repository = response.repository,
@@ -319,14 +299,9 @@ fn prune_repo(
         repository: payload.repository,
         batch_size: payload.batch_size,
     };
-    let response: PruneRepoResponse = post_json(
-        client,
-        &endpoints.prune_repo,
-        api_key,
-        &request,
-    )?
-    .json()
-    .context("failed to deserialize prune repo response")?;
+    let response: PruneRepoResponse = post_json(client, &endpoints.prune_repo, api_key, &request)?
+        .json()
+        .context("failed to deserialize prune repo response")?;
 
     info!(
         repository = response.repository,
@@ -362,14 +337,10 @@ fn prune_policy(
         keep_latest: payload.keep_latest,
         max_commits_to_keep: payload.max_commits_to_keep,
     };
-    let response: PrunePolicyResponse = post_json(
-        client,
-        &endpoints.prune_policy,
-        api_key,
-        &request,
-    )?
-    .json()
-    .context("failed to deserialize prune policy response")?;
+    let response: PrunePolicyResponse =
+        post_json(client, &endpoints.prune_policy, api_key, &request)?
+            .json()
+            .context("failed to deserialize prune policy response")?;
 
     info!(
         repository = response.repository,
