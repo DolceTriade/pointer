@@ -1,3 +1,4 @@
+use crate::db::models::SymbolSuggestion;
 use crate::dsl::{parse_query, tokenize_for_autocomplete};
 use crate::services::search_service::{
     autocomplete_branches, autocomplete_files, autocomplete_languages, autocomplete_paths,
@@ -243,6 +244,7 @@ pub fn SearchBar(
                         let item = SuggestionItem {
                             label: repo.clone(),
                             replacement: format!("{}:{}", repo_key, repo),
+                            subtitle: None,
                             index,
                         };
                         index += 1;
@@ -262,6 +264,7 @@ pub fn SearchBar(
                         let item = SuggestionItem {
                             label: path.clone(),
                             replacement: format!("{}:{}", path_key, path),
+                            subtitle: None,
                             index,
                         };
                         index += 1;
@@ -278,6 +281,7 @@ pub fn SearchBar(
                         let item = SuggestionItem {
                             label: hint.syntax.to_string(),
                             replacement: hint.syntax.to_string(),
+                            subtitle: None,
                             index,
                         };
                         index += 1;
@@ -292,8 +296,9 @@ pub fn SearchBar(
                     .into_iter()
                     .map(|symbol| {
                         let item = SuggestionItem {
-                            label: symbol.clone(),
-                            replacement: symbol,
+                            label: symbol.name.clone(),
+                            replacement: symbol.name.clone(),
+                            subtitle: Some(format!("{}/{}", symbol.repository, symbol.file_path)),
                             index,
                         };
                         index += 1;
@@ -312,6 +317,7 @@ pub fn SearchBar(
                         let item = SuggestionItem {
                             label: hint.syntax.to_string(),
                             replacement: hint.syntax.to_string(),
+                            subtitle: None,
                             index,
                         };
                         index += 1;
@@ -331,6 +337,7 @@ pub fn SearchBar(
                         let item = SuggestionItem {
                             label: lang.clone(),
                             replacement: format!("lang:{}", lang),
+                            subtitle: None,
                             index,
                         };
                         index += 1;
@@ -350,6 +357,7 @@ pub fn SearchBar(
                         let item = SuggestionItem {
                             label: branch.clone(),
                             replacement: format!("branch:{}", branch),
+                            subtitle: None,
                             index,
                         };
                         index += 1;
@@ -366,6 +374,7 @@ pub fn SearchBar(
                         let item = SuggestionItem {
                             label: file.clone(),
                             replacement: format!("file:{}", file),
+                            subtitle: None,
                             index,
                         };
                         index += 1;
@@ -384,6 +393,7 @@ pub fn SearchBar(
                         let item = SuggestionItem {
                             label: opt.to_string(),
                             replacement: format!("case:{}", opt),
+                            subtitle: None,
                             index,
                         };
                         index += 1;
@@ -402,6 +412,7 @@ pub fn SearchBar(
                         let item = SuggestionItem {
                             label: opt.to_string(),
                             replacement: format!("historical:{}", opt),
+                            subtitle: None,
                             index,
                         };
                         index += 1;
@@ -767,13 +778,14 @@ struct AutocompleteResults {
     files: Vec<String>,
     langs: Vec<String>,
     branches: Vec<String>,
-    symbols: Vec<String>,
+    symbols: Vec<SymbolSuggestion>,
 }
 
 #[derive(Clone, PartialEq)]
 struct SuggestionItem {
     label: String,
     replacement: String,
+    subtitle: Option<String>,
     index: usize,
 }
 
@@ -806,6 +818,7 @@ fn render_group_view(
             .map(|item| {
                 let replacement = item.replacement.clone();
                 let label = item.label.clone();
+                let subtitle = item.subtitle.clone();
                 let idx = item.index;
                 let is_active = active_idx == Some(idx);
                 let row_class = if is_active {
@@ -827,9 +840,18 @@ fn render_group_view(
                             set_query.set(updated);
                         }
                     >
-                        <span class="font-mono text-sm text-gray-900 dark:text-gray-100">
-                            {label}
-                        </span>
+                        <div>
+                            <span class="font-mono text-sm text-gray-900 dark:text-gray-100">
+                                {label}
+                            </span>
+                            {subtitle.map(|text| {
+                                view! {
+                                    <div class="text-xs text-gray-500 dark:text-gray-400 truncate">
+                                        {text}
+                                    </div>
+                                }
+                            })}
+                        </div>
                     </div>
                 }
             })

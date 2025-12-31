@@ -2,7 +2,7 @@ use leptos::prelude::*;
 
 #[cfg(feature = "ssr")]
 use crate::db::Database;
-use crate::db::models::SearchResultsPage;
+use crate::db::models::{SearchResultsPage, SymbolSuggestion};
 #[cfg(feature = "ssr")]
 use crate::db::postgres::PostgresDb;
 #[cfg(feature = "ssr")]
@@ -57,7 +57,10 @@ pub async fn autocomplete_paths(
 }
 
 #[server]
-pub async fn autocomplete_symbols(term: String, limit: i64) -> Result<Vec<String>, ServerFnError> {
+pub async fn autocomplete_symbols(
+    term: String,
+    limit: i64,
+) -> Result<Vec<SymbolSuggestion>, ServerFnError> {
     let trimmed = term.trim();
     if trimmed.is_empty() {
         return Ok(Vec::new());

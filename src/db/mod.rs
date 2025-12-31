@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::models::{
     FileReference, HighlightedLine, RepoBranchInfo, SearchResultsPage, SymbolResult,
-    TokenOccurrence,
+    SymbolSuggestion, TokenOccurrence,
 };
 #[cfg(feature = "ssr")]
 use crate::db::models::{ReferenceResult, SearchResult};
@@ -215,7 +215,11 @@ pub trait Database: Clone + Send + Sync + 'static {
         term: &str,
         limit: i64,
     ) -> Result<Vec<String>, DbError>;
-    async fn autocomplete_symbols(&self, term: &str, limit: i64) -> Result<Vec<String>, DbError>;
+    async fn autocomplete_symbols(
+        &self,
+        term: &str,
+        limit: i64,
+    ) -> Result<Vec<SymbolSuggestion>, DbError>;
     async fn health_check(&self) -> Result<String, DbError>;
 }
 

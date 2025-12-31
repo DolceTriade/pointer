@@ -73,6 +73,13 @@ pub struct SearchSnippet {
     pub content_text: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SymbolSuggestion {
+    pub name: String,
+    pub repository: String,
+    pub file_path: String,
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct SearchResult {
     pub repository: String,

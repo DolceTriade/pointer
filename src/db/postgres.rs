@@ -1,6 +1,6 @@
 use crate::db::models::{
     FacetCount, FileReference as DbFileReference, RepoBranchInfo, SearchResultsPage,
-    SearchResultsStats, SearchSnippet,
+    SearchResultsStats, SearchSnippet, SymbolSuggestion,
 };
 use crate::db::{
     Database, DbError, DbUniqueChunk, FileReference, RawFileContent, ReferenceResult, RepoSummary,
@@ -2103,14 +2103,23 @@ ORDER BY idx
         Ok(rows)
     }
 
-    async fn autocomplete_symbols(&self, term: &str, limit: i64) -> Result<Vec<String>, DbError> {
+    async fn autocomplete_symbols(
+        &self,
+        term: &str,
+        limit: i64,
+    ) -> Result<Vec<SymbolSuggestion>, DbError> {
         let escaped = escape_sql_like_literal(term);
         let pattern = format!("%{}%", escaped);
-        let rows: Vec<String> = sqlx::query_scalar(
-            "SELECT name_lc \
-             FROM unique_symbols \
-             WHERE name_lc ILIKE $1 ESCAPE '\\' \
-             ORDER BY name_lc \
+        let rows: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT
+                s.name_lc,
+                MIN(f.repository) AS repository,
+                MIN(f.file_path) AS file_path
+             FROM symbols s
+             JOIN files f ON f.content_hash = s.content_hash
+             WHERE s.name_lc ILIKE $1 ESCAPE '\\'
+             GROUP BY s.name_lc
+             ORDER BY s.name_lc
              LIMIT $2",
         )
         .bind(pattern)
@@ -2119,7 +2128,14 @@ ORDER BY idx
         .await
         .map_err(|e| DbError::Database(e.to_string()))?;
 
-        Ok(rows)
+        Ok(rows
+            .into_iter()
+            .map(|(name, repository, file_path)| SymbolSuggestion {
+                name,
+                repository,
+                file_path,
+            })
+            .collect())
     }
 
     async fn health_check(&self) -> Result<String, DbError> {
