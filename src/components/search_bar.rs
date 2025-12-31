@@ -271,7 +271,10 @@ pub fn SearchBar(
                         item
                     })
                     .collect();
-                groups.push(SuggestionGroup { title: "Paths", items });
+                groups.push(SuggestionGroup {
+                    title: "Paths",
+                    items,
+                });
             }
             AutocompleteMode::DslKey => {
                 let items = dsl_suggestions
@@ -288,7 +291,10 @@ pub fn SearchBar(
                         item
                     })
                     .collect();
-                groups.push(SuggestionGroup { title: "DSL", items });
+                groups.push(SuggestionGroup {
+                    title: "DSL",
+                    items,
+                });
             }
             AutocompleteMode::Symbol => {
                 let symbol_items = results
@@ -364,7 +370,10 @@ pub fn SearchBar(
                         item
                     })
                     .collect();
-                groups.push(SuggestionGroup { title: "Branches", items });
+                groups.push(SuggestionGroup {
+                    title: "Branches",
+                    items,
+                });
             }
             AutocompleteMode::FileValue => {
                 let items = results
@@ -381,7 +390,10 @@ pub fn SearchBar(
                         item
                     })
                     .collect();
-                groups.push(SuggestionGroup { title: "Files", items });
+                groups.push(SuggestionGroup {
+                    title: "Files",
+                    items,
+                });
             }
             AutocompleteMode::CaseValue => {
                 let term = state.term.to_ascii_lowercase();
@@ -400,7 +412,10 @@ pub fn SearchBar(
                         item
                     })
                     .collect();
-                groups.push(SuggestionGroup { title: "Case", items });
+                groups.push(SuggestionGroup {
+                    title: "Case",
+                    items,
+                });
             }
             AutocompleteMode::HistoricalValue => {
                 let term = state.term.to_ascii_lowercase();
@@ -491,11 +506,7 @@ pub fn SearchBar(
                                     if !suggestions.is_empty() {
                                         let next = match active_index.get() {
                                             Some(idx) => {
-                                                if idx == 0 {
-                                                    suggestions.len() - 1
-                                                } else {
-                                                    idx - 1
-                                                }
+                                                if idx == 0 { suggestions.len() - 1 } else { idx - 1 }
                                             }
                                             None => suggestions.len() - 1,
                                         };
@@ -669,7 +680,6 @@ pub fn SearchBar(
                             let active_start = autocomplete_state.get().active_start;
                             let current_query = query.get();
                             let set_query = set_query.clone();
-
                             let mut dsl_group = None;
                             let mut symbol_group = None;
                             let mut other_groups = Vec::new();
@@ -680,32 +690,35 @@ pub fn SearchBar(
                                     _ => other_groups.push(group),
                                 }
                             }
-
-                            let symbol_column = symbol_group.map(|group| {
-                                render_group_view(
-                                    group,
-                                    active_idx,
-                                    active_start,
-                                    current_query.clone(),
-                                    set_query,
-                                )
-                            });
-                            let dsl_column = dsl_group.map(|group| {
-                                render_group_view(
-                                    group,
-                                    active_idx,
-                                    active_start,
-                                    current_query.clone(),
-                                    set_query,
-                                )
-                            });
+                            let symbol_column = symbol_group
+                                .map(|group| {
+                                    render_group_view(
+                                        group,
+                                        active_idx,
+                                        active_start,
+                                        current_query.clone(),
+                                        set_query,
+                                    )
+                                });
+                            let dsl_column = dsl_group
+                                .map(|group| {
+                                    render_group_view(
+                                        group,
+                                        active_idx,
+                                        active_start,
+                                        current_query.clone(),
+                                        set_query,
+                                    )
+                                });
                             let two_column = if symbol_column.is_some() || dsl_column.is_some() {
-                                Some(view! {
-                                    <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                        {symbol_column}
-                                        {dsl_column}
-                                    </div>
-                                })
+                                Some(
+
+                                    view! {
+                                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                            {symbol_column} {dsl_column}
+                                        </div>
+                                    },
+                                )
                             } else {
                                 None
                             };
@@ -806,11 +819,9 @@ fn render_group_view(
     let items = group.items;
     let empty_label = format!("No {} matches.", group_title.to_lowercase());
     let items_view = if items.is_empty() {
-        Either::Left(view! {
-            <div class="text-xs text-gray-500 dark:text-gray-400">
-                {empty_label}
-            </div>
-        })
+        Either::Left(
+            view! { <div class="text-xs text-gray-500 dark:text-gray-400">{empty_label}</div> },
+        )
     } else {
         let current_query = current_query.clone();
         let rendered = items
@@ -844,13 +855,14 @@ fn render_group_view(
                             <span class="font-mono text-sm text-gray-900 dark:text-gray-100">
                                 {label}
                             </span>
-                            {subtitle.map(|text| {
-                                view! {
-                                    <div class="text-xs text-gray-500 dark:text-gray-400 truncate">
-                                        {text}
-                                    </div>
-                                }
-                            })}
+                            {subtitle
+                                .map(|text| {
+                                    view! {
+                                        <div class="text-xs text-gray-500 dark:text-gray-400 truncate">
+                                            {text}
+                                        </div>
+                                    }
+                                })}
                         </div>
                     </div>
                 }
