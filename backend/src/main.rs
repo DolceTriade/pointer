@@ -1505,7 +1505,11 @@ async fn refresh_symbol_cache_handler(
     Json(payload): Json<RefreshSymbolCacheRequest>,
 ) -> ApiResult<Json<RefreshSymbolCacheResponse>> {
     let batch_size = payload.batch_size.max(1);
-    let max_batches = payload.max_batches.max(1);
+    let max_batches = if payload.max_batches <= 0 {
+        i64::MAX
+    } else {
+        payload.max_batches
+    };
     let shard_count = 1_usize;
 
     let mut tx = state.pool.begin().await.map_err(ApiErrorKind::from)?;

@@ -278,6 +278,6 @@ pub struct CleanupSymbolCacheArgs {
 pub struct RefreshSymbolCacheArgs {
     #[arg(long, default_value_t = 10_000)]
     pub batch_size: i64,
-    #[arg(long, default_value_t = 50)]
+    #[arg(long, default_value_t = 0)]
     pub max_batches: i64,
 }
