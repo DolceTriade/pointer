@@ -9,6 +9,8 @@
   wasm-bindgen-cli_0_2_104,
   openssl,
   pkg-config,
+  autoPatchelfHook,
+  stdenv,
 }:
 rustPlatform.buildRustPackage rec {
   pname = "pointer";
@@ -34,9 +36,10 @@ rustPlatform.buildRustPackage rec {
     rustc.llvmPackages.lld
     makeWrapper
     pkg-config
+    autoPatchelfHook
   ];
 
-  buildInputs = [openssl.dev];
+  buildInputs = [openssl openssl.dev stdenv.cc.cc.lib];
 
   buildPhase = ''
     runHook preBuild
