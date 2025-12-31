@@ -287,24 +287,6 @@ pub fn SearchBar(
                 groups.push(SuggestionGroup { title: "DSL", items });
             }
             AutocompleteMode::Symbol => {
-                let dsl_items = dsl_suggestions
-                    .get()
-                    .into_iter()
-                    .map(|hint| {
-                        let item = SuggestionItem {
-                            label: hint.syntax.to_string(),
-                            replacement: hint.syntax.to_string(),
-                            index,
-                        };
-                        index += 1;
-                        item
-                    })
-                    .collect();
-                groups.push(SuggestionGroup {
-                    title: "DSL",
-                    items: dsl_items,
-                });
-
                 let symbol_items = results
                     .symbols
                     .into_iter()
@@ -321,6 +303,24 @@ pub fn SearchBar(
                 groups.push(SuggestionGroup {
                     title: "Symbols",
                     items: symbol_items,
+                });
+
+                let dsl_items = dsl_suggestions
+                    .get()
+                    .into_iter()
+                    .map(|hint| {
+                        let item = SuggestionItem {
+                            label: hint.syntax.to_string(),
+                            replacement: hint.syntax.to_string(),
+                            index,
+                        };
+                        index += 1;
+                        item
+                    })
+                    .collect();
+                groups.push(SuggestionGroup {
+                    title: "DSL",
+                    items: dsl_items,
                 });
             }
             AutocompleteMode::LangValue => {
@@ -657,70 +657,64 @@ pub fn SearchBar(
                             let active_idx = active_index.get();
                             let active_start = autocomplete_state.get().active_start;
                             let current_query = query.get();
+                            let set_query = set_query.clone();
+
+                            let mut dsl_group = None;
+                            let mut symbol_group = None;
+                            let mut other_groups = Vec::new();
+                            for group in groups {
+                                match group.title {
+                                    "DSL" => dsl_group = Some(group),
+                                    "Symbols" => symbol_group = Some(group),
+                                    _ => other_groups.push(group),
+                                }
+                            }
+
+                            let symbol_column = symbol_group.map(|group| {
+                                render_group_view(
+                                    group,
+                                    active_idx,
+                                    active_start,
+                                    current_query.clone(),
+                                    set_query,
+                                )
+                            });
+                            let dsl_column = dsl_group.map(|group| {
+                                render_group_view(
+                                    group,
+                                    active_idx,
+                                    active_start,
+                                    current_query.clone(),
+                                    set_query,
+                                )
+                            });
+                            let two_column = if symbol_column.is_some() || dsl_column.is_some() {
+                                Some(view! {
+                                    <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                        {symbol_column}
+                                        {dsl_column}
+                                    </div>
+                                })
+                            } else {
+                                None
+                            };
 
                             view! {
                                 <div class="p-3 text-sm text-gray-600 dark:text-gray-300">
                                     <For
-                                        each=move || groups.clone()
+                                        each=move || other_groups.clone()
                                         key=|group| group.title
                                         children=move |group| {
-                                            let group_title = group.title;
-                                            let items = group.items;
-                                            let empty_label =
-                                                format!("No {} matches.", group_title.to_lowercase());
-                                            let items_view = if items.is_empty() {
-                                                Either::Left(view! {
-                                                    <div class="text-xs text-gray-500 dark:text-gray-400">
-                                                        {empty_label}
-                                                    </div>
-                                                })
-                                            } else {
-                                                let current_query = current_query.clone();
-                                                let rendered = items
-                                                    .into_iter()
-                                                    .map(|item| {
-                                                        let replacement = item.replacement.clone();
-                                                        let label = item.label.clone();
-                                                        let idx = item.index;
-                                                        let is_active = active_idx == Some(idx);
-                                                        let row_class = if is_active {
-                                                            "flex cursor-pointer bg-gray-200 dark:bg-gray-700 p-2 rounded"
-                                                        } else {
-                                                            "flex cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700 p-2 rounded"
-                                                        };
-                                                        let query_value = current_query.clone();
-                                                        view! {
-                                                            <div
-                                                                class=row_class
-                                                                on:mousedown=move |ev| {
-                                                                    ev.prevent_default();
-                                                                    let updated = apply_autocomplete_replacement(
-                                                                        &query_value,
-                                                                        active_start,
-                                                                        &replacement,
-                                                                    );
-                                                                    set_query.set(updated);
-                                                                }
-                                                            >
-                                                                <span class="font-mono text-sm text-gray-900 dark:text-gray-100">
-                                                                    {label}
-                                                                </span>
-                                                            </div>
-                                                        }
-                                                    })
-                                                    .collect_view();
-                                                Either::Right(view! { <div class="contents">{rendered}</div> })
-                                            };
-                                            view! {
-                                                <div class="mb-3 last:mb-0">
-                                                    <p class="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-2">
-                                                        {group_title}
-                                                    </p>
-                                                    <div class="space-y-1">{items_view}</div>
-                                                </div>
-                                            }
+                                            render_group_view(
+                                                group,
+                                                active_idx,
+                                                active_start,
+                                                current_query.clone(),
+                                                set_query,
+                                            )
                                         }
                                     />
+                                    {two_column}
                                 </div>
                             }
                         }}
@@ -787,6 +781,70 @@ struct SuggestionItem {
 struct SuggestionGroup {
     title: &'static str,
     items: Vec<SuggestionItem>,
+}
+
+fn render_group_view(
+    group: SuggestionGroup,
+    active_idx: Option<usize>,
+    active_start: usize,
+    current_query: String,
+    set_query: WriteSignal<String>,
+) -> impl IntoView {
+    let group_title = group.title;
+    let items = group.items;
+    let empty_label = format!("No {} matches.", group_title.to_lowercase());
+    let items_view = if items.is_empty() {
+        Either::Left(view! {
+            <div class="text-xs text-gray-500 dark:text-gray-400">
+                {empty_label}
+            </div>
+        })
+    } else {
+        let current_query = current_query.clone();
+        let rendered = items
+            .into_iter()
+            .map(|item| {
+                let replacement = item.replacement.clone();
+                let label = item.label.clone();
+                let idx = item.index;
+                let is_active = active_idx == Some(idx);
+                let row_class = if is_active {
+                    "flex cursor-pointer bg-gray-200 dark:bg-gray-700 p-2 rounded"
+                } else {
+                    "flex cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700 p-2 rounded"
+                };
+                let query_value = current_query.clone();
+                view! {
+                    <div
+                        class=row_class
+                        on:mousedown=move |ev| {
+                            ev.prevent_default();
+                            let updated = apply_autocomplete_replacement(
+                                &query_value,
+                                active_start,
+                                &replacement,
+                            );
+                            set_query.set(updated);
+                        }
+                    >
+                        <span class="font-mono text-sm text-gray-900 dark:text-gray-100">
+                            {label}
+                        </span>
+                    </div>
+                }
+            })
+            .collect_view();
+        Either::Right(view! { <div class="contents">{rendered}</div> })
+    };
+
+    view! {
+        <div class="mb-3 last:mb-0">
+            <p class="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-2">
+                {group_title}
+            </p>
+            <div class="space-y-1">{items_view}</div>
+        </div>
+    }
 }
 
 const DSL_KEYS: [&str; 8] = [
@@ -882,17 +940,12 @@ fn build_autocomplete_state(query: &str) -> AutocompleteState {
             mode = AutocompleteMode::DslKey;
         } else {
             let value_lc = token.value.to_ascii_lowercase();
-            let is_key_prefix = DSL_KEYS.iter().any(|key| key.starts_with(&value_lc));
-            if is_key_prefix {
-                mode = AutocompleteMode::DslKey;
-                term = token.value;
-            } else {
-                mode = AutocompleteMode::Symbol;
-                term = token.value;
-            }
+            let _is_key_prefix = DSL_KEYS.iter().any(|key| key.starts_with(&value_lc));
+            mode = AutocompleteMode::Symbol;
+            term = token.value;
         }
     } else if !query.trim().is_empty() {
-        mode = AutocompleteMode::DslKey;
+        mode = AutocompleteMode::Symbol;
     }
 
     AutocompleteState {
