@@ -12,3 +12,4 @@ target/
 .env
 
 node_modules/
+index-output/

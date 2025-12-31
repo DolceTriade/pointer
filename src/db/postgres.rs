@@ -1845,10 +1845,11 @@ ORDER BY idx
                 .into_iter()
                 .map(|mut agg| {
     agg.entries.sort_by(|a, b| {
-        let (marks_a, signal_a) = snippet_signal_score(&a.content_text);
-        let (marks_b, signal_b) = snippet_signal_score(&b.content_text);
-        marks_b
-            .cmp(&marks_a)
+        let (exact_a, marks_a, signal_a) = snippet_signal_score(&a.content_text);
+        let (exact_b, marks_b, signal_b) = snippet_signal_score(&b.content_text);
+        exact_b
+            .cmp(&exact_a)
+            .then_with(|| marks_b.cmp(&marks_a))
             .then_with(|| signal_b.cmp(&signal_a))
             .then_with(|| a.match_line_number.cmp(&b.match_line_number))
             .then_with(|| a.start_line.cmp(&b.start_line))
@@ -2326,13 +2327,52 @@ struct FileAggregate {
 
 const FACET_LIMIT: usize = 8;
 
-fn snippet_signal_score(text: &str) -> (i32, i32) {
+fn snippet_signal_score(text: &str) -> (i32, i32, i32) {
     let mark_count = text.matches("<mark>").count() as i32;
+    let exact_count = count_exact_mark_matches(text);
     let signal_count = text
         .bytes()
         .filter(|byte| matches!(byte, b':' | b'=' | b'(' | b')'))
         .count() as i32;
-    (mark_count, signal_count)
+    (exact_count, mark_count, signal_count)
+}
+
+fn count_exact_mark_matches(text: &str) -> i32 {
+    const OPEN: &str = "<mark>";
+    const CLOSE: &str = "</mark>";
+    let mut count = 0;
+    let mut idx = 0;
+    let bytes = text.as_bytes();
+
+    while let Some(open_rel) = text[idx..].find(OPEN) {
+        let open_idx = idx + open_rel;
+        let content_start = open_idx + OPEN.len();
+        let Some(close_rel) = text[content_start..].find(CLOSE) else {
+            break;
+        };
+        let close_idx = content_start + close_rel;
+        let before = if open_idx == 0 {
+            None
+        } else {
+            bytes.get(open_idx.wrapping_sub(1)).copied()
+        };
+        let after_idx = close_idx + CLOSE.len();
+        let after = bytes.get(after_idx).copied();
+
+        let before_ident = before.map(is_identifier_byte).unwrap_or(false);
+        let after_ident = after.map(is_identifier_byte).unwrap_or(false);
+        if !before_ident && !after_ident {
+            count += 1;
+        }
+
+        idx = after_idx;
+    }
+
+    count
+}
+
+fn is_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
 fn build_search_stats(rows: &[RankedFileRow]) -> SearchResultsStats {
