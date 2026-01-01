@@ -13,6 +13,7 @@ use crate::dsl::{
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sqlx::{Execute, PgPool, Postgres, QueryBuilder, Transaction, types::Json};
+use sqlx::postgres::PgArguments;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     io::Read,
@@ -1942,7 +1943,7 @@ ORDER BY idx
     ) -> Result<Vec<String>, DbError> {
         let escaped = escape_sql_like_literal(term);
         let pattern = format!("%{}%", escaped);
-        let rows: Vec<String> = sqlx::query_scalar(
+        let mut query = sqlx::query_scalar(
             "SELECT DISTINCT repository \
              FROM files \
              WHERE repository ILIKE $1 ESCAPE '\\' \
@@ -1950,10 +1951,38 @@ ORDER BY idx
              LIMIT $2",
         )
         .bind(pattern)
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| DbError::Database(e.to_string()))?;
+        .bind(limit);
+
+        if std::env::var("POINTER_EXPLAIN_SEARCH_SQL").is_ok() {
+            let sql = format!("EXPLAIN (ANALYZE, VERBOSE, BUFFERS) {}", query.sql());
+            if let Ok(Some(args)) = query.take_arguments() {
+                let args: PgArguments = args;
+                let explain_args = args.clone();
+                match sqlx::query_scalar_with::<Postgres, String, PgArguments>(&sql, explain_args)
+                    .fetch_all(&self.pool)
+                    .await
+                {
+                    Ok(rows) => {
+                        for line in rows {
+                            tracing::info!(target: "pointer::autocomplete_sql", "{}", line);
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            target: "pointer::autocomplete_sql",
+                            "failed to run EXPLAIN: {}",
+                            err
+                        );
+                    }
+                }
+                query = sqlx::query_scalar_with::<Postgres, String, PgArguments>(query.sql(), args);
+            }
+        }
+
+        let rows: Vec<String> = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| DbError::Database(e.to_string()))?;
 
         Ok(rows)
     }
@@ -1994,8 +2023,34 @@ ORDER BY idx
         qb.push(" ESCAPE '\\' ORDER BY dir LIMIT ");
         qb.push_bind(limit);
 
-        let rows: Vec<String> = qb
-            .build_query_scalar()
+        let mut query = qb.build_query_scalar::<String>();
+        if std::env::var("POINTER_EXPLAIN_SEARCH_SQL").is_ok() {
+            let sql = format!("EXPLAIN (ANALYZE, VERBOSE, BUFFERS) {}", query.sql());
+            if let Ok(Some(args)) = query.take_arguments() {
+                let args: PgArguments = args;
+                let explain_args = args.clone();
+                match sqlx::query_scalar_with::<Postgres, String, PgArguments>(&sql, explain_args)
+                    .fetch_all(&self.pool)
+                    .await
+                {
+                    Ok(rows) => {
+                        for line in rows {
+                            tracing::info!(target: "pointer::autocomplete_sql", "{}", line);
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            target: "pointer::autocomplete_sql",
+                            "failed to run EXPLAIN: {}",
+                            err
+                        );
+                    }
+                }
+                query = sqlx::query_scalar_with::<Postgres, String, PgArguments>(query.sql(), args);
+            }
+        }
+
+        let rows: Vec<String> = query
             .fetch_all(&self.pool)
             .await
             .map_err(|e| DbError::Database(e.to_string()))?;
@@ -2027,8 +2082,34 @@ ORDER BY idx
         qb.push(" ESCAPE '\\' ORDER BY file_path LIMIT ");
         qb.push_bind(limit);
 
-        let rows: Vec<String> = qb
-            .build_query_scalar()
+        let mut query = qb.build_query_scalar::<String>();
+        if std::env::var("POINTER_EXPLAIN_SEARCH_SQL").is_ok() {
+            let sql = format!("EXPLAIN (ANALYZE, VERBOSE, BUFFERS) {}", query.sql());
+            if let Ok(Some(args)) = query.take_arguments() {
+                let args: PgArguments = args;
+                let explain_args = args.clone();
+                match sqlx::query_scalar_with::<Postgres, String, PgArguments>(&sql, explain_args)
+                    .fetch_all(&self.pool)
+                    .await
+                {
+                    Ok(rows) => {
+                        for line in rows {
+                            tracing::info!(target: "pointer::autocomplete_sql", "{}", line);
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            target: "pointer::autocomplete_sql",
+                            "failed to run EXPLAIN: {}",
+                            err
+                        );
+                    }
+                }
+                query = sqlx::query_scalar_with::<Postgres, String, PgArguments>(query.sql(), args);
+            }
+        }
+
+        let rows: Vec<String> = query
             .fetch_all(&self.pool)
             .await
             .map_err(|e| DbError::Database(e.to_string()))?;
@@ -2061,8 +2142,37 @@ ORDER BY idx
         qb.push(" ESCAPE '\\' ORDER BY cb.language LIMIT ");
         qb.push_bind(limit);
 
-        let rows: Vec<Option<String>> = qb
-            .build_query_scalar()
+        let mut query = qb.build_query_scalar::<Option<String>>();
+        if std::env::var("POINTER_EXPLAIN_SEARCH_SQL").is_ok() {
+            let sql = format!("EXPLAIN (ANALYZE, VERBOSE, BUFFERS) {}", query.sql());
+            if let Ok(Some(args)) = query.take_arguments() {
+                let args: PgArguments = args;
+                let explain_args = args.clone();
+                match sqlx::query_scalar_with::<Postgres, String, PgArguments>(&sql, explain_args)
+                    .fetch_all(&self.pool)
+                    .await
+                {
+                    Ok(rows) => {
+                        for line in rows {
+                            tracing::info!(target: "pointer::autocomplete_sql", "{}", line);
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            target: "pointer::autocomplete_sql",
+                            "failed to run EXPLAIN: {}",
+                            err
+                        );
+                    }
+                }
+                query = sqlx::query_scalar_with::<Postgres, Option<String>, PgArguments>(
+                    query.sql(),
+                    args,
+                );
+            }
+        }
+
+        let rows: Vec<Option<String>> = query
             .fetch_all(&self.pool)
             .await
             .map_err(|e| DbError::Database(e.to_string()))?;
@@ -2094,8 +2204,34 @@ ORDER BY idx
         qb.push(" ESCAPE '\\' ORDER BY branch LIMIT ");
         qb.push_bind(limit);
 
-        let rows: Vec<String> = qb
-            .build_query_scalar()
+        let mut query = qb.build_query_scalar::<String>();
+        if std::env::var("POINTER_EXPLAIN_SEARCH_SQL").is_ok() {
+            let sql = format!("EXPLAIN (ANALYZE, VERBOSE, BUFFERS) {}", query.sql());
+            if let Ok(Some(args)) = query.take_arguments() {
+                let args: PgArguments = args;
+                let explain_args = args.clone();
+                match sqlx::query_scalar_with::<Postgres, String, PgArguments>(&sql, explain_args)
+                    .fetch_all(&self.pool)
+                    .await
+                {
+                    Ok(rows) => {
+                        for line in rows {
+                            tracing::info!(target: "pointer::autocomplete_sql", "{}", line);
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            target: "pointer::autocomplete_sql",
+                            "failed to run EXPLAIN: {}",
+                            err
+                        );
+                    }
+                }
+                query = sqlx::query_scalar_with::<Postgres, String, PgArguments>(query.sql(), args);
+            }
+        }
+
+        let rows: Vec<String> = query
             .fetch_all(&self.pool)
             .await
             .map_err(|e| DbError::Database(e.to_string()))?;
@@ -2110,23 +2246,59 @@ ORDER BY idx
     ) -> Result<Vec<SymbolSuggestion>, DbError> {
         let escaped = escape_sql_like_literal(term);
         let pattern = format!("%{}%", escaped);
-        let rows: Vec<(String, String, String)> = sqlx::query_as(
-            "SELECT
-                s.name_lc,
+        let mut query = sqlx::query_as(
+            "WITH matches AS (
+                SELECT us.name_lc
+                FROM unique_symbols us
+                WHERE us.name_lc ILIKE $1 ESCAPE '\\'
+                LIMIT $2
+             )
+             SELECT
+                m.name_lc,
                 MIN(f.repository) AS repository,
                 MIN(f.file_path) AS file_path
-             FROM symbols s
+             FROM matches m
+             JOIN symbols s ON s.name_lc = m.name_lc
              JOIN files f ON f.content_hash = s.content_hash
-             WHERE s.name_lc ILIKE $1 ESCAPE '\\'
-             GROUP BY s.name_lc
-             ORDER BY s.name_lc
-             LIMIT $2",
+             GROUP BY m.name_lc
+             ORDER BY m.name_lc",
         )
         .bind(pattern)
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| DbError::Database(e.to_string()))?;
+        .bind(limit);
+
+        if std::env::var("POINTER_EXPLAIN_SEARCH_SQL").is_ok() {
+            let sql = format!("EXPLAIN (ANALYZE, VERBOSE, BUFFERS) {}", query.sql());
+            if let Ok(Some(args)) = query.take_arguments() {
+                let args: PgArguments = args;
+                let explain_args = args.clone();
+                match sqlx::query_scalar_with::<Postgres, String, PgArguments>(&sql, explain_args)
+                    .fetch_all(&self.pool)
+                    .await
+                {
+                    Ok(rows) => {
+                        for line in rows {
+                            tracing::info!(target: "pointer::autocomplete_sql", "{}", line);
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            target: "pointer::autocomplete_sql",
+                            "failed to run EXPLAIN: {}",
+                            err
+                        );
+                    }
+                }
+                query = sqlx::query_as_with::<Postgres, (String, String, String), PgArguments>(
+                    query.sql(),
+                    args,
+                );
+            }
+        }
+
+        let rows: Vec<(String, String, String)> = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| DbError::Database(e.to_string()))?;
 
         Ok(rows
             .into_iter()
