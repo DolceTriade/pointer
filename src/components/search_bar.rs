@@ -68,8 +68,14 @@ pub fn SearchBar(
         }
 
         match parse_query(&q) {
-            Ok(_) => Some(ValidationStatus::Valid),
-            Err(_) => Some(ValidationStatus::Invalid),
+            Ok(_) => Some(ValidationState {
+                status: ValidationStatus::Valid,
+                message: None,
+            }),
+            Err(err) => Some(ValidationState {
+                status: ValidationStatus::Invalid,
+                message: Some(err.to_string()),
+            }),
         }
     });
 
@@ -464,7 +470,19 @@ pub fn SearchBar(
     view! {
         <div class="w-full max-w-2xl">
             <div class="group relative">
-                <div class="flex items-center rounded-full border border-gray-300 dark:border-gray-700 shadow-lg overflow-hidden bg-white dark:bg-gray-800 relative">
+                <div
+                    class=move || {
+                        let border = match validation.get().map(|state| state.status) {
+                            Some(ValidationStatus::Valid) => "border-emerald-400 dark:border-emerald-600",
+                            Some(ValidationStatus::Invalid) => "border-rose-400 dark:border-rose-600",
+                            None => "border-gray-300 dark:border-gray-700",
+                        };
+                        format!(
+                            "flex items-center rounded-full border shadow-lg overflow-hidden bg-white dark:bg-gray-800 relative transition-colors duration-200 {}",
+                            border
+                        )
+                    }
+                >
                     <input
                         type="text"
                         placeholder="Search for code... (use DSL: repo:myrepo lang:rust)"
@@ -530,56 +548,8 @@ pub fn SearchBar(
                         }
                     />
 
-                    // Validation indicator
-                    {move || {
-                        validation
-                            .get()
-                            .map(|status| {
-                                match status {
-                                    ValidationStatus::Valid => {
-                                        view! {
-                                            <div class="absolute right-12 top-1/2 transform -translate-y-1/2">
-                                                <svg
-                                                    class="w-5 h-5 text-green-500"
-                                                    fill="none"
-                                                    stroke="currentColor"
-                                                    viewBox="0 0 24 24"
-                                                >
-                                                    <path
-                                                        stroke-linecap="round"
-                                                        stroke-linejoin="round"
-                                                        stroke-width="2"
-                                                        d="M5 13l4 4L19 7"
-                                                    ></path>
-                                                </svg>
-                                            </div>
-                                        }
-                                    }
-                                    ValidationStatus::Invalid => {
-                                        view! {
-                                            <div class="absolute right-12 top-1/2 transform -translate-y-1/2">
-                                                <svg
-                                                    class="w-5 h-5 text-red-500"
-                                                    fill="none"
-                                                    stroke="currentColor"
-                                                    viewBox="0 0 24 24"
-                                                >
-                                                    <path
-                                                        stroke-linecap="round"
-                                                        stroke-linejoin="round"
-                                                        stroke-width="2"
-                                                        d="M6 18L18 6M6 6l12 12"
-                                                    ></path>
-                                                </svg>
-                                            </div>
-                                        }
-                                    }
-                                }
-                            })
-                    }}
-
                     <button
-                        class="px-6 py-4 bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors duration-200"
+                        class="px-6 py-4 bg-blue-600 text-white shadow-sm hover:bg-blue-700 hover:shadow-md hover:-translate-y-px dark:bg-blue-500 dark:hover:bg-blue-400 transition-all duration-200"
                         on:click=move |_| on_search()
                     >
                         <svg
@@ -607,6 +577,23 @@ pub fn SearchBar(
                     </span>
                     <span>"Enter opens results in a new tab"</span>
                 </div>
+                {move || {
+                    validation.get().and_then(|state| {
+                        if state.status == ValidationStatus::Invalid {
+                            state.message.map(|msg| {
+                                let label = format!("Invalid query: {}", msg);
+                                view! {
+                                    <div class="mt-2 px-3 py-2 text-xs text-red-700 dark:text-red-200 bg-red-50 dark:bg-red-950/40 border border-red-300 dark:border-red-800 rounded-md flex items-start gap-2">
+                                        <span class="font-mono text-red-600 dark:text-red-200">"X"</span>
+                                        <span>{label}</span>
+                                    </div>
+                                }
+                            })
+                        } else {
+                            None
+                        }
+                    })
+                }}
 
                 // Autocomplete or tutorial popup
                 <div class="absolute hidden mt-2 w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg z-10 opacity-0 scale-95 transition-all duration-200 group-focus-within:opacity-100 group-focus-within:scale-100 group-focus-within:block">
@@ -753,6 +740,12 @@ pub fn SearchBar(
 enum ValidationStatus {
     Valid,
     Invalid,
+}
+
+#[derive(Clone, PartialEq)]
+struct ValidationState {
+    status: ValidationStatus,
+    message: Option<String>,
 }
 
 #[derive(Clone, PartialEq)]

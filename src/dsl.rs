@@ -109,6 +109,22 @@ pub enum ParseError {
     EmptyQuery,
 }
 
+impl fmt::Display for ParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ParseError::InvalidFilter(value) => {
+                if value.contains(' ') || value.contains(':') {
+                    write!(f, "{}", value)
+                } else {
+                    write!(f, "Unknown filter: {}", value)
+                }
+            }
+            ParseError::UnmatchedParenthesis => write!(f, "Unmatched parenthesis"),
+            ParseError::EmptyQuery => write!(f, "Empty query"),
+        }
+    }
+}
+
 // A simple recursive descent parser for the Zoekt query language
 #[derive(Debug, Clone)]
 struct Token {
