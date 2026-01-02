@@ -12,8 +12,8 @@ use crate::dsl::{
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use sqlx::{Execute, PgPool, Postgres, QueryBuilder, Transaction, types::Json};
 use sqlx::postgres::PgArguments;
+use sqlx::{Execute, PgPool, Postgres, QueryBuilder, Transaction, types::Json};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     io::Read,

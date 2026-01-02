@@ -111,7 +111,7 @@ pub fn CodeIntelPanel(
     let insights_scroll_container = NodeRef::<Div>::new();
 
     view! {
-        <aside class="w-80 flex-shrink-0 bg-white/95 dark:bg-slate-950/70 text-slate-900 dark:text-slate-100 rounded-lg shadow border border-slate-200 dark:border-slate-800 p-4 sticky top-20 max-h-[calc(100vh-6rem)] overflow-x-auto overflow-y-auto backdrop-blur">
+        <aside class="w-80 flex-shrink-0 bg-white/95 dark:bg-slate-950/70 text-slate-900 dark:text-slate-100 rounded-lg shadow border border-slate-200 dark:border-slate-800 p-4 sticky top-20 backdrop-blur">
             <h2 class="text-xl font-semibold mb-4 text-slate-900 dark:text-white">
                 "Code Intelligence"
             </h2>
@@ -139,11 +139,7 @@ pub fn CodeIntelPanel(
                         })
                 }}
             </div>
-            <div
-                class="overflow-y-auto pr-1"
-                node_ref=insights_scroll_container
-                style="max-height: calc(100vh - 12rem);"
-            >
+            <div class="pr-1" node_ref=insights_scroll_container>
                 <div class="space-y-4">
                     <div class="flex flex-col gap-1">
                         <label class="text-xs uppercase tracking-wide text-slate-600 dark:text-slate-300">
@@ -544,23 +540,20 @@ pub fn CodeIntelPanel(
                                                                 view! {
                                                                     <div class="rounded border border-slate-200 dark:border-slate-800 bg-white/90 dark:bg-slate-900/60 p-3 shadow-sm">
                                                                         <div class="flex items-center justify-between gap-2">
-                                                                            <span class="font-mono text-sm text-blue-600 dark:text-blue-400">
-                                                                                {definition.symbol.clone()}
-                                                                            </span>
+                                                                            {definition
+                                                                                .namespace
+                                                                                .as_ref()
+                                                                                .map(|ns| {
+                                                                                    view! {
+                                                                                        <div class="text-xs text-slate-500 dark:text-slate-300">
+                                                                                            {ns.clone()}
+                                                                                        </div>
+                                                                                    }
+                                                                                })}
                                                                             <span class="text-xs text-slate-500 dark:text-slate-300 uppercase">
                                                                                 {definition_language}
                                                                             </span>
                                                                         </div>
-                                                                        {definition
-                                                                            .namespace
-                                                                            .as_ref()
-                                                                            .map(|ns| {
-                                                                                view! {
-                                                                                    <div class="text-xs text-slate-500 dark:text-slate-300 mt-1">
-                                                                                        {ns.clone()}
-                                                                                    </div>
-                                                                                }
-                                                                            })}
                                                                         <div class="mt-2 flex items-center gap-2 min-w-0">
                                                                             <A
                                                                                 href=definition_link
@@ -659,28 +652,24 @@ pub fn CodeIntelPanel(
                                                                                                                             line_number,
                                                                                                                         );
                                                                                                                         let reference_file_path = reference.file_path.clone();
-                                                                                                                        let reference_label = reference_file_path.clone();
-                                                                                                                        let reference_title = reference_label.clone();
+                                                                                                                        let reference_title = reference_file_path.clone();
                                                                                                                         view! {
                                                                                                                             <div class="rounded border border-slate-200 dark:border-slate-800 bg-white/90 dark:bg-slate-950/40 transition-colors overflow-hidden">
                                                                                                                                 <div class="flex items-center justify-between gap-2 px-3 py-2">
                                                                                                                                     <div class="min-w-0">
                                                                                                                                         <A
                                                                                                                                             href=reference_link.clone()
-                                                                                                                                            attr:class="text-sm text-blue-600 dark:text-blue-400 hover:underline block"
+                                                                                                                                            attr:class="text-xs text-slate-500 dark:text-slate-300 hover:underline block"
                                                                                                                                             attr:title=reference_title.clone()
                                                                                                                                         >
                                                                                                                                             <span class="block text-ellipsis overflow-hidden whitespace-nowrap flex-1 min-w-0">
-                                                                                                                                                {reference_label.clone()}
+                                                                                                                                                {format!(
+                                                                                                                                                    "Line {}  •  Column {}",
+                                                                                                                                                    line_number,
+                                                                                                                                                    reference.column,
+                                                                                                                                                )}
                                                                                                                                             </span>
                                                                                                                                         </A>
-                                                                                                                                        <p class="text-xs text-slate-500 dark:text-slate-300">
-                                                                                                                                            {format!(
-                                                                                                                                                "Line {}  •  Column {}",
-                                                                                                                                                line_number,
-                                                                                                                                                reference.column,
-                                                                                                                                            )}
-                                                                                                                                        </p>
                                                                                                                                     </div>
                                                                                                                                     <PathFilterActions
                                                                                                                                         path=reference_file_path.clone()
@@ -702,6 +691,7 @@ pub fn CodeIntelPanel(
                                                                                                                                                     .map(|(idx, text)| {
                                                                                                                                                         let current_line = start_line + idx as u32;
                                                                                                                                                         let is_highlight = current_line == highlight_line;
+                                                                                                                                                        let display_text = collapse_snippet_whitespace(&text);
                                                                                                                                                         let row_class = if is_highlight {
                                                                                                                                                             "flex gap-3 bg-blue-100/80 dark:bg-blue-900/40 rounded px-2 py-1"
                                                                                                                                                         } else {
@@ -712,8 +702,8 @@ pub fn CodeIntelPanel(
                                                                                                                                                                 <span class="w-12 text-right text-[10px] text-slate-500 dark:text-slate-300">
                                                                                                                                                                     {current_line}
                                                                                                                                                                 </span>
-                                                                                                                                                                <span class="flex-1 overflow-x-auto overflow-hidden whitespace-pre flex-shrink-0 min-w-0">
-                                                                                                                                                                    {text}
+                                                                                                                                                                <span class="flex-1 whitespace-nowrap min-w-max">
+                                                                                                                                                                    {display_text}
                                                                                                                                                                 </span>
                                                                                                                                                             </div>
                                                                                                                                                         }
@@ -785,4 +775,8 @@ pub fn snippet_matches_filter(reference: &SymbolReferenceWithSnippet, needle: &s
                 .any(|line| line.to_lowercase().contains(needle))
         })
         .unwrap_or(false)
+}
+
+fn collapse_snippet_whitespace(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<&str>>().join(" ")
 }

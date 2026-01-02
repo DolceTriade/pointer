@@ -470,19 +470,19 @@ pub fn SearchBar(
     view! {
         <div class="w-full max-w-2xl">
             <div class="group relative">
-                <div
-                    class=move || {
-                        let border = match validation.get().map(|state| state.status) {
-                            Some(ValidationStatus::Valid) => "border-emerald-400 dark:border-emerald-600",
-                            Some(ValidationStatus::Invalid) => "border-rose-400 dark:border-rose-600",
-                            None => "border-gray-300 dark:border-gray-700",
-                        };
-                        format!(
-                            "flex items-center rounded-full border shadow-lg overflow-hidden bg-white dark:bg-gray-800 relative transition-colors duration-200 {}",
-                            border
-                        )
-                    }
-                >
+                <div class=move || {
+                    let border = match validation.get().map(|state| state.status) {
+                        Some(ValidationStatus::Valid) => {
+                            "border-emerald-400 dark:border-emerald-600"
+                        }
+                        Some(ValidationStatus::Invalid) => "border-rose-400 dark:border-rose-600",
+                        None => "border-gray-300 dark:border-gray-700",
+                    };
+                    format!(
+                        "flex items-center rounded-full border shadow-lg overflow-hidden bg-white dark:bg-gray-800 relative transition-colors duration-200 {}",
+                        border,
+                    )
+                }>
                     <input
                         type="text"
                         placeholder="Search for code... (use DSL: repo:myrepo lang:rust)"
@@ -578,21 +578,27 @@ pub fn SearchBar(
                     <span>"Enter opens results in a new tab"</span>
                 </div>
                 {move || {
-                    validation.get().and_then(|state| {
-                        if state.status == ValidationStatus::Invalid {
-                            state.message.map(|msg| {
-                                let label = format!("Invalid query: {}", msg);
-                                view! {
-                                    <div class="mt-2 px-3 py-2 text-xs text-red-700 dark:text-red-200 bg-red-50 dark:bg-red-950/40 border border-red-300 dark:border-red-800 rounded-md flex items-start gap-2">
-                                        <span class="font-mono text-red-600 dark:text-red-200">"X"</span>
-                                        <span>{label}</span>
-                                    </div>
-                                }
-                            })
-                        } else {
-                            None
-                        }
-                    })
+                    validation
+                        .get()
+                        .and_then(|state| {
+                            if state.status == ValidationStatus::Invalid {
+                                state
+                                    .message
+                                    .map(|msg| {
+                                        let label = format!("Invalid query: {}", msg);
+                                        view! {
+                                            <div class="mt-2 px-3 py-2 text-xs text-red-700 dark:text-red-200 bg-red-50 dark:bg-red-950/40 border border-red-300 dark:border-red-800 rounded-md flex items-start gap-2">
+                                                <span class="font-mono text-red-600 dark:text-red-200">
+                                                    "X"
+                                                </span>
+                                                <span>{label}</span>
+                                            </div>
+                                        }
+                                    })
+                            } else {
+                                None
+                            }
+                        })
                 }}
 
                 // Autocomplete or tutorial popup
