@@ -116,7 +116,12 @@ fn run_index(args: IndexArgs) -> Result<()> {
         let options = upload::UploadOptions {
             incremental_symbols: !args.full_symbol_upload,
         };
-        upload::upload_index_with_options(url, args.upload_api_key.as_deref(), &artifacts, &options)?;
+        upload::upload_index_with_options(
+            url,
+            args.upload_api_key.as_deref(),
+            &artifacts,
+            &options,
+        )?;
     }
 
     info!(repo = repository, output = ?output_dir, files = artifacts.file_pointer_count(), "indexing complete");

@@ -95,7 +95,13 @@ pub fn upload_index_with_options(
 
     // 5. Upload manifest shards per section
     info!("uploading manifest shards");
-    upload_manifest_shards(&client, &endpoints, api_key, artifacts, needed_hashes.as_ref())?;
+    upload_manifest_shards(
+        &client,
+        &endpoints,
+        api_key,
+        artifacts,
+        needed_hashes.as_ref(),
+    )?;
 
     Ok(())
 }
@@ -166,7 +172,12 @@ fn upload_content_blobs(
         }
 
         processed = processed.saturating_add(batch.len());
-        maybe_log_progress("content blobs", processed, artifacts.content_blob_count(), &mut last_percent);
+        maybe_log_progress(
+            "content blobs",
+            processed,
+            artifacts.content_blob_count(),
+            &mut last_percent,
+        );
 
         tx.send(batch)
             .map_err(|_| anyhow!("content blob upload worker dropped"))?;
@@ -226,7 +237,10 @@ fn request_needed_content_hashes(
             .json()
             .context("failed to deserialize content need response")?;
 
-    info!(needed = response.missing.len(), "found content hashes to upload");
+    info!(
+        needed = response.missing.len(),
+        "found content hashes to upload"
+    );
     Ok(response.missing.into_iter().collect())
 }
 
@@ -292,7 +306,12 @@ fn upload_unique_chunks(
         }
 
         processed = processed.saturating_add(chunks.len());
-        maybe_log_progress("unique chunks", processed, needed_chunks.len(), &mut last_percent);
+        maybe_log_progress(
+            "unique chunks",
+            processed,
+            needed_chunks.len(),
+            &mut last_percent,
+        );
 
         tx.send(chunks)
             .map_err(|_| anyhow!("unique chunk upload worker dropped"))?;
@@ -343,7 +362,12 @@ fn upload_chunk_mappings(
         }
 
         processed = processed.saturating_add(batch.len());
-        maybe_log_progress("chunk mappings", processed, artifacts.chunk_mapping_count(), &mut last_percent);
+        maybe_log_progress(
+            "chunk mappings",
+            processed,
+            artifacts.chunk_mapping_count(),
+            &mut last_percent,
+        );
 
         tx.send(batch)
             .map_err(|_| anyhow!("chunk mapping upload worker dropped"))?;
@@ -419,8 +443,8 @@ fn upload_manifest_shards(
                 "reference_record",
                 Some(artifacts.reference_record_count()),
                 |line| {
-                    let record: ReferenceRecord = serde_json::from_str(line)
-                        .context("failed to parse reference record")?;
+                    let record: ReferenceRecord =
+                        serde_json::from_str(line).context("failed to parse reference record")?;
                     Ok(needed.contains(&record.content_hash))
                 },
             )?;
@@ -728,7 +752,8 @@ fn maybe_log_progress(label: &str, processed: usize, total: usize, last_percent:
     if percent > 100 {
         percent = 100;
     }
-    let should_log = percent >= last_percent.saturating_add(PROGRESS_STEP_PERCENT) || percent == 100;
+    let should_log =
+        percent >= last_percent.saturating_add(PROGRESS_STEP_PERCENT) || percent == 100;
 
     if should_log {
         *last_percent = percent;
