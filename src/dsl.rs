@@ -816,6 +816,11 @@ impl FlatQuery {
         let mut base = FlatQuery::default();
         match filter {
             Filter::Content(value) => {
+                if value.chars().count() < 3 {
+                    return Err(QueryPlanError::Invalid(
+                        "search terms must be at least 3 characters".to_string(),
+                    ));
+                }
                 let predicate = ContentPredicate::Plain(value.clone());
                 if negate {
                     base.excluded_terms.push(predicate);
@@ -891,6 +896,11 @@ impl FlatQuery {
     fn from_term(term: &str, negate: bool) -> Result<Self, QueryPlanError> {
         if term.is_empty() {
             return Err(QueryPlanError::Invalid("empty search term".to_string()));
+        }
+        if term.chars().count() < 3 {
+            return Err(QueryPlanError::Invalid(
+                "search terms must be at least 3 characters".to_string(),
+            ));
         }
         let mut base = FlatQuery::default();
         let predicate = ContentPredicate::Plain(term.to_string());
@@ -1060,6 +1070,15 @@ mod tests {
     fn test_parse_content_filter() {
         let result = parse_query("content:\"hello world\"");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn rejects_short_terms() {
+        let result = TextSearchRequest::from_query_str("ab");
+        assert!(result.is_err());
+
+        let result = TextSearchRequest::from_query_str("content:ab");
+        assert!(result.is_err());
     }
 
     #[test]

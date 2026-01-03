@@ -30,6 +30,561 @@ impl PostgresDb {
     }
 }
 
+fn push_content_predicate(
+    qb: &mut QueryBuilder<'_, Postgres>,
+    predicate: &ContentPredicate,
+    case_mode: CaseSensitivity,
+    column: &str,
+) {
+    let (like_op, regex_op) = match case_mode {
+        CaseSensitivity::Yes => (" LIKE ", " ~ "),
+        _ => (" ILIKE ", " ~* "),
+    };
+
+    match predicate {
+        ContentPredicate::Plain(value) => {
+            let escaped = escape_sql_like_literal(value);
+            qb.push(column);
+            qb.push(like_op);
+            qb.push("'%' || ");
+            qb.push_bind(escaped);
+            qb.push(" || '%' ESCAPE '\\'");
+        }
+        ContentPredicate::Regex(pattern) => {
+            qb.push(column);
+            qb.push(regex_op);
+            qb.push_bind(pattern.clone());
+        }
+    }
+}
+
+fn push_content_condition(
+    qb: &mut QueryBuilder<'_, Postgres>,
+    predicate: &ContentPredicate,
+    case_mode: CaseSensitivity,
+    negate: bool,
+) {
+    qb.push(" AND ");
+    if negate {
+        qb.push("NOT (");
+    } else {
+        qb.push("(");
+    }
+
+    push_content_predicate(qb, predicate, case_mode, "c.text_content");
+
+    qb.push(")");
+}
+
+fn has_uppercase(value: &str) -> bool {
+    value.chars().any(|ch| ch.is_ascii_uppercase())
+}
+
+fn resolve_case(plan: &TextSearchPlan) -> CaseSensitivity {
+    match plan.case_sensitivity {
+        Some(CaseSensitivity::Yes) => CaseSensitivity::Yes,
+        Some(CaseSensitivity::No) => CaseSensitivity::No,
+        Some(CaseSensitivity::Auto) => {
+            let any_upper = plan
+                .required_terms
+                .iter()
+                .filter_map(|term| match term {
+                    ContentPredicate::Plain(value) => Some(value),
+                    _ => None,
+                })
+                .any(|value| has_uppercase(value));
+            if any_upper {
+                CaseSensitivity::Yes
+            } else {
+                CaseSensitivity::No
+            }
+        }
+        None => CaseSensitivity::No,
+    }
+}
+
+fn push_search_ctes<'a>(
+    qb: &mut QueryBuilder<'a, Postgres>,
+    request: &'a TextSearchRequest,
+    plan_row_limit: i64,
+    fetch_limit: i64,
+    file_limit: i64,
+    needs_live_branch_filter: bool,
+    symbol_terms: &'a [String],
+) {
+    qb.push("WITH ");
+
+    if needs_live_branch_filter {
+        qb.push(
+            "
+                live_repos AS (
+                    SELECT DISTINCT repository
+                    FROM repo_live_branches
+                    UNION
+                    SELECT DISTINCT repository
+                    FROM branches
+                ),
+                live_commits AS (
+                    SELECT DISTINCT b.repository, b.commit_sha
+                    FROM repo_live_branches lb
+                    JOIN branches b
+                      ON b.repository = lb.repository
+                     AND b.branch = lb.branch
+                    UNION
+                    SELECT DISTINCT b.repository, b.commit_sha
+                    FROM branches b
+                    WHERE NOT EXISTS (
+                        SELECT 1
+                        FROM repo_live_branches lb
+                        WHERE lb.repository = b.repository
+                    )
+                ),",
+        );
+    }
+
+    qb.push("plan_results AS (");
+
+    for (idx, plan) in request.plans.iter().enumerate() {
+        if idx > 0 {
+            qb.push(" UNION ALL ");
+        }
+
+        let case_mode = resolve_case(plan);
+        let highlight_case_sensitive = matches!(case_mode, CaseSensitivity::Yes);
+
+        qb.push("(");
+        qb.push(
+            "
+                SELECT
+                    files.id AS file_id,
+                    files.content_hash,
+                    cbc.chunk_line_count AS line_count,
+                    cbc.chunk_index,
+                ",
+        );
+        qb.push_bind(&plan.highlight_pattern);
+        qb.push(
+            " AS highlight_pattern,
+                ",
+        );
+        qb.push_bind(highlight_case_sensitive);
+        qb.push(
+            " AS highlight_case_sensitive,
+                ",
+        );
+        qb.push_bind(plan.include_historical);
+        qb.push(
+            " AS include_historical
+                FROM (
+                    SELECT
+                        c.chunk_hash
+                    FROM
+                        chunks c
+                    WHERE
+                        TRUE",
+        );
+
+        if plan.required_terms.len() == 1 {
+            for predicate in &plan.required_terms {
+                push_content_condition(qb, predicate, case_mode, false);
+            }
+        } else if !plan.required_terms.is_empty() {
+            qb.push(" AND (");
+            for (idx, predicate) in plan.required_terms.iter().enumerate() {
+                if idx > 0 {
+                    qb.push(" OR ");
+                }
+                qb.push("(");
+                push_content_predicate(qb, predicate, case_mode, "c.text_content");
+                qb.push(")");
+            }
+            qb.push(")");
+        }
+
+        for predicate in &plan.excluded_terms {
+            push_content_condition(qb, predicate, case_mode, true);
+        }
+
+        qb.push(
+            "
+                    LIMIT ",
+        );
+        qb.push_bind(plan_row_limit);
+        qb.push(
+            "
+                ) chunk_hits
+                JOIN content_blob_chunks cbc ON cbc.chunk_hash = chunk_hits.chunk_hash
+                JOIN files ON files.content_hash = cbc.content_hash",
+        );
+
+        let needs_live_branch_filter_for_plan =
+            plan.branches.is_empty() && !plan.include_historical;
+        if needs_live_branch_filter_for_plan {
+            qb.push(
+                " LEFT JOIN live_repos lr ON lr.repository = files.repository
+                      LEFT JOIN live_commits lc
+                        ON lc.repository = files.repository
+                       AND lc.commit_sha = files.commit_sha",
+            );
+        }
+
+        let needs_language = !plan.langs.is_empty() || !plan.excluded_langs.is_empty();
+        if needs_language {
+            qb.push(" JOIN content_blobs cb ON cb.hash = files.content_hash");
+        }
+
+        qb.push(" WHERE TRUE");
+
+        if !plan.repos.is_empty() {
+            qb.push(" AND files.repository = ANY(");
+            qb.push_bind(&plan.repos);
+            qb.push(")");
+        }
+
+        if !plan.excluded_repos.is_empty() {
+            qb.push(" AND NOT (files.repository = ANY(");
+            qb.push_bind(&plan.excluded_repos);
+            qb.push("))");
+        }
+
+        if !plan.file_globs.is_empty() {
+            for pattern in &plan.file_globs {
+                qb.push(" AND files.file_path ILIKE ");
+                qb.push_bind(pattern);
+                qb.push(" ESCAPE '\\'");
+            }
+        }
+
+        if !plan.excluded_file_globs.is_empty() {
+            for pattern in &plan.excluded_file_globs {
+                qb.push(" AND files.file_path NOT ILIKE ");
+                qb.push_bind(pattern);
+                qb.push(" ESCAPE '\\'");
+            }
+        }
+
+        if !plan.langs.is_empty() {
+            qb.push(" AND cb.language = ANY(");
+            qb.push_bind(&plan.langs);
+            qb.push(")");
+        }
+
+        if !plan.excluded_langs.is_empty() {
+            qb.push(" AND NOT (cb.language = ANY(");
+            qb.push_bind(&plan.excluded_langs);
+            qb.push("))");
+        }
+
+        if plan.required_terms.len() > 1 {
+            qb.push(" AND files.content_hash IN (");
+            for (idx, predicate) in plan.required_terms.iter().enumerate() {
+                if idx > 0 {
+                    qb.push(" INTERSECT ");
+                }
+                qb.push(
+                    "SELECT DISTINCT cbc_req.content_hash \
+                             FROM content_blob_chunks cbc_req \
+                             JOIN chunks c_req ON c_req.chunk_hash = cbc_req.chunk_hash \
+                             WHERE ",
+                );
+                push_content_predicate(qb, predicate, case_mode, "c_req.text_content");
+            }
+            qb.push(")");
+        }
+
+        if !plan.branches.is_empty() {
+            qb.push(" AND (files.commit_sha = ANY(");
+            qb.push_bind(&plan.branches);
+            qb.push(") OR EXISTS (SELECT 1 FROM branches b WHERE b.repository = files.repository AND b.commit_sha = files.commit_sha AND b.branch = ANY(");
+            qb.push_bind(&plan.branches);
+            qb.push(")))");
+        }
+
+        if !plan.excluded_branches.is_empty() {
+            qb.push(" AND NOT (files.commit_sha = ANY(");
+            qb.push_bind(&plan.excluded_branches);
+            qb.push(") OR EXISTS (SELECT 1 FROM branches b WHERE b.repository = files.repository AND b.commit_sha = files.commit_sha AND b.branch = ANY(");
+            qb.push_bind(&plan.excluded_branches);
+            qb.push(")))");
+        }
+        if needs_live_branch_filter_for_plan {
+            qb.push(" AND (lr.repository IS NULL OR lc.commit_sha IS NOT NULL)");
+        }
+        qb.push(
+            "
+            )",
+        );
+    }
+
+    qb.push(
+        "),
+            limited_plan AS (
+                SELECT
+                    pr.file_id,
+                    pr.content_hash,
+                    pr.line_count,
+                    pr.chunk_index,
+                    pr.highlight_pattern,
+                    pr.highlight_case_sensitive,
+                    pr.include_historical
+                FROM
+                    plan_results pr
+                ORDER BY
+                    pr.file_id,
+                    pr.chunk_index
+                LIMIT ",
+    );
+    qb.push_bind(fetch_limit);
+    qb.push(
+        "
+            ),
+            scored_files AS (
+                SELECT
+                    file_id,
+                    content_hash,
+                    include_historical,
+                    SUM(
+                        CASE
+                            WHEN highlight_case_sensitive THEN 2
+                            ELSE 1
+                        END
+                    ) AS score,
+                    MIN(chunk_index) AS min_chunk_index
+                FROM limited_plan
+                GROUP BY file_id, content_hash, include_historical
+            ),",
+    );
+
+    if symbol_terms.is_empty() {
+        qb.push(
+            "
+            top_files AS (
+                SELECT
+                    sf.file_id,
+                    sf.content_hash,
+                    sf.include_historical,
+                    sf.score::FLOAT8 AS total_score
+                FROM scored_files sf
+                ORDER BY sf.score DESC, sf.min_chunk_index ASC
+                LIMIT ",
+        );
+        qb.push_bind(file_limit);
+    } else {
+        qb.push(
+            "
+            symbol_term_matches AS MATERIALIZED (
+                SELECT
+                    term,
+                    us.name_lc
+                FROM UNNEST(",
+        );
+        qb.push_bind(symbol_terms);
+        qb.push(
+            ") AS term
+                JOIN unique_symbols us
+                  ON us.name_lc LIKE '%' || term || '%'
+            ),
+            symbol_scores AS (
+                SELECT
+                    sf.file_id,
+                    sf.content_hash,
+                    MAX(
+                        CASE
+                            -- Strongly favor exact symbol matches, then namespace-prefixed, then loose substring
+                            WHEN stm.name_lc = stm.term THEN 50.0
+                            WHEN stm.name_lc LIKE stm.term || '::%' THEN 25.0
+                            ELSE 1.0 / (1 + ABS(LENGTH(stm.name_lc) - LENGTH(stm.term)))
+                        END
+                    ) AS score
+                FROM symbol_term_matches stm
+                JOIN symbols s ON s.name_lc = stm.name_lc
+                JOIN scored_files sf ON sf.content_hash = s.content_hash
+                GROUP BY sf.file_id, sf.content_hash
+            ),
+            top_files AS (
+                SELECT
+                    sf.file_id,
+                    sf.content_hash,
+                    sf.include_historical,
+                    (sf.score::FLOAT8 + COALESCE(ss.score, 0)::FLOAT8) AS total_score
+                FROM scored_files sf
+                LEFT JOIN symbol_scores ss
+                  ON ss.file_id = sf.file_id
+                 AND ss.content_hash = sf.content_hash
+                LIMIT ",
+        );
+        qb.push_bind(file_limit);
+    }
+
+    qb.push(
+        "
+            ),
+            ranked_top AS (
+                SELECT
+                    f.id AS file_id,
+                    f.repository,
+                    f.commit_sha,
+                    f.file_path,
+                    lp.content_hash,
+                    MIN(lp.chunk_index) AS chunk_index,
+                    tf.total_score,
+                    tf.include_historical
+                FROM limited_plan lp
+                JOIN top_files tf
+                  ON lp.file_id = tf.file_id
+                 AND lp.content_hash = tf.content_hash
+                 AND lp.include_historical = tf.include_historical
+                JOIN files f
+                  ON f.id = lp.file_id
+                GROUP BY
+                    f.id,
+                    f.repository,
+                    f.commit_sha,
+                    f.file_path,
+                    lp.content_hash,
+                    tf.total_score,
+                    tf.include_historical
+            ),
+            ranked_keys AS (
+                SELECT DISTINCT repository, commit_sha
+                FROM ranked_top
+            ),
+            branch_match AS (
+                SELECT
+                    bs.repository,
+                    bs.commit_sha,
+                    array_agg(DISTINCT bs.branch) AS branches,
+                    MAX(bs.indexed_at) AS snapshot_indexed_at
+                FROM branch_snapshots bs
+                JOIN ranked_keys rk
+                  ON rk.repository = bs.repository
+                 AND rk.commit_sha = bs.commit_sha
+                GROUP BY bs.repository, bs.commit_sha
+            ),
+            branch_fallback AS (
+                SELECT
+                    b.repository,
+                    b.commit_sha,
+                    array_agg(DISTINCT b.branch) AS fallback_branches
+                FROM branches b
+                JOIN ranked_keys rk
+                  ON rk.repository = b.repository
+                 AND rk.commit_sha = b.commit_sha
+                GROUP BY b.repository, b.commit_sha
+            ),
+            live_branch_match AS (
+                SELECT
+                    rk.repository,
+                    rk.commit_sha,
+                    array_agg(lb.branch) AS live_branches
+                FROM ranked_keys rk
+                JOIN repo_live_branches lb
+                  ON lb.repository = rk.repository
+                JOIN branch_snapshots bs
+                  ON bs.repository = lb.repository
+                 AND bs.branch = lb.branch
+                 AND bs.commit_sha = rk.commit_sha
+                GROUP BY rk.repository, rk.commit_sha
+            ),
+            live_branch_fallback AS (
+                SELECT
+                    rk.repository,
+                    rk.commit_sha,
+                    array_agg(lb.branch) AS live_branches
+                FROM ranked_keys rk
+                JOIN repo_live_branches lb
+                  ON lb.repository = rk.repository
+                JOIN branches b
+                  ON b.repository = lb.repository
+                 AND b.branch = lb.branch
+                 AND b.commit_sha = rk.commit_sha
+                GROUP BY rk.repository, rk.commit_sha
+            ),
+            live_repo AS (
+                SELECT
+                    rk.repository,
+                    array_agg(lb.branch) AS repo_live_branches
+                FROM ranked_keys rk
+                LEFT JOIN repo_live_branches lb
+                  ON lb.repository = rk.repository
+                GROUP BY rk.repository
+            ),
+            filtered_ranked AS (
+                SELECT
+                    rt.file_id,
+                    rt.repository,
+                    rt.commit_sha,
+                    rt.file_path,
+                    rt.content_hash,
+                    rt.chunk_index,
+                    rt.total_score,
+                    rt.include_historical,
+                    COALESCE(bm.branches, bf.fallback_branches, ARRAY[]::TEXT[]) AS branches,
+                    COALESCE(
+                        lbm.live_branches,
+                        lbf.live_branches,
+                        ARRAY[]::TEXT[]
+                    ) AS live_branches,
+                    bm.snapshot_indexed_at AS snapshot_indexed_at,
+                    CASE
+                        WHEN lr.repo_live_branches IS NULL THEN FALSE
+                        WHEN COALESCE(
+                                array_length(
+                                    COALESCE(
+                                        lbm.live_branches,
+                                        lbf.live_branches,
+                                        ARRAY[]::TEXT[]
+                                    ),
+                                    1
+                                ),
+                                0
+                            ) = 0 THEN TRUE
+                        ELSE FALSE
+                        END AS is_historical
+                FROM ranked_top rt
+                LEFT JOIN branch_match bm
+                  ON bm.repository = rt.repository
+                 AND bm.commit_sha = rt.commit_sha
+                LEFT JOIN branch_fallback bf
+                  ON bf.repository = rt.repository
+                 AND bf.commit_sha = rt.commit_sha
+                LEFT JOIN live_branch_match lbm
+                  ON lbm.repository = rt.repository
+                 AND lbm.commit_sha = rt.commit_sha
+                LEFT JOIN live_branch_fallback lbf
+                  ON lbf.repository = rt.repository
+                 AND lbf.commit_sha = rt.commit_sha
+                LEFT JOIN live_repo lr
+                  ON lr.repository = rt.repository
+                WHERE
+                    rt.include_historical
+                    OR lr.repo_live_branches IS NULL
+                        OR COALESCE(
+                            array_length(
+                                COALESCE(
+                                    lbm.live_branches,
+                                    lbf.live_branches,
+                                    ARRAY[]::TEXT[]
+                                ),
+                                1
+                            ),
+                            0
+                        ) > 0
+                        OR COALESCE(
+                            array_length(
+                                COALESCE(
+                                    bm.branches,
+                                    bf.fallback_branches,
+                                    ARRAY[]::TEXT[]
+                                ),
+                                1
+                            ),
+                            0
+                        ) > 0
+            )",
+    );
+}
+
 #[async_trait]
 impl Database for PostgresDb {
     async fn get_all_repositories(&self) -> Result<Vec<RepoSummary>, DbError> {
@@ -1059,70 +1614,6 @@ ORDER BY idx
     }
 
     async fn text_search(&self, request: &TextSearchRequest) -> Result<SearchResultsPage, DbError> {
-        fn push_content_condition(
-            qb: &mut QueryBuilder<'_, Postgres>,
-            predicate: &ContentPredicate,
-            case_mode: CaseSensitivity,
-            negate: bool,
-        ) {
-            let (like_op, regex_op) = match case_mode {
-                CaseSensitivity::Yes => (" LIKE ", " ~ "),
-                _ => (" ILIKE ", " ~* "),
-            };
-
-            qb.push(" AND ");
-            if negate {
-                qb.push("NOT (");
-            } else {
-                qb.push("(");
-            }
-
-            match predicate {
-                ContentPredicate::Plain(value) => {
-                    let escaped = escape_sql_like_literal(value);
-                    qb.push("c.text_content");
-                    qb.push(like_op);
-                    qb.push("'%' || ");
-                    qb.push_bind(escaped);
-                    qb.push(" || '%' ESCAPE '\\'");
-                }
-                ContentPredicate::Regex(pattern) => {
-                    qb.push("c.text_content");
-                    qb.push(regex_op);
-                    qb.push_bind(pattern.clone());
-                }
-            }
-
-            qb.push(")");
-        }
-
-        fn has_uppercase(value: &str) -> bool {
-            value.chars().any(|ch| ch.is_ascii_uppercase())
-        }
-
-        fn resolve_case(plan: &TextSearchPlan) -> CaseSensitivity {
-            match plan.case_sensitivity {
-                Some(CaseSensitivity::Yes) => CaseSensitivity::Yes,
-                Some(CaseSensitivity::No) => CaseSensitivity::No,
-                Some(CaseSensitivity::Auto) => {
-                    let any_upper = plan
-                        .required_terms
-                        .iter()
-                        .filter_map(|term| match term {
-                            ContentPredicate::Plain(value) => Some(value),
-                            _ => None,
-                        })
-                        .any(|value| has_uppercase(value));
-                    if any_upper {
-                        CaseSensitivity::Yes
-                    } else {
-                        CaseSensitivity::No
-                    }
-                }
-                None => CaseSensitivity::No,
-            }
-        }
-
         if request.plans.is_empty() {
             return Ok(SearchResultsPage::empty(
                 request.original_query.clone(),
@@ -1155,460 +1646,6 @@ ORDER BY idx
             .map(|t| t.to_lowercase())
             .collect();
 
-        fn push_search_ctes<'a>(
-            qb: &mut QueryBuilder<'a, Postgres>,
-            request: &'a TextSearchRequest,
-            plan_row_limit: i64,
-            fetch_limit: i64,
-            file_limit: i64,
-            needs_live_branch_filter: bool,
-            symbol_terms: &'a [String],
-            resolve_case: &dyn Fn(&TextSearchPlan) -> CaseSensitivity,
-            push_content_condition: &dyn Fn(
-                &mut QueryBuilder<'_, Postgres>,
-                &ContentPredicate,
-                CaseSensitivity,
-                bool,
-            ),
-        ) {
-            qb.push("WITH ");
-
-            if needs_live_branch_filter {
-                qb.push(
-                    "
-                live_repos AS (
-                    SELECT DISTINCT repository
-                    FROM repo_live_branches
-                ),
-                live_commits AS (
-                    SELECT DISTINCT bs.repository, bs.commit_sha
-                    FROM repo_live_branches lb
-                    JOIN branch_snapshots bs
-                      ON bs.repository = lb.repository
-                     AND bs.branch = lb.branch
-                    UNION
-                    SELECT DISTINCT b.repository, b.commit_sha
-                    FROM repo_live_branches lb
-                    JOIN branches b
-                      ON b.repository = lb.repository
-                     AND b.branch = lb.branch
-                ),",
-                );
-            }
-
-            qb.push("plan_results AS (");
-
-            for (idx, plan) in request.plans.iter().enumerate() {
-                if idx > 0 {
-                    qb.push(" UNION ALL ");
-                }
-
-                let case_mode = resolve_case(plan);
-                let highlight_case_sensitive = matches!(case_mode, CaseSensitivity::Yes);
-
-                qb.push("(");
-                qb.push(
-                    "
-                SELECT
-                    files.id AS file_id,
-                    files.content_hash,
-                    cbc.chunk_line_count AS line_count,
-                    cbc.chunk_index,
-                ",
-                );
-                qb.push_bind(&plan.highlight_pattern);
-                qb.push(
-                    " AS highlight_pattern,
-                ",
-                );
-                qb.push_bind(highlight_case_sensitive);
-                qb.push(
-                    " AS highlight_case_sensitive,
-                ",
-                );
-                qb.push_bind(plan.include_historical);
-                qb.push(
-                    " AS include_historical
-                FROM (
-                    SELECT
-                        c.chunk_hash
-                    FROM
-                        chunks c
-                    WHERE
-                        TRUE",
-                );
-
-                for predicate in &plan.required_terms {
-                    push_content_condition(qb, predicate, case_mode, false);
-                }
-
-                for predicate in &plan.excluded_terms {
-                    push_content_condition(qb, predicate, case_mode, true);
-                }
-
-                qb.push(
-                    "
-                    LIMIT ",
-                );
-                qb.push_bind(plan_row_limit);
-                qb.push(
-                    "
-                ) chunk_hits
-                JOIN content_blob_chunks cbc ON cbc.chunk_hash = chunk_hits.chunk_hash
-                JOIN files ON files.content_hash = cbc.content_hash",
-                );
-
-                let needs_live_branch_filter_for_plan =
-                    plan.branches.is_empty() && !plan.include_historical;
-                if needs_live_branch_filter_for_plan {
-                    qb.push(
-                        " LEFT JOIN live_repos lr ON lr.repository = files.repository
-                      LEFT JOIN live_commits lc
-                        ON lc.repository = files.repository
-                       AND lc.commit_sha = files.commit_sha",
-                    );
-                }
-
-                let needs_language = !plan.langs.is_empty() || !plan.excluded_langs.is_empty();
-                if needs_language {
-                    qb.push(" JOIN content_blobs cb ON cb.hash = files.content_hash");
-                }
-
-                qb.push(" WHERE TRUE");
-
-                if !plan.repos.is_empty() {
-                    qb.push(" AND files.repository = ANY(");
-                    qb.push_bind(&plan.repos);
-                    qb.push(")");
-                }
-
-                if !plan.excluded_repos.is_empty() {
-                    qb.push(" AND NOT (files.repository = ANY(");
-                    qb.push_bind(&plan.excluded_repos);
-                    qb.push("))");
-                }
-
-                if !plan.file_globs.is_empty() {
-                    for pattern in &plan.file_globs {
-                        qb.push(" AND files.file_path ILIKE ");
-                        qb.push_bind(pattern);
-                        qb.push(" ESCAPE '\\'");
-                    }
-                }
-
-                if !plan.excluded_file_globs.is_empty() {
-                    for pattern in &plan.excluded_file_globs {
-                        qb.push(" AND files.file_path NOT ILIKE ");
-                        qb.push_bind(pattern);
-                        qb.push(" ESCAPE '\\'");
-                    }
-                }
-
-                if !plan.langs.is_empty() {
-                    qb.push(" AND cb.language = ANY(");
-                    qb.push_bind(&plan.langs);
-                    qb.push(")");
-                }
-
-                if !plan.excluded_langs.is_empty() {
-                    qb.push(" AND NOT (cb.language = ANY(");
-                    qb.push_bind(&plan.excluded_langs);
-                    qb.push("))");
-                }
-
-                if !plan.branches.is_empty() {
-                    qb.push(" AND (files.commit_sha = ANY(");
-                    qb.push_bind(&plan.branches);
-                    qb.push(") OR EXISTS (SELECT 1 FROM branches b WHERE b.repository = files.repository AND b.commit_sha = files.commit_sha AND b.branch = ANY(");
-                    qb.push_bind(&plan.branches);
-                    qb.push(")))");
-                }
-
-                if !plan.excluded_branches.is_empty() {
-                    qb.push(" AND NOT (files.commit_sha = ANY(");
-                    qb.push_bind(&plan.excluded_branches);
-                    qb.push(") OR EXISTS (SELECT 1 FROM branches b WHERE b.repository = files.repository AND b.commit_sha = files.commit_sha AND b.branch = ANY(");
-                    qb.push_bind(&plan.excluded_branches);
-                    qb.push(")))");
-                }
-                if needs_live_branch_filter_for_plan {
-                    qb.push(" AND (lr.repository IS NULL OR lc.commit_sha IS NOT NULL)");
-                }
-                qb.push(
-                    "
-            )",
-                );
-            }
-
-            qb.push(
-                "),
-            limited_plan AS (
-                SELECT
-                    pr.file_id,
-                    pr.content_hash,
-                    pr.line_count,
-                    pr.chunk_index,
-                    pr.highlight_pattern,
-                    pr.highlight_case_sensitive,
-                    pr.include_historical
-                FROM
-                    plan_results pr
-                ORDER BY
-                    pr.file_id,
-                    pr.chunk_index
-                LIMIT ",
-            );
-            qb.push_bind(fetch_limit);
-            qb.push(
-                "
-            ),
-            scored_files AS (
-                SELECT
-                    file_id,
-                    content_hash,
-                    include_historical,
-                    SUM(
-                        CASE
-                            WHEN highlight_case_sensitive THEN 2
-                            ELSE 1
-                        END
-                    ) AS score,
-                    MIN(chunk_index) AS min_chunk_index
-                FROM limited_plan
-                GROUP BY file_id, content_hash, include_historical
-            ),",
-            );
-
-            if symbol_terms.is_empty() {
-                qb.push(
-                    "
-            top_files AS (
-                SELECT
-                    sf.file_id,
-                    sf.content_hash,
-                    sf.include_historical,
-                    sf.score::FLOAT8 AS total_score
-                FROM scored_files sf
-                ORDER BY sf.score DESC, sf.min_chunk_index ASC
-                LIMIT ",
-                );
-                qb.push_bind(file_limit);
-            } else {
-                qb.push(
-                    "
-            symbol_term_matches AS MATERIALIZED (
-                SELECT
-                    term,
-                    us.name_lc
-                FROM UNNEST(",
-                );
-                qb.push_bind(symbol_terms);
-                qb.push(
-                    ") AS term
-                JOIN unique_symbols us
-                  ON us.name_lc LIKE '%' || term || '%'
-            ),
-            symbol_scores AS (
-                SELECT
-                    sf.file_id,
-                    sf.content_hash,
-                    MAX(
-                        CASE
-                            -- Strongly favor exact symbol matches, then namespace-prefixed, then loose substring
-                            WHEN stm.name_lc = stm.term THEN 50.0
-                            WHEN stm.name_lc LIKE stm.term || '::%' THEN 25.0
-                            ELSE 1.0 / (1 + ABS(LENGTH(stm.name_lc) - LENGTH(stm.term)))
-                        END
-                    ) AS score
-                FROM symbol_term_matches stm
-                JOIN symbols s ON s.name_lc = stm.name_lc
-                JOIN scored_files sf ON sf.content_hash = s.content_hash
-                GROUP BY sf.file_id, sf.content_hash
-            ),
-            top_files AS (
-                SELECT
-                    sf.file_id,
-                    sf.content_hash,
-                    sf.include_historical,
-                    (sf.score::FLOAT8 + COALESCE(ss.score, 0)::FLOAT8) AS total_score
-                FROM scored_files sf
-                LEFT JOIN symbol_scores ss
-                  ON ss.file_id = sf.file_id
-                 AND ss.content_hash = sf.content_hash
-                LIMIT ",
-                );
-                qb.push_bind(file_limit);
-            }
-
-            qb.push(
-                "
-            ),
-            ranked_top AS (
-                SELECT
-                    f.id AS file_id,
-                    f.repository,
-                    f.commit_sha,
-                    f.file_path,
-                    lp.content_hash,
-                    MIN(lp.chunk_index) AS chunk_index,
-                    tf.total_score,
-                    tf.include_historical
-                FROM limited_plan lp
-                JOIN top_files tf
-                  ON lp.file_id = tf.file_id
-                 AND lp.content_hash = tf.content_hash
-                 AND lp.include_historical = tf.include_historical
-                JOIN files f
-                  ON f.id = lp.file_id
-                GROUP BY
-                    f.id,
-                    f.repository,
-                    f.commit_sha,
-                    f.file_path,
-                    lp.content_hash,
-                    tf.total_score,
-                    tf.include_historical
-            ),
-            ranked_keys AS (
-                SELECT DISTINCT repository, commit_sha
-                FROM ranked_top
-            ),
-            branch_match AS (
-                SELECT
-                    bs.repository,
-                    bs.commit_sha,
-                    array_agg(DISTINCT bs.branch) AS branches,
-                    MAX(bs.indexed_at) AS snapshot_indexed_at
-                FROM branch_snapshots bs
-                JOIN ranked_keys rk
-                  ON rk.repository = bs.repository
-                 AND rk.commit_sha = bs.commit_sha
-                GROUP BY bs.repository, bs.commit_sha
-            ),
-            branch_fallback AS (
-                SELECT
-                    b.repository,
-                    b.commit_sha,
-                    array_agg(DISTINCT b.branch) AS fallback_branches
-                FROM branches b
-                JOIN ranked_keys rk
-                  ON rk.repository = b.repository
-                 AND rk.commit_sha = b.commit_sha
-                GROUP BY b.repository, b.commit_sha
-            ),
-            live_branch_match AS (
-                SELECT
-                    rk.repository,
-                    rk.commit_sha,
-                    array_agg(lb.branch) AS live_branches
-                FROM ranked_keys rk
-                JOIN repo_live_branches lb
-                  ON lb.repository = rk.repository
-                JOIN branch_snapshots bs
-                  ON bs.repository = lb.repository
-                 AND bs.branch = lb.branch
-                 AND bs.commit_sha = rk.commit_sha
-                GROUP BY rk.repository, rk.commit_sha
-            ),
-            live_branch_fallback AS (
-                SELECT
-                    rk.repository,
-                    rk.commit_sha,
-                    array_agg(lb.branch) AS live_branches
-                FROM ranked_keys rk
-                JOIN repo_live_branches lb
-                  ON lb.repository = rk.repository
-                JOIN branches b
-                  ON b.repository = lb.repository
-                 AND b.branch = lb.branch
-                 AND b.commit_sha = rk.commit_sha
-                GROUP BY rk.repository, rk.commit_sha
-            ),
-            live_repo AS (
-                SELECT
-                    rk.repository,
-                    array_agg(lb.branch) AS repo_live_branches
-                FROM ranked_keys rk
-                LEFT JOIN repo_live_branches lb
-                  ON lb.repository = rk.repository
-                GROUP BY rk.repository
-            ),
-            filtered_ranked AS (
-                SELECT
-                    rt.file_id,
-                    rt.repository,
-                    rt.commit_sha,
-                    rt.file_path,
-                    rt.content_hash,
-                    rt.chunk_index,
-                    rt.total_score,
-                    rt.include_historical,
-                    COALESCE(bm.branches, bf.fallback_branches, ARRAY[]::TEXT[]) AS branches,
-                    COALESCE(
-                        lbm.live_branches,
-                        lbf.live_branches,
-                        ARRAY[]::TEXT[]
-                    ) AS live_branches,
-                    bm.snapshot_indexed_at AS snapshot_indexed_at,
-                    CASE
-                        WHEN lr.repo_live_branches IS NULL THEN FALSE
-                        WHEN COALESCE(
-                                array_length(
-                                    COALESCE(
-                                        lbm.live_branches,
-                                        lbf.live_branches,
-                                        ARRAY[]::TEXT[]
-                                    ),
-                                    1
-                                ),
-                                0
-                            ) = 0 THEN TRUE
-                        ELSE FALSE
-                        END AS is_historical
-                FROM ranked_top rt
-                LEFT JOIN branch_match bm
-                  ON bm.repository = rt.repository
-                 AND bm.commit_sha = rt.commit_sha
-                LEFT JOIN branch_fallback bf
-                  ON bf.repository = rt.repository
-                 AND bf.commit_sha = rt.commit_sha
-                LEFT JOIN live_branch_match lbm
-                  ON lbm.repository = rt.repository
-                 AND lbm.commit_sha = rt.commit_sha
-                LEFT JOIN live_branch_fallback lbf
-                  ON lbf.repository = rt.repository
-                 AND lbf.commit_sha = rt.commit_sha
-                LEFT JOIN live_repo lr
-                  ON lr.repository = rt.repository
-                WHERE
-                    rt.include_historical
-                    OR lr.repo_live_branches IS NULL
-                        OR COALESCE(
-                            array_length(
-                                COALESCE(
-                                    lbm.live_branches,
-                                    lbf.live_branches,
-                                    ARRAY[]::TEXT[]
-                                ),
-                                1
-                            ),
-                            0
-                        ) > 0
-                        OR COALESCE(
-                            array_length(
-                                COALESCE(
-                                    bm.branches,
-                                    bf.fallback_branches,
-                                    ARRAY[]::TEXT[]
-                                ),
-                                1
-                            ),
-                            0
-                        ) > 0
-            )",
-            );
-        }
-
         let explain_requested = std::env::var("POINTER_EXPLAIN_SEARCH_SQL").is_ok();
 
         let mut phase1_qb = QueryBuilder::new("");
@@ -1620,8 +1657,6 @@ ORDER BY idx
             file_limit,
             needs_live_branch_filter,
             &symbol_terms,
-            &resolve_case,
-            &push_content_condition,
         );
         phase1_qb.push(
             "
@@ -1712,8 +1747,6 @@ ORDER BY idx
                 file_limit,
                 needs_live_branch_filter,
                 &symbol_terms,
-                &resolve_case,
-                &push_content_condition,
             );
             phase2_qb.push(
                 ",
@@ -2880,6 +2913,44 @@ fn build_snippet_from_map(
 mod tests {
     use super::*;
 
+    fn build_phase1_sql(request: &TextSearchRequest) -> String {
+        let page_index = u64::from(request.page);
+        let page_size = u64::from(request.page_size.max(1));
+        let sample_factor = u64::from(FILE_SAMPLE_FACTOR.max(1));
+        let base_limit = page_index
+            .saturating_add(1)
+            .saturating_mul(page_size)
+            .saturating_mul(sample_factor);
+        let minimum = page_size.saturating_mul(sample_factor);
+        let fetch_limit_u64 = base_limit.max(minimum).saturating_add(1);
+        let mut fetch_limit = fetch_limit_u64.min(i64::MAX as u64) as i64;
+        fetch_limit = fetch_limit.min(5000);
+        let file_limit = fetch_limit.min(25000);
+        let plan_row_limit: i64 = 5000;
+
+        let needs_live_branch_filter = request
+            .plans
+            .iter()
+            .any(|plan| plan.branches.is_empty() && !plan.include_historical);
+
+        let symbol_terms: Vec<String> = collect_symbol_terms(request)
+            .into_iter()
+            .map(|t| t.to_lowercase())
+            .collect();
+
+        let mut qb = QueryBuilder::new("");
+        push_search_ctes(
+            &mut qb,
+            request,
+            plan_row_limit,
+            fetch_limit,
+            file_limit,
+            needs_live_branch_filter,
+            &symbol_terms,
+        );
+        qb.sql().to_string()
+    }
+
     #[test]
     fn snippet_bounds_use_match_offset() {
         let text = "alpha\n<mark>ip_rcv</mark>\nomega";
@@ -2938,6 +3009,21 @@ mod tests {
         let lines: Vec<&str> = merged_snippet.content_text.split('\n').collect();
         assert_eq!(lines.len(), 5);
         assert_eq!(lines[2], "<mark>hit_b</mark>");
+    }
+
+    #[test]
+    fn multi_term_search_builds_intersect_filter() {
+        let request = TextSearchRequest::from_query_str("polly LinkAllPasses").unwrap();
+        let sql = build_phase1_sql(&request);
+        assert!(sql.contains("files.content_hash IN"));
+        assert!(sql.contains("INTERSECT"));
+    }
+
+    #[test]
+    fn single_term_search_omits_intersect_filter() {
+        let request = TextSearchRequest::from_query_str("polly").unwrap();
+        let sql = build_phase1_sql(&request);
+        assert!(!sql.contains("INTERSECT"));
     }
 }
 

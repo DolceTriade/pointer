@@ -1,5 +1,5 @@
 use crate::db::models::SymbolSuggestion;
-use crate::dsl::{parse_query, tokenize_for_autocomplete};
+use crate::dsl::{TextSearchRequest, parse_query, tokenize_for_autocomplete};
 use crate::services::search_service::{
     autocomplete_branches, autocomplete_files, autocomplete_languages, autocomplete_paths,
     autocomplete_repositories, autocomplete_symbols,
@@ -67,7 +67,7 @@ pub fn SearchBar(
             return None;
         }
 
-        match parse_query(&q) {
+        match TextSearchRequest::from_query_str(&q) {
             Ok(_) => Some(ValidationState {
                 status: ValidationStatus::Valid,
                 message: None,
