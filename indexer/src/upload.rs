@@ -21,6 +21,8 @@ const MANIFEST_SHARD_RECORD_LIMIT: usize = 50_000;
 const MANIFEST_SHARD_BYTE_LIMIT: usize = 4 * 1024 * 1024;
 const UPLOAD_PARALLELISM: usize = 4;
 
+const PROGRESS_STEP_PERCENT: u8 = 10;
+
 #[derive(Debug)]
 struct ManifestShard {
     index: u64,
@@ -155,11 +157,16 @@ fn upload_content_blobs(
     );
     let workers = spawn_workers(rx, worker_func);
 
+    let mut processed = 0usize;
+    let mut last_percent = 0u8;
     loop {
         let batch = stream.next_batch(1000)?;
         if batch.is_empty() {
             break;
         }
+
+        processed = processed.saturating_add(batch.len());
+        maybe_log_progress("content blobs", processed, artifacts.content_blob_count(), &mut last_percent);
 
         tx.send(batch)
             .map_err(|_| anyhow!("content blob upload worker dropped"))?;
@@ -270,6 +277,8 @@ fn upload_unique_chunks(
         Ok(())
     });
     let workers = spawn_workers(rx, worker_func);
+    let mut processed = 0usize;
+    let mut last_percent = 0u8;
     for batch in needed_chunks.chunks(100) {
         let mut chunks = Vec::with_capacity(batch.len());
         for hash in batch {
@@ -281,6 +290,9 @@ fn upload_unique_chunks(
                 text_content,
             });
         }
+
+        processed = processed.saturating_add(chunks.len());
+        maybe_log_progress("unique chunks", processed, needed_chunks.len(), &mut last_percent);
 
         tx.send(chunks)
             .map_err(|_| anyhow!("unique chunk upload worker dropped"))?;
@@ -322,11 +334,16 @@ fn upload_chunk_mappings(
         Ok(())
     });
     let workers = spawn_workers(rx, worker_func);
+    let mut processed = 0usize;
+    let mut last_percent = 0u8;
     loop {
         let batch = stream.next_batch(1000)?;
         if batch.is_empty() {
             break;
         }
+
+        processed = processed.saturating_add(batch.len());
+        maybe_log_progress("chunk mappings", processed, artifacts.chunk_mapping_count(), &mut last_percent);
 
         tx.send(batch)
             .map_err(|_| anyhow!("chunk mapping upload worker dropped"))?;
@@ -351,6 +368,7 @@ fn upload_manifest_shards(
         api_key,
         artifacts.file_pointers_path(),
         "file_pointer",
+        artifacts.file_pointer_count(),
     )?;
 
     if let Some(needed) = needed_hashes {
@@ -361,6 +379,7 @@ fn upload_manifest_shards(
                 api_key,
                 artifacts.symbol_records_path(),
                 "symbol_record",
+                Some(artifacts.symbol_record_count()),
                 |line| {
                     let record: SymbolRecord =
                         serde_json::from_str(line).context("failed to parse symbol record")?;
@@ -377,6 +396,7 @@ fn upload_manifest_shards(
             api_key,
             artifacts.symbol_records_path(),
             "symbol_record",
+            artifacts.symbol_record_count(),
         )?;
     }
 
@@ -386,6 +406,7 @@ fn upload_manifest_shards(
         api_key,
         artifacts.symbol_namespaces_path(),
         "symbol_namespace",
+        artifacts.symbol_namespace_count(),
     )?;
 
     if let Some(needed) = needed_hashes {
@@ -396,6 +417,7 @@ fn upload_manifest_shards(
                 api_key,
                 artifacts.reference_records_path(),
                 "reference_record",
+                Some(artifacts.reference_record_count()),
                 |line| {
                     let record: ReferenceRecord = serde_json::from_str(line)
                         .context("failed to parse reference record")?;
@@ -412,6 +434,7 @@ fn upload_manifest_shards(
             api_key,
             artifacts.reference_records_path(),
             "reference_record",
+            artifacts.reference_record_count(),
         )?;
     }
 
@@ -432,8 +455,17 @@ fn upload_record_store_shards(
     api_key: Option<&str>,
     path: &std::path::Path,
     section: &str,
+    total_records: usize,
 ) -> Result<()> {
-    upload_filtered_record_store_shards(client, endpoints, api_key, path, section, |_| Ok(true))
+    upload_filtered_record_store_shards(
+        client,
+        endpoints,
+        api_key,
+        path,
+        section,
+        Some(total_records),
+        |_| Ok(true),
+    )
 }
 
 fn upload_filtered_record_store_shards<F>(
@@ -442,6 +474,7 @@ fn upload_filtered_record_store_shards<F>(
     api_key: Option<&str>,
     path: &std::path::Path,
     section: &str,
+    total_records: Option<usize>,
     mut should_include: F,
 ) -> Result<()>
 where
@@ -477,6 +510,8 @@ where
     let mut line = String::new();
     let mut shard_index: u64 = 0;
     let mut eof = false;
+    let mut processed_records: usize = 0;
+    let mut last_percent = 0u8;
 
     while !eof {
         let mut shard_data = Vec::with_capacity(MANIFEST_SHARD_BYTE_LIMIT + 1024);
@@ -495,6 +530,11 @@ where
 
             if line.trim().is_empty() {
                 continue;
+            }
+
+            processed_records = processed_records.saturating_add(1);
+            if let Some(total) = total_records {
+                maybe_log_progress(section, processed_records, total, &mut last_percent);
             }
 
             if !should_include(line.trim_end_matches(['\n', '\r']))? {
@@ -677,6 +717,23 @@ where
     drop(receiver);
 
     WorkerGroup { handles }
+}
+
+fn maybe_log_progress(label: &str, processed: usize, total: usize, last_percent: &mut u8) {
+    if total == 0 {
+        return;
+    }
+
+    let mut percent = (processed.saturating_mul(100) / total) as u8;
+    if percent > 100 {
+        percent = 100;
+    }
+    let should_log = percent >= last_percent.saturating_add(PROGRESS_STEP_PERCENT) || percent == 100;
+
+    if should_log {
+        *last_percent = percent;
+        info!(label = label, percent, processed, total, "upload progress");
+    }
 }
 
 #[derive(Serialize)]
