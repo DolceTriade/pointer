@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use tracing::info;
 use zstd::stream::Encoder;
 
-use crate::models::{ChunkMapping, IndexArtifacts, UniqueChunk};
+use crate::models::{ChunkMapping, IndexArtifacts, ReferenceRecord, SymbolRecord, UniqueChunk};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 const MANIFEST_SHARD_RECORD_LIMIT: usize = 50_000;
@@ -28,12 +28,45 @@ struct ManifestShard {
 }
 
 pub fn upload_index(url: &str, api_key: Option<&str>, artifacts: &IndexArtifacts) -> Result<()> {
+    upload_index_with_options(url, api_key, artifacts, &UploadOptions::default())
+}
+
+pub struct UploadOptions {
+    pub incremental_symbols: bool,
+}
+
+impl Default for UploadOptions {
+    fn default() -> Self {
+        Self {
+            incremental_symbols: true,
+        }
+    }
+}
+
+pub fn upload_index_with_options(
+    url: &str,
+    api_key: Option<&str>,
+    artifacts: &IndexArtifacts,
+    options: &UploadOptions,
+) -> Result<()> {
     let client = Client::builder()
         .timeout(REQUEST_TIMEOUT)
         .build()
         .context("failed to build HTTP client")?;
 
     let endpoints = Arc::new(Endpoints::new(url));
+
+    let needed_hashes = if options.incremental_symbols {
+        let content_hashes = collect_content_hashes(artifacts)?;
+        Some(request_needed_content_hashes(
+            &client,
+            &endpoints,
+            api_key,
+            &content_hashes,
+        )?)
+    } else {
+        None
+    };
 
     // 1. Upload all content blob metadata
     upload_content_blobs(&client, &endpoints, api_key, artifacts)?;
@@ -60,7 +93,7 @@ pub fn upload_index(url: &str, api_key: Option<&str>, artifacts: &IndexArtifacts
 
     // 5. Upload manifest shards per section
     info!("uploading manifest shards");
-    upload_manifest_shards(&client, &endpoints, api_key, artifacts)?;
+    upload_manifest_shards(&client, &endpoints, api_key, artifacts, needed_hashes.as_ref())?;
 
     Ok(())
 }
@@ -68,6 +101,7 @@ pub fn upload_index(url: &str, api_key: Option<&str>, artifacts: &IndexArtifacts
 #[derive(Clone)]
 struct Endpoints {
     blobs_upload: String,
+    blobs_need: String,
     chunks_need: String,
     chunks_upload: String,
     mappings_upload: String,
@@ -79,6 +113,7 @@ impl Endpoints {
         let trimmed = base.trim_end_matches('/');
         Self {
             blobs_upload: format!("{}/blobs/upload", trimmed),
+            blobs_need: format!("{}/blobs/need", trimmed),
             chunks_need: format!("{}/chunks/need", trimmed),
             chunks_upload: format!("{}/chunks/upload", trimmed),
             mappings_upload: format!("{}/mappings/upload", trimmed),
@@ -158,6 +193,47 @@ fn request_needed_chunks(
 
     info!(needed = response.missing.len(), "found chunks to upload");
     Ok(response.missing.into_iter().collect())
+}
+
+fn request_needed_content_hashes(
+    client: &Client,
+    endpoints: &Arc<Endpoints>,
+    api_key: Option<&str>,
+    content_hashes: &[String],
+) -> Result<HashSet<String>> {
+    if content_hashes.is_empty() {
+        return Ok(HashSet::new());
+    }
+
+    info!(
+        count = content_hashes.len(),
+        "checking for needed content hashes"
+    );
+
+    let request = ContentNeedRequest {
+        hashes: content_hashes.to_vec(),
+    };
+
+    let response: ContentNeedResponse =
+        post_json(client, &endpoints.blobs_need, api_key, &request)?
+            .json()
+            .context("failed to deserialize content need response")?;
+
+    info!(needed = response.missing.len(), "found content hashes to upload");
+    Ok(response.missing.into_iter().collect())
+}
+
+fn collect_content_hashes(artifacts: &IndexArtifacts) -> Result<Vec<String>> {
+    let mut stream = artifacts.content_blobs_stream()?;
+    let mut hashes = Vec::new();
+    loop {
+        let batch = stream.next_batch(1000)?;
+        if batch.is_empty() {
+            break;
+        }
+        hashes.extend(batch.into_iter().map(|blob| blob.hash));
+    }
+    Ok(hashes)
 }
 
 fn upload_unique_chunks(
@@ -267,6 +343,7 @@ fn upload_manifest_shards(
     endpoints: &Arc<Endpoints>,
     api_key: Option<&str>,
     artifacts: &IndexArtifacts,
+    needed_hashes: Option<&HashSet<String>>,
 ) -> Result<()> {
     upload_record_store_shards(
         client,
@@ -276,13 +353,32 @@ fn upload_manifest_shards(
         "file_pointer",
     )?;
 
-    upload_record_store_shards(
-        client,
-        endpoints,
-        api_key,
-        artifacts.symbol_records_path(),
-        "symbol_record",
-    )?;
+    if let Some(needed) = needed_hashes {
+        if !needed.is_empty() {
+            upload_filtered_record_store_shards(
+                client,
+                endpoints,
+                api_key,
+                artifacts.symbol_records_path(),
+                "symbol_record",
+                |line| {
+                    let record: SymbolRecord =
+                        serde_json::from_str(line).context("failed to parse symbol record")?;
+                    Ok(needed.contains(&record.content_hash))
+                },
+            )?;
+        } else {
+            info!("no new content hashes; skipping symbol record upload");
+        }
+    } else {
+        upload_record_store_shards(
+            client,
+            endpoints,
+            api_key,
+            artifacts.symbol_records_path(),
+            "symbol_record",
+        )?;
+    }
 
     upload_record_store_shards(
         client,
@@ -292,13 +388,32 @@ fn upload_manifest_shards(
         "symbol_namespace",
     )?;
 
-    upload_record_store_shards(
-        client,
-        endpoints,
-        api_key,
-        artifacts.reference_records_path(),
-        "reference_record",
-    )?;
+    if let Some(needed) = needed_hashes {
+        if !needed.is_empty() {
+            upload_filtered_record_store_shards(
+                client,
+                endpoints,
+                api_key,
+                artifacts.reference_records_path(),
+                "reference_record",
+                |line| {
+                    let record: ReferenceRecord = serde_json::from_str(line)
+                        .context("failed to parse reference record")?;
+                    Ok(needed.contains(&record.content_hash))
+                },
+            )?;
+        } else {
+            info!("no new content hashes; skipping reference record upload");
+        }
+    } else {
+        upload_record_store_shards(
+            client,
+            endpoints,
+            api_key,
+            artifacts.reference_records_path(),
+            "reference_record",
+        )?;
+    }
 
     upload_branch_heads(client, endpoints, api_key, &artifacts.branches)?;
 
@@ -318,6 +433,20 @@ fn upload_record_store_shards(
     path: &std::path::Path,
     section: &str,
 ) -> Result<()> {
+    upload_filtered_record_store_shards(client, endpoints, api_key, path, section, |_| Ok(true))
+}
+
+fn upload_filtered_record_store_shards<F>(
+    client: &Client,
+    endpoints: &Arc<Endpoints>,
+    api_key: Option<&str>,
+    path: &std::path::Path,
+    section: &str,
+    mut should_include: F,
+) -> Result<()>
+where
+    F: FnMut(&str) -> Result<bool>,
+{
     if !path.exists() {
         return Ok(());
     }
@@ -365,6 +494,10 @@ fn upload_record_store_shards(
             }
 
             if line.trim().is_empty() {
+                continue;
+            }
+
+            if !should_include(line.trim_end_matches(['\n', '\r']))? {
                 continue;
             }
 
@@ -558,6 +691,16 @@ struct ChunkNeedRequest {
 
 #[derive(Deserialize)]
 struct ChunkNeedResponse {
+    missing: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct ContentNeedRequest {
+    hashes: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct ContentNeedResponse {
     missing: Vec<String>,
 }
 

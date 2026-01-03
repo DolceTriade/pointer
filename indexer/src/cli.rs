@@ -60,6 +60,9 @@ pub struct IndexArgs {
     /// API key used when uploading to the backend (sent as a Bearer token).
     #[arg(long)]
     pub upload_api_key: Option<String>,
+    /// Upload all symbol and reference records, even if content hashes already exist.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub full_symbol_upload: bool,
     /// Mark this branch as the live branch for the repository.
     #[arg(long = "live", action = ArgAction::SetTrue, conflicts_with = "not_live")]
     pub live: bool,
@@ -110,7 +113,10 @@ fn run_index(args: IndexArgs) -> Result<()> {
 
     if let Some(url) = args.upload_url.as_deref() {
         info!(%url, "uploading index to backend");
-        upload::upload_index(url, args.upload_api_key.as_deref(), &artifacts)?;
+        let options = upload::UploadOptions {
+            incremental_symbols: !args.full_symbol_upload,
+        };
+        upload::upload_index_with_options(url, args.upload_api_key.as_deref(), &artifacts, &options)?;
     }
 
     info!(repo = repository, output = ?output_dir, files = artifacts.file_pointer_count(), "indexing complete");

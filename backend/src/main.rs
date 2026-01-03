@@ -135,6 +135,16 @@ struct ChunkNeedResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct ContentNeedRequest {
+    hashes: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ContentNeedResponse {
+    missing: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct UniqueChunkUploadRequest {
     chunks: Vec<UniqueChunk>,
 }
@@ -239,10 +249,12 @@ async fn main() -> Result<()> {
         .route("/api/v1/chunks/need", post(chunks_need))
         .route("/api/v1/chunks/upload", post(chunks_upload))
         .route("/api/v1/mappings/upload", post(mappings_upload))
+        .route("/api/v1/blobs/need", post(blobs_need))
         .route("/api/v1/index/blobs/upload", post(blobs_upload))
         .route("/api/v1/index/chunks/need", post(chunks_need))
         .route("/api/v1/index/chunks/upload", post(chunks_upload))
         .route("/api/v1/index/mappings/upload", post(mappings_upload))
+        .route("/api/v1/index/blobs/need", post(blobs_need))
         .route("/api/v1/manifest/shard", post(manifest_shard))
         .route("/api/v1/index/manifest/shard", post(manifest_shard))
         // Manifest upload routes
@@ -378,6 +390,33 @@ async fn chunks_need(
         .collect();
 
     Ok(Json(ChunkNeedResponse { missing }))
+}
+
+async fn blobs_need(
+    State(state): State<AppState>,
+    Json(payload): Json<ContentNeedRequest>,
+) -> ApiResult<Json<ContentNeedResponse>> {
+    if payload.hashes.is_empty() {
+        return Ok(Json(ContentNeedResponse {
+            missing: Vec::new(),
+        }));
+    }
+
+    let existing: Vec<(String,)> =
+        sqlx::query_as("SELECT hash FROM content_blobs WHERE hash = ANY($1)")
+            .bind(&payload.hashes)
+            .fetch_all(&state.pool)
+            .await
+            .map_err(ApiErrorKind::from)?;
+
+    let present: HashSet<String> = existing.into_iter().map(|row| row.0).collect();
+    let missing: Vec<String> = payload
+        .hashes
+        .into_iter()
+        .filter(|h| !present.contains(h))
+        .collect();
+
+    Ok(Json(ContentNeedResponse { missing }))
 }
 
 async fn chunks_upload(
