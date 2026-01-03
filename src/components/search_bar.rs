@@ -21,6 +21,7 @@ pub fn SearchBar(
     let input_ref = NodeRef::<leptos::html::Input>::new();
     let navigate = use_navigate();
     let on_complete_cb = on_complete.clone();
+    let has_interacted = RwSignal::new(false);
 
     let on_search = move || {
         let q = query.get().trim().to_string();
@@ -62,6 +63,9 @@ pub fn SearchBar(
 
     // Create a reactive validation of the query
     let validation = Memo::new(move |_| {
+        if !has_interacted.get() {
+            return None;
+        }
         let q = query.get();
         if q.is_empty() {
             return None;
@@ -467,6 +471,15 @@ pub fn SearchBar(
         active_index.set(None);
     };
 
+    let apply_selection = {
+        let set_query = set_query.clone();
+        move |replacement: &str, active_start: usize| {
+            let updated = apply_autocomplete_replacement(&query.get(), active_start, replacement);
+            set_query.set(updated);
+            active_index.set(None);
+        }
+    };
+
     view! {
         <div class="w-full max-w-2xl">
             <div class="group relative">
@@ -493,17 +506,18 @@ pub fn SearchBar(
                         on:keydown={
                             let func = on_search.clone();
                             move |ev| {
+                                if !has_interacted.get() {
+                                    has_interacted.set(true);
+                                }
                                 if ev.key() == "Enter" {
                                     ev.prevent_default();
                                     let suggestions = flat_suggestions.get();
                                     if let Some(idx) = active_index.get() {
                                         if let Some(suggestion) = suggestions.get(idx) {
-                                            let updated = apply_autocomplete_replacement(
-                                                &query.get(),
-                                                autocomplete_state.get().active_start,
+                                            apply_selection(
                                                 &suggestion.replacement,
+                                                autocomplete_state.get().active_start,
                                             );
-                                            set_query.set(updated);
                                             return;
                                         }
                                     }
@@ -535,12 +549,10 @@ pub fn SearchBar(
                                     if let Some(idx) = active_index.get() {
                                         if let Some(suggestion) = suggestions.get(idx) {
                                             ev.prevent_default();
-                                            let updated = apply_autocomplete_replacement(
-                                                &query.get(),
-                                                autocomplete_state.get().active_start,
+                                            apply_selection(
                                                 &suggestion.replacement,
+                                                autocomplete_state.get().active_start,
                                             );
-                                            set_query.set(updated);
                                         }
                                     }
                                 }
@@ -622,12 +634,7 @@ pub fn SearchBar(
                                                         class="flex cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700 p-1 rounded"
                                                         on:mousedown=move |ev| {
                                                             ev.prevent_default();
-                                                            let updated = apply_autocomplete_replacement(
-                                                                &query.get(),
-                                                                query.get().len(),
-                                                                &syntax,
-                                                            );
-                                                            set_query.set(updated);
+                                                            apply_selection(&syntax, query.get().len());
                                                         }
                                                     >
                                                         <span class="font-mono text-blue-600 dark:text-blue-400 font-semibold mr-2">
@@ -653,11 +660,12 @@ pub fn SearchBar(
                                                             class="font-mono text-sm bg-gray-100 dark:bg-gray-700 p-2 rounded cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-600"
                                                             on:mousedown=move |ev| {
                                                                 ev.prevent_default();
-                                                                set_query.set(ex.to_string());
-                                                            }
-                                                        >
-                                                            {ex}
-                                                        </div>
+                                                            set_query.set(ex.to_string());
+                                                            active_index.set(None);
+                                                        }
+                                                    >
+                                                        {ex}
+                                                    </div>
                                                     }
                                                 })
                                                 .collect_view()}
@@ -685,14 +693,15 @@ pub fn SearchBar(
                             }
                             let symbol_column = symbol_group
                                 .map(|group| {
-                                    render_group_view(
-                                        group,
-                                        active_idx,
-                                        active_start,
-                                        current_query.clone(),
-                                        set_query,
-                                    )
-                                });
+                                        render_group_view(
+                                            group,
+                                            active_idx,
+                                            active_start,
+                                            current_query.clone(),
+                                            set_query,
+                                            active_index,
+                                        )
+                                    });
                             let dsl_column = dsl_group
                                 .map(|group| {
                                     render_group_view(
@@ -701,6 +710,7 @@ pub fn SearchBar(
                                         active_start,
                                         current_query.clone(),
                                         set_query,
+                                        active_index,
                                     )
                                 });
                             let two_column = if symbol_column.is_some() || dsl_column.is_some() {
@@ -728,6 +738,7 @@ pub fn SearchBar(
                                                 active_start,
                                                 current_query.clone(),
                                                 set_query,
+                                                active_index,
                                             )
                                         }
                                     />
@@ -813,6 +824,7 @@ fn render_group_view(
     active_start: usize,
     current_query: String,
     set_query: WriteSignal<String>,
+    active_index: RwSignal<Option<usize>>,
 ) -> impl IntoView {
     let group_title = group.title;
     let items = group.items;
@@ -848,6 +860,7 @@ fn render_group_view(
                                 &replacement,
                             );
                             set_query.set(updated);
+                            active_index.set(None);
                         }
                     >
                         <div>
