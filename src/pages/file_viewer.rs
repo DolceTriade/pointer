@@ -673,9 +673,9 @@ pub fn FileViewer() -> impl IntoView {
                             </Suspense>
                         </div>
                         <div class="w-80 flex-shrink-0 flex flex-col gap-3 sticky top-20 self-start">
-                            <CopyPathButton
-                                path=Signal::derive(move || path().unwrap_or_default())
-                            />
+                            <CopyPathButton path=Signal::derive(move || {
+                                path().unwrap_or_default()
+                            }) />
                             <CodeIntelPanel
                                 repo=repo.into()
                                 branch=branch.into()

@@ -2678,6 +2678,7 @@ struct SearchResultRow {
     file_path: String,
     content_hash: String,
     start_line: i64,
+    #[allow(dead_code)]
     line_count: i32,
     content_text: String,
     match_line_number: i32,
@@ -2690,15 +2691,23 @@ struct SearchResultRow {
 #[derive(sqlx::FromRow, Debug, Clone)]
 struct RankedFileRow {
     repository: String,
+    #[allow(dead_code)]
     commit_sha: String,
     file_path: String,
+    #[allow(dead_code)]
     content_hash: String,
+    #[allow(dead_code)]
     chunk_index: i32,
+    #[allow(dead_code)]
     total_score: f64,
+    #[allow(dead_code)]
     include_historical: bool,
     branches: Vec<String>,
+    #[allow(dead_code)]
     live_branches: Vec<String>,
+    #[allow(dead_code)]
     is_historical: bool,
+    #[allow(dead_code)]
     snapshot_indexed_at: Option<DateTime<Utc>>,
 }
 

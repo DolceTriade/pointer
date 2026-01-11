@@ -1,5 +1,5 @@
 use crate::db::models::SymbolSuggestion;
-use crate::dsl::{TextSearchRequest, parse_query, tokenize_for_autocomplete};
+use crate::dsl::{TextSearchRequest, tokenize_for_autocomplete};
 use crate::services::search_service::{
     autocomplete_branches, autocomplete_files, autocomplete_languages, autocomplete_paths,
     autocomplete_repositories, autocomplete_symbols,
@@ -660,12 +660,12 @@ pub fn SearchBar(
                                                             class="font-mono text-sm bg-gray-100 dark:bg-gray-700 p-2 rounded cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-600"
                                                             on:mousedown=move |ev| {
                                                                 ev.prevent_default();
-                                                            set_query.set(ex.to_string());
-                                                            active_index.set(None);
-                                                        }
-                                                    >
-                                                        {ex}
-                                                    </div>
+                                                                set_query.set(ex.to_string());
+                                                                active_index.set(None);
+                                                            }
+                                                        >
+                                                            {ex}
+                                                        </div>
                                                     }
                                                 })
                                                 .collect_view()}
@@ -693,15 +693,15 @@ pub fn SearchBar(
                             }
                             let symbol_column = symbol_group
                                 .map(|group| {
-                                        render_group_view(
-                                            group,
-                                            active_idx,
-                                            active_start,
-                                            current_query.clone(),
-                                            set_query,
-                                            active_index,
-                                        )
-                                    });
+                                    render_group_view(
+                                        group,
+                                        active_idx,
+                                        active_start,
+                                        current_query.clone(),
+                                        set_query,
+                                        active_index,
+                                    )
+                                });
                             let dsl_column = dsl_group
                                 .map(|group| {
                                     render_group_view(
