@@ -7,7 +7,7 @@ use leptos_router::params::Params;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-use crate::components::breadcrumbs::Breadcrumbs;
+use crate::components::breadcrumbs::{Breadcrumbs, CopyPathButton};
 use crate::components::code_intel_panel::CodeIntelPanel;
 use crate::components::file_content::FileContent;
 use crate::components::file_tree::{DirectoryIcon, FileIcon, FileTreeNode};
@@ -672,15 +672,20 @@ pub fn FileViewer() -> impl IntoView {
                                 }}
                             </Suspense>
                         </div>
-                        <CodeIntelPanel
-                            repo=repo.into()
-                            branch=branch.into()
-                            path=path.into()
-                            selected_symbol=selected_symbol
-                            language=file_language.into()
-                            included_paths=included_paths
-                            excluded_paths=excluded_paths
-                        />
+                        <div class="w-80 flex-shrink-0 flex flex-col gap-3 sticky top-20 self-start">
+                            <CopyPathButton
+                                path=Signal::derive(move || path().unwrap_or_default())
+                            />
+                            <CodeIntelPanel
+                                repo=repo.into()
+                                branch=branch.into()
+                                path=path.into()
+                                selected_symbol=selected_symbol
+                                language=file_language.into()
+                                included_paths=included_paths
+                                excluded_paths=excluded_paths
+                            />
+                        </div>
                     </div>
                 </div>
             </div>

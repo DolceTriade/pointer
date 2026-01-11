@@ -111,7 +111,7 @@ pub fn CodeIntelPanel(
     let insights_scroll_container = NodeRef::<Div>::new();
 
     view! {
-        <aside class="w-80 flex-shrink-0 flex flex-col max-h-[calc(100vh-6rem)] bg-white/95 dark:bg-slate-950/70 text-slate-900 dark:text-slate-100 rounded-lg shadow border border-slate-200 dark:border-slate-800 p-4 sticky top-20 backdrop-blur">
+        <aside class="w-80 flex-shrink-0 flex flex-col max-h-[calc(100vh-6rem)] bg-white/95 dark:bg-slate-950/70 text-slate-900 dark:text-slate-100 rounded-lg shadow border border-slate-200 dark:border-slate-800 p-4 backdrop-blur">
             <h2 class="text-xl font-semibold mb-4 text-slate-900 dark:text-white">
                 "Code Intelligence"
             </h2>

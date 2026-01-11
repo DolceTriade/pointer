@@ -8,7 +8,7 @@ pub mod quick_navigator;
 pub mod repo_list;
 pub mod search_bar;
 
-pub use breadcrumbs::Breadcrumbs;
+pub use breadcrumbs::{Breadcrumbs, CopyPathButton};
 pub use code_intel_panel::{
     CodeIntelPanel, SymbolInsightsResponse, SymbolMatch, SymbolReferenceWithSnippet,
 };
