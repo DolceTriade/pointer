@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -10,7 +11,7 @@ use crossbeam_channel::bounded;
 use ignore::{WalkBuilder, WalkState};
 use rayon::iter::ParallelBridge;
 use rayon::prelude::*;
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, warn};
 
 use crate::chunk_store::ChunkStore;
 use crate::config::IndexerConfig;
@@ -42,6 +43,11 @@ impl Indexer {
             .ignore(true)
             .build_parallel();
 
+        info!(
+            repo = %self.config.repo_path.display(),
+            "walker configured with git_ignore=true git_exclude=true ignore=true hidden=false"
+        );
+
         let scratch_dir = self.config.output_dir.join(".pointer-scratch");
         fs::create_dir_all(&scratch_dir).with_context(|| {
             format!(
@@ -51,13 +57,26 @@ impl Indexer {
         })?;
 
         let (tx, rx) = bounded::<FileEntry>(1024);
+        let seen_files = Arc::new(AtomicUsize::new(0));
+        let skipped_non_file = Arc::new(AtomicUsize::new(0));
+        let skipped_outside_repo = Arc::new(AtomicUsize::new(0));
+        let skipped_filtered = Arc::new(AtomicUsize::new(0));
+
         let walker_thread = {
             let tx = tx.clone();
             let repo_root = self.config.repo_path.clone();
+            let seen_files = Arc::clone(&seen_files);
+            let skipped_non_file = Arc::clone(&skipped_non_file);
+            let skipped_outside_repo = Arc::clone(&skipped_outside_repo);
+            let skipped_filtered = Arc::clone(&skipped_filtered);
             thread::spawn(move || {
                 walker.run(|| {
                     let tx = tx.clone();
                     let repo_root = repo_root.clone();
+                    let seen_files = Arc::clone(&seen_files);
+                    let skipped_non_file = Arc::clone(&skipped_non_file);
+                    let skipped_outside_repo = Arc::clone(&skipped_outside_repo);
+                    let skipped_filtered = Arc::clone(&skipped_filtered);
                     Box::new(move |entry| {
                         match entry {
                             Ok(entry) => {
@@ -66,7 +85,8 @@ impl Indexer {
                                     .map(|ft| ft.is_file())
                                     .unwrap_or(false)
                                 {
-                                    trace!(path = %entry.path().display(), "skipping non-file entry");
+                                    skipped_non_file.fetch_add(1, Ordering::Relaxed);
+                                    debug!(path = %entry.path().display(), "skipping non-file entry");
                                     return WalkState::Continue;
                                 }
 
@@ -75,6 +95,7 @@ impl Indexer {
                                     match utils::ensure_relative(&absolute_path, &repo_root) {
                                         Ok(path) => path,
                                         Err(err) => {
+                                            skipped_outside_repo.fetch_add(1, Ordering::Relaxed);
                                             warn!(
                                                 error = %err,
                                                 path = %absolute_path.display(),
@@ -85,7 +106,8 @@ impl Indexer {
                                     };
 
                                 if should_skip(&relative_path) {
-                                    trace!(path = %relative_path.display(), "skipping filtered file");
+                                    skipped_filtered.fetch_add(1, Ordering::Relaxed);
+                                    debug!(path = %relative_path.display(), "skipping filtered file");
                                     return WalkState::Continue;
                                 }
 
@@ -98,6 +120,7 @@ impl Indexer {
                                 {
                                     return WalkState::Quit;
                                 }
+                                seen_files.fetch_add(1, Ordering::Relaxed);
                             }
                             Err(err) => {
                                 warn!(error = %err, "failed to read directory entry");
@@ -122,6 +145,9 @@ impl Indexer {
 
         let config = self.config.clone();
 
+        let processed_ok = Arc::new(AtomicUsize::new(0));
+        let processed_err = Arc::new(AtomicUsize::new(0));
+
         rx.into_iter()
             .par_bridge()
             .for_each({
@@ -135,9 +161,12 @@ impl Indexer {
                 let chunk_mappings_writer = chunk_mappings_writer.clone();
                 let seen_namespaces = seen_namespaces.clone();
                 let config = config.clone();
+                let processed_ok = Arc::clone(&processed_ok);
+                let processed_err = Arc::clone(&processed_err);
 
                 move |entry| match process_file(&config, &entry) {
                     Ok(file_artifacts) => {
+                        processed_ok.fetch_add(1, Ordering::Relaxed);
                         let FileArtifacts {
                             content_blob,
                             file_pointer,
@@ -219,6 +248,7 @@ impl Indexer {
                         }
                     }
                     Err(err) => {
+                        processed_err.fetch_add(1, Ordering::Relaxed);
                         warn!(error = %err, "failed to process file");
                     }
                 }
@@ -236,6 +266,16 @@ impl Indexer {
         let symbol_namespaces = symbol_namespaces_writer.into_store()?;
         let reference_records = reference_records_writer.into_store()?;
         let chunk_mappings = chunk_mappings_writer.into_store()?;
+
+        info!(
+            seen_files = seen_files.load(Ordering::Relaxed),
+            skipped_non_file = skipped_non_file.load(Ordering::Relaxed),
+            skipped_outside_repo = skipped_outside_repo.load(Ordering::Relaxed),
+            skipped_filtered = skipped_filtered.load(Ordering::Relaxed),
+            processed_ok = processed_ok.load(Ordering::Relaxed),
+            processed_err = processed_err.load(Ordering::Relaxed),
+            "indexer file scan summary"
+        );
 
         let mut branches = Vec::new();
         if let Some(branch) = &self.config.branch {
