@@ -1427,6 +1427,9 @@
   .top-0 {
     top: calc(var(--spacing) * 0);
   }
+  .top-6 {
+    top: calc(var(--spacing) * 6);
+  }
   .top-20 {
     top: calc(var(--spacing) * 20);
   }

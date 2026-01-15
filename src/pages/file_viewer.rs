@@ -513,46 +513,48 @@ pub fn FileViewer() -> impl IntoView {
                 />
                 <div class="flex gap-6 items-start">
                     // Left Panel: File Tree
-                    <div class="w-64 flex-shrink-0 bg-white dark:bg-gray-800 rounded-lg shadow p-4 border border-gray-200 dark:border-gray-700 self-start">
+                    <div class="w-64 flex-shrink-0 bg-white dark:bg-gray-800 rounded-lg shadow p-4 border border-gray-200 dark:border-gray-700 self-start sticky top-6 max-h-[calc(100vh-6rem)] flex flex-col">
                         <h2 class="text-xl font-semibold mb-4 text-gray-800 dark:text-gray-200">
                             "Files"
                         </h2>
                         <FileQuickNavigator repo=repo.into() branch=branch.into() />
-                        <Suspense fallback=move || {
-                            view! { <p>"Loading tree..."</p> }
-                        }>
-                            <ul class="font-mono text-sm">
-                                {move || {
-                                    tree_resource
-                                        .get()
-                                        .map(|result| match result {
-                                            Ok(FileViewerData::Directory { entries, .. }) => {
-                                                Either::Left(
-                                                    view! {
-                                                        <For
-                                                            each=move || entries.clone()
-                                                            key=|e| e.path.clone()
-                                                            children=move |entry| {
-                                                                view! {
-                                                                    <FileTreeNode
-                                                                        entry=entry
-                                                                        repo=repo.into()
-                                                                        branch=branch.into()
-                                                                        expanded=expanded_dirs
-                                                                    />
+                        <div class="flex-1 min-h-0 overflow-y-auto pr-1">
+                            <Suspense fallback=move || {
+                                view! { <p>"Loading tree..."</p> }
+                            }>
+                                <ul class="font-mono text-sm">
+                                    {move || {
+                                        tree_resource
+                                            .get()
+                                            .map(|result| match result {
+                                                Ok(FileViewerData::Directory { entries, .. }) => {
+                                                    Either::Left(
+                                                        view! {
+                                                            <For
+                                                                each=move || entries.clone()
+                                                                key=|e| e.path.clone()
+                                                                children=move |entry| {
+                                                                    view! {
+                                                                        <FileTreeNode
+                                                                            entry=entry
+                                                                            repo=repo.into()
+                                                                            branch=branch.into()
+                                                                            expanded=expanded_dirs
+                                                                        />
+                                                                    }
                                                                 }
-                                                            }
-                                                        />
-                                                    },
-                                                )
-                                            }
-                                            _ => {
-                                                Either::Right(view! { <p>"Error loading file tree."</p> })
-                                            }
-                                        })
-                                }}
-                            </ul>
-                        </Suspense>
+                                                            />
+                                                        },
+                                                    )
+                                                }
+                                                _ => {
+                                                    Either::Right(view! { <p>"Error loading file tree."</p> })
+                                                }
+                                            })
+                                    }}
+                                </ul>
+                            </Suspense>
+                        </div>
                     </div>
 
                     <div class="flex-1 min-w-0 flex gap-6 items-start">
