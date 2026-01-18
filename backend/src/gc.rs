@@ -337,7 +337,15 @@ pub async fn prune_commit_data(
         }
     }
 
-    sqlx::query("DELETE FROM chunks WHERE ref_count = 0")
+    sqlx::query(
+        "DELETE FROM chunks c
+         WHERE NOT EXISTS (
+             SELECT 1
+             FROM chunk_ref_counts crc
+             WHERE crc.chunk_hash = c.chunk_hash
+               AND crc.ref_count > 0
+         )",
+    )
         .execute(&mut *tx)
         .await
         .map_err(ApiErrorKind::from)?;
@@ -478,7 +486,15 @@ pub async fn prune_repository_data(
 
     {
         let mut tx = pool.begin().await.map_err(ApiErrorKind::from)?;
-        sqlx::query("DELETE FROM chunks WHERE ref_count = 0")
+        sqlx::query(
+            "DELETE FROM chunks c
+             WHERE NOT EXISTS (
+                 SELECT 1
+                 FROM chunk_ref_counts crc
+                 WHERE crc.chunk_hash = c.chunk_hash
+                   AND crc.ref_count > 0
+             )",
+        )
             .execute(&mut *tx)
             .await
             .map_err(ApiErrorKind::from)?;
