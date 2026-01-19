@@ -589,7 +589,20 @@ fn push_search_ctes<'a>(
 impl Database for PostgresDb {
     async fn get_all_repositories(&self) -> Result<Vec<RepoSummary>, DbError> {
         let rows: Vec<(String, i64)> = sqlx::query_as(
-            "SELECT repository, COUNT(*) as file_count FROM files GROUP BY repository ORDER BY repository",
+            "WITH live_commits AS (
+                SELECT b.repository, b.commit_sha
+                FROM repo_live_branches lb
+                JOIN branches b
+                  ON b.repository = lb.repository
+                 AND b.branch = lb.branch
+            )
+            SELECT f.repository, COUNT(*) as file_count
+            FROM files f
+            JOIN live_commits lc
+              ON lc.repository = f.repository
+             AND lc.commit_sha = f.commit_sha
+            GROUP BY f.repository
+            ORDER BY f.repository",
         )
         .fetch_all(&self.pool)
         .await
