@@ -390,10 +390,10 @@ fn preprocess_regex_pattern(raw: &str) -> Result<String, ParseError> {
     }
 
     let (normalized, start_anchored, end_anchored) = normalize_line_anchors(&decoded);
-    let prefix = if start_anchored { "" } else { "(.*)" };
-    let suffix = if end_anchored { "" } else { "(.*)" };
+    let prefix = if start_anchored { "" } else { ".*" };
+    let suffix = if end_anchored { "" } else { ".*" };
     Ok(format!(
-        "(?:\n|^){prefix}{core}{suffix}(\n|$)",
+        "(?m)^{prefix}{core}{suffix}$",
         prefix = prefix,
         core = normalized,
         suffix = suffix
@@ -1135,13 +1135,13 @@ mod tests {
     #[test]
     fn preprocess_regex_basic_pattern() {
         let pattern = preprocess_regex_pattern("void").expect("should preprocess");
-        assert_eq!(pattern, "(?:\n|^)(.*)void(.*)(\n|$)");
+        assert_eq!(pattern, "(?m)^.*void.*$");
     }
 
     #[test]
     fn preprocess_regex_with_tab_escape() {
         let pattern = preprocess_regex_pattern("\\tfoo").expect("should preprocess");
-        assert_eq!(pattern, "(?:\n|^)(.*)\tfoo(.*)(\n|$)");
+        assert_eq!(pattern, "(?m)^.*\tfoo.*$");
     }
 
     #[test]
@@ -1167,25 +1167,25 @@ mod tests {
     #[test]
     fn preprocess_regex_preserves_line_anchors() {
         let pattern = preprocess_regex_pattern("^foo$").expect("should preprocess");
-        assert_eq!(pattern, "(?:\n|^)foo(\n|$)");
+        assert_eq!(pattern, "(?m)^foo$");
     }
 
     #[test]
     fn preprocess_regex_start_anchor_only() {
         let pattern = preprocess_regex_pattern("^foo").expect("should preprocess");
-        assert_eq!(pattern, "(?:\n|^)foo(.*)(\n|$)");
+        assert_eq!(pattern, "(?m)^foo.*$");
     }
 
     #[test]
     fn preprocess_regex_end_anchor_only() {
         let pattern = preprocess_regex_pattern("foo$").expect("should preprocess");
-        assert_eq!(pattern, "(?:\n|^)(.*)foo(\n|$)");
+        assert_eq!(pattern, "(?m)^.*foo$");
     }
 
     #[test]
     fn preprocess_regex_parentheses_are_literal() {
         let pattern = preprocess_regex_pattern("(foo) bar").expect("should preprocess");
-        assert_eq!(pattern, "(?:\n|^)(.*)\\(foo\\) bar(.*)(\n|$)");
+        assert_eq!(pattern, "(?m)^.*\\(foo\\) bar.*$");
     }
 
     #[test]
