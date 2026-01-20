@@ -302,14 +302,22 @@ fn find_identifier_in_declarator<'a>(declarator: &Node<'a>) -> Option<Node<'a>> 
 
     while let Some(current) = stack.pop() {
         match current.kind() {
-            "identifier" | "type_identifier" | "field_identifier" | "scoped_identifier" => {
+            "identifier" | "type_identifier" | "field_identifier" => {
                 return Some(current);
+            }
+            "scoped_identifier" | "qualified_identifier" => {
+                if let Some(name) = current.child_by_field_name("name") {
+                    return Some(name);
+                }
+                let mut cursor = current.walk();
+                for child in current.children(&mut cursor) {
+                    stack.push(child);
+                }
             }
             "pointer_declarator"
             | "function_declarator"
             | "array_declarator"
             | "parenthesized_declarator"
-            | "qualified_identifier"
             | "reference_declarator" => {
                 if let Some(child) = current.child_by_field_name("declarator") {
                     stack.push(child);
@@ -377,6 +385,48 @@ fn record_definition_node(
     None
 }
 
+fn strip_template_args(raw: &str) -> String {
+    let mut out = String::new();
+    let mut depth = 0usize;
+
+    for ch in raw.chars() {
+        match ch {
+            '<' => depth += 1,
+            '>' => {
+                if depth > 0 {
+                    depth -= 1;
+                }
+            }
+            _ => {
+                if depth == 0 && !ch.is_whitespace() {
+                    out.push(ch);
+                }
+            }
+        }
+    }
+
+    out
+}
+
+fn normalize_reference_name(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some(idx) = trimmed.find('<') {
+        if trimmed[idx..].contains('>') {
+            let stripped = strip_template_args(trimmed);
+            if stripped.is_empty() {
+                return None;
+            }
+            return Some(stripped);
+        }
+    }
+
+    Some(trimmed.to_string())
+}
+
 fn record_reference_node(
     node: &Node,
     source: &[u8],
@@ -389,11 +439,10 @@ fn record_reference_node(
     }
 
     if let Ok(raw) = node.utf8_text(source) {
-        let name = raw.trim();
-        if !name.is_empty() {
+        if let Some(name) = normalize_reference_name(raw) {
             let pos = node.start_position();
             references.push(ExtractedReference {
-                name: name.to_string(),
+                name,
                 kind: Some("reference".to_string()),
                 namespace: namespace_from_stack(namespace_stack),
                 line: pos.row + 1,
@@ -520,6 +569,102 @@ mod tests {
                 references_map.contains_key(key),
                 "missing reference for {:?}",
                 key
+            );
+        }
+    }
+
+    #[test]
+    fn strips_template_arguments_from_scoped_references() {
+        let source = r#"
+            namespace demo {
+                template <typename F>
+                struct c {};
+
+                template <typename F>
+                struct signatureof {};
+
+                template <typename F>
+                using sig_t = signatureof<
+                    c<F>,
+                    typename std::enable_if<std::is_function<F>::value>::type
+                >;
+            }
+        "#;
+
+        let extraction = extract(source);
+
+        for reference in &extraction.references {
+            assert!(
+                !reference.name.contains('\n')
+                    && !reference.name.contains('<')
+                    && !reference.name.contains('>'),
+                "unexpected templated reference name: {:?}",
+                reference.name
+            );
+        }
+    }
+
+    #[test]
+    fn handles_template_qualified_definitions() {
+        let source = r#"
+            template <typename T>
+            struct Foo {
+                void bar();
+            };
+
+            template <typename T>
+            void Foo<T>::bar() {}
+        "#;
+
+        let extraction = extract(source);
+        let (definitions, _references) = bucket_kinds(&extraction.references);
+
+        for (name, _namespace) in definitions.keys() {
+            assert!(
+                !name.contains('<') && !name.contains('>'),
+                "unexpected templated definition name: {:?}",
+                name
+            );
+        }
+
+        assert!(
+            definitions.contains_key(&("bar".to_string(), Some("Foo".to_string()))),
+            "missing definition for Foo::bar"
+        );
+    }
+
+    #[test]
+    fn strips_nested_template_references() {
+        let source = r#"
+            namespace demo {
+                template <typename T>
+                struct wrapper {};
+
+                template <typename T>
+                struct signatureof {};
+
+                template <typename T>
+                using deep_sig = signatureof<
+                    wrapper<std::vector<std::pair<int, T>>>,
+                    typename std::enable_if<
+                        std::is_same<
+                            std::vector<std::pair<int, T>>,
+                            std::vector<std::pair<int, T>>
+                        >::value
+                    >::type
+                >;
+            }
+        "#;
+
+        let extraction = extract(source);
+
+        for reference in &extraction.references {
+            assert!(
+                !reference.name.contains('\n')
+                    && !reference.name.contains('<')
+                    && !reference.name.contains('>'),
+                "unexpected nested templated reference name: {:?}",
+                reference.name
             );
         }
     }
