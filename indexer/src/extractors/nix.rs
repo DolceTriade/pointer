@@ -257,4 +257,39 @@ mod tests {
         assert!(refs.contains(&("isGccArchSupported", Some("isGccTuneSupported"), 35)));
         assert!(refs.contains(&("tune", Some("isGccTuneSupported"), 35)));
     }
+
+    #[test]
+    fn extracts_string_interpolations() {
+        let source = r#"
+            {
+              msg = "${if (hardeningDisable != [] || hardeningEnable != [] || isMusl) then "NIX_HARDENING_ENABLE" else null}";
+              nested = "${if cond then "${inner}" else "fallback"}";
+            }
+        "#;
+
+        let extraction = extract(source);
+        let references = extraction.references;
+
+        let refs: HashSet<_> = references
+            .iter()
+            .filter(|r| r.kind == Some("reference".to_string()))
+            .map(|r| r.name.as_str())
+            .collect();
+
+        assert!(refs.contains("hardeningDisable"));
+        assert!(refs.contains("hardeningEnable"));
+        assert!(refs.contains("isMusl"));
+        assert!(refs.contains("cond"));
+        assert!(refs.contains("inner"));
+
+        for reference in &references {
+            assert!(
+                !reference.name.contains("${")
+                    && !reference.name.contains('}')
+                    && !reference.name.contains('\n'),
+                "unexpected interpolated symbol: {:?}",
+                reference.name
+            );
+        }
+    }
 }
