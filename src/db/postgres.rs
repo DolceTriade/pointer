@@ -151,6 +151,7 @@ fn push_search_ctes<'a>(
 
         let case_mode = resolve_case(plan);
         let highlight_case_sensitive = matches!(case_mode, CaseSensitivity::Yes);
+        let prefer_repo_first = !plan.repos.is_empty();
 
         qb.push("(");
         qb.push(
@@ -158,8 +159,8 @@ fn push_search_ctes<'a>(
                 SELECT
                     files.id AS file_id,
                     files.content_hash,
-                    cbc.chunk_line_count AS line_count,
-                    cbc.chunk_index,
+                    matched_rows.chunk_line_count AS line_count,
+                    matched_rows.chunk_index,
                 ",
         );
         qb.push_bind(&plan.highlight_pattern);
@@ -173,16 +174,69 @@ fn push_search_ctes<'a>(
                 ",
         );
         qb.push_bind(plan.include_historical);
-        qb.push(
-            " AS include_historical
+        if prefer_repo_first {
+            qb.push(
+                " AS include_historical
                 FROM (
                     SELECT
-                        c.chunk_hash
+                        f_seed.id AS file_id,
+                        f_seed.content_hash,
+                        cbc.chunk_line_count,
+                        cbc.chunk_index
                     FROM
-                        chunks c
+                        files f_seed
+                        JOIN content_blob_chunks cbc
+                          ON cbc.content_hash = f_seed.content_hash
+                        JOIN chunks c
+                          ON c.chunk_hash = cbc.chunk_hash
                     WHERE
                         TRUE",
-        );
+            );
+
+            qb.push(" AND f_seed.repository = ANY(");
+            qb.push_bind(&plan.repos);
+            qb.push(")");
+
+            if !plan.excluded_repos.is_empty() {
+                qb.push(" AND NOT (f_seed.repository = ANY(");
+                qb.push_bind(&plan.excluded_repos);
+                qb.push("))");
+            }
+
+            if !plan.file_globs.is_empty() {
+                for pattern in &plan.file_globs {
+                    qb.push(" AND f_seed.file_path ILIKE ");
+                    qb.push_bind(pattern);
+                    qb.push(" ESCAPE '\\'");
+                }
+            }
+
+            if !plan.excluded_file_globs.is_empty() {
+                for pattern in &plan.excluded_file_globs {
+                    qb.push(" AND f_seed.file_path NOT ILIKE ");
+                    qb.push_bind(pattern);
+                    qb.push(" ESCAPE '\\'");
+                }
+            }
+        } else {
+            qb.push(
+                " AS include_historical
+                FROM (
+                    SELECT
+                        f_seed.id AS file_id,
+                        f_seed.content_hash,
+                        cbc.chunk_line_count,
+                        cbc.chunk_index
+                    FROM
+                        chunks c
+                        JOIN content_blob_chunks cbc
+                          ON cbc.chunk_hash = c.chunk_hash
+                        JOIN files f_seed
+                          ON f_seed.content_hash = cbc.content_hash
+                    WHERE
+                        TRUE",
+            );
+        }
 
         if plan.required_terms.len() == 1 {
             for predicate in &plan.required_terms {
@@ -207,14 +261,13 @@ fn push_search_ctes<'a>(
 
         qb.push(
             "
-                    LIMIT ",
+                        LIMIT ",
         );
         qb.push_bind(plan_row_limit);
         qb.push(
             "
-                ) chunk_hits
-                JOIN content_blob_chunks cbc ON cbc.chunk_hash = chunk_hits.chunk_hash
-                JOIN files ON files.content_hash = cbc.content_hash",
+                ) matched_rows
+                JOIN files ON files.id = matched_rows.file_id",
         );
 
         let needs_live_branch_filter_for_plan =
@@ -235,19 +288,19 @@ fn push_search_ctes<'a>(
 
         qb.push(" WHERE TRUE");
 
-        if !plan.repos.is_empty() {
+        if !prefer_repo_first && !plan.repos.is_empty() {
             qb.push(" AND files.repository = ANY(");
             qb.push_bind(&plan.repos);
             qb.push(")");
         }
 
-        if !plan.excluded_repos.is_empty() {
+        if !prefer_repo_first && !plan.excluded_repos.is_empty() {
             qb.push(" AND NOT (files.repository = ANY(");
             qb.push_bind(&plan.excluded_repos);
             qb.push("))");
         }
 
-        if !plan.file_globs.is_empty() {
+        if !prefer_repo_first && !plan.file_globs.is_empty() {
             for pattern in &plan.file_globs {
                 qb.push(" AND files.file_path ILIKE ");
                 qb.push_bind(pattern);
@@ -255,7 +308,7 @@ fn push_search_ctes<'a>(
             }
         }
 
-        if !plan.excluded_file_globs.is_empty() {
+        if !prefer_repo_first && !plan.excluded_file_globs.is_empty() {
             for pattern in &plan.excluded_file_globs {
                 qb.push(" AND files.file_path NOT ILIKE ");
                 qb.push_bind(pattern);
