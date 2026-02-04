@@ -292,11 +292,45 @@ fn namespace_from_stack(namespace_stack: &[String]) -> Option<String> {
 
 fn sanitize_identifier(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
-    if trimmed.is_empty() || trimmed == "_" || trimmed == "self" {
-        None
-    } else {
-        Some(trimmed.to_string())
+    if trimmed.is_empty() {
+        return None;
     }
+
+    let stripped = strip_template_args(trimmed);
+    let candidate = stripped.trim();
+
+    if candidate.is_empty() || candidate == "_" || candidate == "self" {
+        return None;
+    }
+
+    if candidate.chars().any(|ch| ch.is_whitespace()) {
+        return None;
+    }
+
+    Some(candidate.to_string())
+}
+
+fn strip_template_args(raw: &str) -> String {
+    let mut out = String::new();
+    let mut depth = 0usize;
+
+    for ch in raw.chars() {
+        match ch {
+            '<' => depth += 1,
+            '>' => {
+                if depth > 0 {
+                    depth -= 1;
+                }
+            }
+            _ => {
+                if depth == 0 {
+                    out.push(ch);
+                }
+            }
+        }
+    }
+
+    out
 }
 
 fn record_definition_node(
@@ -615,5 +649,126 @@ mod tests {
                 key
             );
         }
+    }
+
+    #[test]
+    fn strips_generic_arguments_from_references() {
+        let source = r#"
+            type Alias = BinaryOp<
+                Fortran::evaluate::Relational<
+                    Fortran::evaluate::Type<
+                        Fortran::common::TypeCategory::Character,
+                        KIND
+                    >
+                >
+            >;
+
+            fn usage() {
+                foo::<Bar>();
+                let _ = ::core::intrinsics::mir::__internal_extract_let;
+            }
+        "#;
+
+        let extraction = extract(source);
+
+        for reference in &extraction.references {
+            assert!(
+                !reference.name.contains('<')
+                    && !reference.name.contains('>')
+                    && !reference.name.contains('\n'),
+                "unexpected generic reference name: {:?}",
+                reference.name
+            );
+        }
+
+        let refs: HashSet<_> = extraction
+            .references
+            .iter()
+            .filter(|r| r.kind == Some("reference".to_string()))
+            .map(|r| r.name.as_str())
+            .collect();
+
+        assert!(refs.contains("BinaryOp"));
+        assert!(refs.contains("Relational"));
+        assert!(refs.contains("Type"));
+        assert!(refs.contains("foo"));
+        assert!(refs.contains("Bar"));
+        assert!(refs.contains("core"));
+        assert!(refs.contains("intrinsics"));
+        assert!(refs.contains("__internal_extract_let"));
+    }
+
+    #[test]
+    fn strips_multiline_generic_references() {
+        let source = r#"
+            type Alias = comb_hash_fn_string_form<
+                direct_mask_range_hashing_t_<
+                  Size_Type
+                >
+            >;
+
+            type Common = common_type<
+                chrono::duration<_Rep1, _Period1>,
+                chrono::duration<_Rep2, _Period2>
+            >;
+
+            type Distance = _ConstTimeDistance<
+                _Iter1,
+                _Iter1,
+                _Iter2,
+                _Iter2,
+                __enable_if_t<
+                    is_same<
+                        typename iterator_traits<_Iter1>::iterator_category,
+                        random_access_iterator_tag
+                    >::value &&
+                    is_same<
+                        typename iterator_traits<_Iter2>::iterator_category,
+                        random_access_iterator_tag
+                    >::value
+                >
+            >;
+
+            type Dispatch = container_base_dispatch<
+                Key,
+                null_type,
+                _Alloc,
+                gp_hash_tag,
+                Policy_Tl
+            >;
+        "#;
+
+        let extraction = extract(source);
+
+        for reference in &extraction.references {
+            assert!(
+                !reference.name.contains('<')
+                    && !reference.name.contains('>')
+                    && !reference.name.contains('\n'),
+                "unexpected generic reference name: {:?}",
+                reference.name
+            );
+        }
+
+        let refs: HashSet<_> = extraction
+            .references
+            .iter()
+            .filter(|r| r.kind == Some("reference".to_string()))
+            .map(|r| r.name.as_str())
+            .collect();
+
+        assert!(refs.contains("comb_hash_fn_string_form"));
+        assert!(refs.contains("direct_mask_range_hashing_t_"));
+        assert!(refs.contains("Size_Type"));
+        assert!(refs.contains("common_type"));
+        assert!(refs.contains("chrono"));
+        assert!(refs.contains("duration"));
+        assert!(refs.contains("_ConstTimeDistance"));
+        assert!(refs.contains("__enable_if_t"));
+        assert!(refs.contains("iterator_traits"));
+        assert!(refs.contains("random_access_iterator_tag"));
+        assert!(refs.contains("container_base_dispatch"));
+        assert!(refs.contains("gp_hash_tag"));
+        assert!(refs.contains("Policy_Tl"));
     }
 }

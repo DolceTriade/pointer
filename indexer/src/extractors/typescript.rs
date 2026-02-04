@@ -5,7 +5,7 @@ use super::{ExtractedReference, Extraction};
 pub fn extract(source: &str) -> Extraction {
     let mut parser = Parser::new();
     parser
-        .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
+        .set_language(&tree_sitter_typescript::LANGUAGE_TSX.into())
         .expect("failed to load tree-sitter TypeScript grammar");
 
     let tree = match parser.parse(source, None) {
@@ -178,6 +178,16 @@ fn is_part_of_definition_or_declaration(node: &Node) -> bool {
     let mut current = node.parent();
     while let Some(parent) = current {
         match parent.kind() {
+            "variable_declarator" => {
+                if is_within_field(node, &parent, "name") {
+                    return true;
+                }
+            }
+            "assignment_expression" => {
+                if is_within_field(node, &parent, "left") {
+                    return true;
+                }
+            }
             "function_declaration"
             | "generator_function_declaration"
             | "class_declaration"
@@ -185,22 +195,45 @@ fn is_part_of_definition_or_declaration(node: &Node) -> bool {
             | "type_alias_declaration"
             | "enum_declaration"
             | "namespace_declaration"
-            | "internal_module"
-            | "method_definition"
+            | "internal_module" => {
+                if is_within_field(node, &parent, "name") {
+                    return true;
+                }
+            }
+            "method_definition"
             | "method_signature"
             | "public_field_definition"
             | "property_declaration"
-            | "property_signature"
-            | "constructor"
-            | "constructor_signature"
-            | "lexical_declaration"
-            | "variable_declaration"
-            | "assignment_expression" => {
+            | "property_signature" => {
+                if is_within_field(node, &parent, "name")
+                    || is_within_field(node, &parent, "property")
+                {
+                    return true;
+                }
+            }
+            "constructor" | "constructor_signature" => {
                 return true;
             }
             _ => {}
         }
         current = parent.parent();
+    }
+    false
+}
+
+fn is_within_field(node: &Node, ancestor: &Node, field_name: &str) -> bool {
+    let Some(field_node) = ancestor.child_by_field_name(field_name) else {
+        return false;
+    };
+    let mut current = Some(*node);
+    while let Some(curr) = current {
+        if curr.id() == field_node.id() {
+            return true;
+        }
+        if curr.id() == ancestor.id() {
+            break;
+        }
+        current = curr.parent();
     }
     false
 }
@@ -279,5 +312,118 @@ mod tests {
         assert!(definitions.contains(&("handler", None)));
         assert!(definitions.contains(&("pointer", None)));
         assert!(definitions.contains(&("arrow", None)));
+    }
+
+    #[test]
+    fn extracts_jsx_expression_references() {
+        let source = r#"
+            const items = [
+              <element key={'something'}>
+                value
+              </element>,
+              <another
+                ternery={foo.is('something') ? 'one' : undefined}
+                click={() => {
+                   doSoemthing();
+                 }}
+                 literal={`soemthing-${interpolation}`}
+                >
+                 {thing.value}
+                </another>,
+            ];
+        "#;
+
+        let extraction = extract(source);
+        let references = extraction.references;
+
+        let definitions: HashSet<_> = references
+            .iter()
+            .filter(|r| r.kind == Some("definition".to_string()))
+            .map(|r| r.name.as_str())
+            .collect();
+
+        let refs: HashSet<_> = references
+            .iter()
+            .filter(|r| r.kind == Some("reference".to_string()))
+            .map(|r| r.name.as_str())
+            .collect();
+
+        assert!(definitions.contains("items"));
+        assert!(refs.contains("foo"));
+        assert!(refs.contains("is"));
+        assert!(refs.contains("doSoemthing"));
+        assert!(refs.contains("interpolation"));
+        assert!(refs.contains("thing"));
+        assert!(refs.contains("value"));
+    }
+
+    #[test]
+    fn extracts_jsx_array_enum_references() {
+        let source = r#"
+            const items = [
+              <element
+                args={[
+                   Enum.ValA,
+                    Enum.ValB,
+                    Enum.ValC,
+                 ]}
+                >
+              </element>,
+            ];
+        "#;
+
+        let extraction = extract(source);
+        let references = extraction.references;
+
+        let refs: HashSet<_> = references
+            .iter()
+            .filter(|r| r.kind == Some("reference".to_string()))
+            .map(|r| r.name.as_str())
+            .collect();
+
+        assert!(refs.contains("Enum"));
+        assert!(refs.contains("ValA"));
+        assert!(refs.contains("ValB"));
+        assert!(refs.contains("ValC"));
+    }
+
+    #[test]
+    fn extracts_array_literal_object_references() {
+        let source = r#"
+            const rows = [
+              {
+                id: "a",
+                name: payload?.title || "",
+                isActive: isActive,
+              },
+              {
+                id: "b",
+                label: "Worker",
+                value: primaryUrl,
+              },
+            ];
+        "#;
+
+        let extraction = extract(source);
+        let references = extraction.references;
+
+        let refs: HashSet<_> = references
+            .iter()
+            .filter(|r| r.kind == Some("reference".to_string()))
+            .map(|r| r.name.as_str())
+            .collect();
+
+        assert!(refs.contains("payload"));
+        assert!(refs.contains("title"));
+        assert!(refs.contains("isActive"));
+        assert!(refs.contains("primaryUrl"));
+
+        for reference in &references {
+            assert!(
+                !reference.name.contains('\n'),
+                "unexpected multiline reference name: {:?}",
+                reference.name
+            );
+        }
     }
 }

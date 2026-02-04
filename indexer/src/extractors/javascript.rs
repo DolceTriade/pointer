@@ -6,7 +6,7 @@ use super::{ExtractedReference, Extraction};
 pub fn extract(source: &str) -> Extraction {
     let mut parser = Parser::new();
     parser
-        .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
+        .set_language(&tree_sitter_typescript::LANGUAGE_TSX.into())
         .expect("failed to load tree-sitter JavaScript grammar");
 
     let tree = match parser.parse(source, None) {
@@ -398,6 +398,119 @@ mod tests {
                 references_map.contains_key(key),
                 "missing reference for {:?}",
                 key
+            );
+        }
+    }
+
+    #[test]
+    fn extracts_jsx_expression_references() {
+        let source = r#"
+            const items = [
+              <element key={'something'}>
+                value
+              </element>,
+              <another
+                ternery={foo.is('something') ? 'one' : undefined}
+                click={() => {
+                   doSoemthing();
+                 }}
+                 literal={`soemthing-${interpolation}`}
+                >
+                 {thing.value}
+                </another>,
+            ];
+        "#;
+
+        let extraction = extract(source);
+        let references = extraction.references;
+
+        let definitions: HashSet<_> = references
+            .iter()
+            .filter(|r| r.kind == Some("definition".to_string()))
+            .map(|r| r.name.as_str())
+            .collect();
+
+        let refs: HashSet<_> = references
+            .iter()
+            .filter(|r| r.kind == Some("reference".to_string()))
+            .map(|r| r.name.as_str())
+            .collect();
+
+        assert!(definitions.contains("items"));
+        assert!(refs.contains("foo"));
+        assert!(refs.contains("is"));
+        assert!(refs.contains("doSoemthing"));
+        assert!(refs.contains("interpolation"));
+        assert!(refs.contains("thing"));
+        assert!(refs.contains("value"));
+    }
+
+    #[test]
+    fn extracts_jsx_array_enum_references() {
+        let source = r#"
+            const items = [
+              <element
+                args={[
+                   Enum.ValA,
+                    Enum.ValB,
+                    Enum.ValC,
+                 ]}
+                >
+              </element>,
+            ];
+        "#;
+
+        let extraction = extract(source);
+        let references = extraction.references;
+
+        let refs: HashSet<_> = references
+            .iter()
+            .filter(|r| r.kind == Some("reference".to_string()))
+            .map(|r| r.name.as_str())
+            .collect();
+
+        assert!(refs.contains("Enum"));
+        assert!(refs.contains("ValA"));
+        assert!(refs.contains("ValB"));
+        assert!(refs.contains("ValC"));
+    }
+
+    #[test]
+    fn extracts_array_literal_object_references() {
+        let source = r#"
+            const rows = [
+              {
+                id: "a",
+                name: payload?.title || "",
+                isActive: isActive,
+              },
+              {
+                id: "b",
+                label: "Worker",
+                value: primaryUrl,
+              },
+            ];
+        "#;
+
+        let extraction = extract(source);
+        let references = extraction.references;
+
+        let refs: HashSet<_> = references
+            .iter()
+            .filter(|r| r.kind == Some("reference".to_string()))
+            .map(|r| r.name.as_str())
+            .collect();
+
+        assert!(refs.contains("payload"));
+        assert!(refs.contains("title"));
+        assert!(refs.contains("isActive"));
+        assert!(refs.contains("primaryUrl"));
+
+        for reference in &references {
+            assert!(
+                !reference.name.contains('\n'),
+                "unexpected multiline reference name: {:?}",
+                reference.name
             );
         }
     }

@@ -368,18 +368,17 @@ fn record_definition_node(
     }
 
     if let Ok(raw) = node.utf8_text(source) {
-        let name = raw.trim();
-        if !name.is_empty() {
+        if let Some(name) = normalize_cpp_name(raw) {
             let pos = node.start_position();
             references.push(ExtractedReference {
-                name: name.to_string(),
+                name: name.clone(),
                 kind: Some(kind.to_string()),
                 namespace: namespace_from_stack(namespace_stack),
                 line: pos.row + 1,
                 column: pos.column + 1,
             });
             defined_nodes.insert(node.id());
-            return Some(name.to_string());
+            return Some(name);
         }
     }
     None
@@ -408,7 +407,7 @@ fn strip_template_args(raw: &str) -> String {
     out
 }
 
-fn normalize_reference_name(raw: &str) -> Option<String> {
+fn normalize_cpp_name(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;
@@ -422,6 +421,10 @@ fn normalize_reference_name(raw: &str) -> Option<String> {
             }
             return Some(stripped);
         }
+    }
+
+    if trimmed.chars().any(|ch| ch.is_whitespace()) {
+        return None;
     }
 
     Some(trimmed.to_string())
@@ -439,7 +442,7 @@ fn record_reference_node(
     }
 
     if let Ok(raw) = node.utf8_text(source) {
-        if let Some(name) = normalize_reference_name(raw) {
+        if let Some(name) = normalize_cpp_name(raw) {
             let pos = node.start_position();
             references.push(ExtractedReference {
                 name,
@@ -664,6 +667,66 @@ mod tests {
                     && !reference.name.contains('<')
                     && !reference.name.contains('>'),
                 "unexpected nested templated reference name: {:?}",
+                reference.name
+            );
+        }
+    }
+
+    #[test]
+    fn strips_multiline_template_symbols() {
+        let source = r#"
+            template <typename T, typename... Printers>
+            struct FindFirstPrinter {};
+
+            template <typename T, typename... Printers>
+            using FindFirstPrinterT = FindFirstPrinter<
+                T,
+                decltype(Printer::PrintValue(std::declval<const T&>(), nullptr)),
+                Printer,
+                Printers...
+            >;
+
+            template <typename T, typename = void>
+            struct has_description {};
+
+            template <typename T>
+            struct has_description<
+                T,
+                void_t<decltype(T::getDescription())>
+            >;
+
+            template <typename F, typename = void>
+            struct is_unary_function {};
+
+            template <typename F>
+            struct is_unary_function<
+                F,
+                Catch::Detail::void_t<decltype(
+                    std::declval<F>()(fake_arg())
+                )>
+            >;
+
+            template <typename F>
+            struct C {};
+
+            template <typename F>
+            struct SignatureOf {};
+
+            template <typename F>
+            using SignatureOfT = SignatureOf<
+                C<F>,
+                typename std::enable_if<std::is_function<F>::value>::type
+            >;
+        "#;
+
+        let extraction = extract(source);
+
+        for reference in &extraction.references {
+            assert!(
+                !reference.name.contains('\n')
+                    && !reference.name.contains('<')
+                    && !reference.name.contains('>'),
+                "unexpected templated reference name: {:?}",
                 reference.name
             );
         }
