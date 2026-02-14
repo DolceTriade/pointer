@@ -480,6 +480,8 @@ fn push_search_ctes<'a>(
                     f.file_path,
                     lp.content_hash,
                     MIN(lp.chunk_index) AS chunk_index,
+                    (array_agg(lp.highlight_pattern ORDER BY lp.chunk_index ASC))[1] AS highlight_pattern,
+                    (array_agg(lp.highlight_case_sensitive ORDER BY lp.chunk_index ASC))[1] AS highlight_case_sensitive,
                     tf.total_score,
                     tf.include_historical
                 FROM limited_plan lp
@@ -570,6 +572,8 @@ fn push_search_ctes<'a>(
                     rt.file_path,
                     rt.content_hash,
                     rt.chunk_index,
+                    rt.highlight_pattern,
+                    rt.highlight_case_sensitive,
                     rt.total_score,
                     rt.include_historical,
                     COALESCE(bm.branches, bf.fallback_branches, ARRAY[]::TEXT[]) AS branches,
@@ -1727,6 +1731,7 @@ ORDER BY idx
         phase1_qb.push(
             "
             SELECT
+                fr.file_id,
                 fr.repository,
                 fr.commit_sha,
                 fr.file_path,
@@ -1737,7 +1742,9 @@ ORDER BY idx
                 fr.branches,
                 fr.live_branches,
                 fr.is_historical,
-                fr.snapshot_indexed_at
+                fr.snapshot_indexed_at,
+                fr.highlight_pattern,
+                fr.highlight_case_sensitive
             FROM filtered_ranked fr
             ORDER BY
                 fr.total_score DESC,
@@ -1801,47 +1808,47 @@ ORDER BY idx
         let results = if start >= total {
             Vec::new()
         } else {
-            let offset = i64::try_from(start).unwrap_or(i64::MAX);
-            let limit = i64::try_from(page_size).unwrap_or(i64::MAX);
+            let end = start.saturating_add(page_size).min(total);
+            let page_rows = &ranked_rows[start..end];
 
-            let mut phase2_qb = QueryBuilder::new("");
-            push_search_ctes(
-                &mut phase2_qb,
-                request,
-                plan_row_limit,
-                fetch_limit,
-                file_limit,
-                needs_live_branch_filter,
-                &symbol_terms,
-            );
-            phase2_qb.push(
+            let mut phase2_qb = QueryBuilder::new(
+                "
+                WITH paged_files (
+                    ord,
+                    file_id,
+                    repository,
+                    commit_sha,
+                    file_path,
+                    content_hash,
+                    chunk_index,
+                    total_score,
+                    include_historical,
+                    branches,
+                    live_branches,
+                    is_historical,
+                    snapshot_indexed_at,
+                    highlight_pattern,
+                    highlight_case_sensitive
+                ) AS (
                 ",
-            paged_files AS (
-                SELECT
-                    fr.file_id,
-                    fr.repository,
-                    fr.commit_sha,
-                    fr.file_path,
-                    fr.content_hash,
-                    fr.chunk_index,
-                    fr.total_score,
-                    fr.include_historical,
-                    fr.branches,
-                    fr.live_branches,
-                    fr.is_historical,
-                    fr.snapshot_indexed_at
-                FROM filtered_ranked fr
-                ORDER BY
-                    fr.total_score DESC,
-                    fr.repository,
-                    fr.commit_sha,
-                    fr.file_path,
-                    fr.chunk_index
-                LIMIT ",
             );
-            phase2_qb.push_bind(limit);
-            phase2_qb.push(" OFFSET ");
-            phase2_qb.push_bind(offset);
+            phase2_qb.push_values(page_rows.iter().enumerate(), |mut b, (ord, row)| {
+                b.push_bind(ord as i64)
+                    .push_bind(row.file_id)
+                    .push_bind(&row.repository)
+                    .push_bind(&row.commit_sha)
+                    .push_bind(&row.file_path)
+                    .push_bind(&row.content_hash)
+                    .push_bind(row.chunk_index)
+                    .push_bind(row.total_score)
+                    .push_bind(row.include_historical)
+                    .push_bind(&row.branches)
+                    .push_bind(&row.live_branches)
+                    .push_bind(row.is_historical)
+                    .push_bind(row.snapshot_indexed_at)
+                    .push_bind(&row.highlight_pattern)
+                    .push_bind(row.highlight_case_sensitive);
+            });
             phase2_qb.push(
                 "
             )
@@ -1864,16 +1871,11 @@ ORDER BY idx
              AND cbc.chunk_index = pf.chunk_index
             JOIN chunks c
               ON c.chunk_hash = cbc.chunk_hash
-            JOIN limited_plan lp
-              ON lp.file_id = pf.file_id
-             AND lp.content_hash = pf.content_hash
-             AND lp.chunk_index = pf.chunk_index
-             AND lp.include_historical = pf.include_historical
             CROSS JOIN LATERAL extract_context_with_highlight(
                 c.text_content,
-                lp.highlight_pattern,
+                pf.highlight_pattern,
                 3,
-                lp.highlight_case_sensitive
+                pf.highlight_case_sensitive
             ) ctx
             LEFT JOIN LATERAL (
                 SELECT
@@ -1883,11 +1885,7 @@ ORDER BY idx
                   AND cbc.chunk_index < pf.chunk_index
             ) sl ON TRUE
             ORDER BY
-                pf.total_score DESC,
-                pf.repository,
-                pf.commit_sha,
-                pf.file_path,
-                pf.chunk_index,
+                pf.ord,
                 ctx.match_line_number",
             );
 
@@ -2756,25 +2754,23 @@ struct SearchResultRow {
 
 #[derive(sqlx::FromRow, Debug, Clone)]
 struct RankedFileRow {
-    repository: String,
     #[allow(dead_code)]
+    file_id: i32,
+    repository: String,
     commit_sha: String,
     file_path: String,
-    #[allow(dead_code)]
     content_hash: String,
-    #[allow(dead_code)]
     chunk_index: i32,
-    #[allow(dead_code)]
     total_score: f64,
-    #[allow(dead_code)]
     include_historical: bool,
     branches: Vec<String>,
-    #[allow(dead_code)]
     live_branches: Vec<String>,
-    #[allow(dead_code)]
     is_historical: bool,
-    #[allow(dead_code)]
     snapshot_indexed_at: Option<DateTime<Utc>>,
+    #[allow(dead_code)]
+    highlight_pattern: String,
+    #[allow(dead_code)]
+    highlight_case_sensitive: bool,
 }
 
 #[derive(sqlx::FromRow)]
