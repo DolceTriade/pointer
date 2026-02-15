@@ -2,6 +2,7 @@
 state_dir = ".reposerver-state"
 default_interval = "5m"
 max_repo_concurrency = 1
+shell = "sh"
 git_bin = "git"
 indexer_bin = "pointer-indexer"
 indexer_args = ["--upload-url", "http://127.0.0.1:8080/api/v1/index"]

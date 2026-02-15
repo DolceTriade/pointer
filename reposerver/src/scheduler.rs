@@ -518,6 +518,7 @@ impl Scheduler {
         for (idx, hook) in repo.pre_index_hooks.iter().enumerate() {
             let hook_index = idx + 1;
             match hooks::run_hook(
+                &self.cfg.global.shell,
                 hook,
                 "pre",
                 hook_index,
@@ -632,6 +633,7 @@ impl Scheduler {
         for (idx, hook) in repo.post_upload_hooks.iter().enumerate() {
             let hook_index = idx + 1;
             match hooks::run_hook(
+                &self.cfg.global.shell,
                 hook,
                 "post",
                 hook_index,
@@ -747,6 +749,7 @@ impl Scheduler {
         );
 
         match hooks::run_hook(
+            &self.cfg.global.shell,
             hook,
             "global_finish",
             1,

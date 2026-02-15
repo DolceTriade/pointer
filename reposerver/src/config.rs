@@ -18,6 +18,7 @@ pub struct GlobalConfig {
     pub state_dir: PathBuf,
     pub default_interval: Duration,
     pub max_repo_concurrency: usize,
+    pub shell: String,
     pub git_bin: String,
     pub indexer_bin: String,
     pub indexer_args: Vec<String>,
@@ -61,6 +62,7 @@ struct RawGlobalConfig {
     state_dir: Option<PathBuf>,
     default_interval: Option<String>,
     max_repo_concurrency: Option<usize>,
+    shell: Option<String>,
     git_bin: Option<String>,
     indexer_bin: Option<String>,
     #[serde(default)]
@@ -125,12 +127,16 @@ impl AppConfig {
 
         let max_repo_concurrency = raw.global.max_repo_concurrency.unwrap_or(1).max(1);
 
+        let shell = raw.global.shell.unwrap_or_else(|| "sh".to_string());
         let git_bin = raw.global.git_bin.unwrap_or_else(|| "git".to_string());
         let indexer_bin = raw
             .global
             .indexer_bin
             .unwrap_or_else(|| "pointer-indexer".to_string());
 
+        if shell.trim().is_empty() {
+            bail!("global.shell must not be empty");
+        }
         if git_bin.trim().is_empty() {
             bail!("global.git_bin must not be empty");
         }
@@ -142,6 +148,7 @@ impl AppConfig {
             state_dir,
             default_interval,
             max_repo_concurrency,
+            shell,
             git_bin,
             indexer_bin,
             indexer_args: raw.global.indexer_args,
@@ -331,7 +338,24 @@ mod tests {
         assert_eq!(cfg.repos.len(), 1);
         assert_eq!(cfg.repos[0].interval, Duration::from_secs(300));
         assert_eq!(cfg.global.max_repo_concurrency, 1);
+        assert_eq!(cfg.global.shell, "sh");
         assert!(cfg.global.indexer_args.is_empty());
+    }
+
+    #[test]
+    fn rejects_empty_global_shell() {
+        let raw = r#"
+            [global]
+            shell = "   "
+
+            [[repo]]
+            name = "foo"
+            url = "git@example.com:foo.git"
+            branches = ["main"]
+        "#;
+        let parsed: FileConfig = toml::from_str(raw).expect("parse config");
+        let err = AppConfig::from_raw(parsed).expect_err("should fail");
+        assert!(err.to_string().contains("global.shell"));
     }
 
     #[test]

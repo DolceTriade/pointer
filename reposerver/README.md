@@ -19,6 +19,7 @@ See `reposerver/example.reposerver.toml` for a complete example.
 
 `global.indexer_args` are applied first for every invocation, then `repo.indexer_args` are appended.
 Per-branch args can be set with `[[repo.per_branch]]`; those args are appended last.
+Hooks run as `<global.shell> -c "<command>"` and `global.shell` defaults to `sh`.
 
 Optional global finish hook:
 

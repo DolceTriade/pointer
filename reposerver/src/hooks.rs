@@ -16,6 +16,7 @@ pub struct HookResult {
 }
 
 pub async fn run_hook(
+    shell: &str,
     hook: &HookConfig,
     hook_type: &str,
     hook_index: usize,
@@ -28,6 +29,7 @@ pub async fn run_hook(
     info!(
         stage = "hook",
         event = "hook.begin",
+        shell = %shell,
         hook_type = %hook_type,
         hook_index,
         repo = %repo,
@@ -37,7 +39,7 @@ pub async fn run_hook(
         "starting hook command"
     );
 
-    let mut cmd = Command::new("sh");
+    let mut cmd = Command::new(shell);
     cmd.arg("-c").arg(&hook.command);
     cmd.env("REPOSERVER_REPO", repo);
     cmd.env("REPOSERVER_BRANCH", branch);
