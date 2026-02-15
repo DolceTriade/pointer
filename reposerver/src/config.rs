@@ -21,6 +21,7 @@ pub struct GlobalConfig {
     pub git_bin: String,
     pub indexer_bin: String,
     pub indexer_args: Vec<String>,
+    pub finish_hook: Option<HookConfig>,
 }
 
 #[derive(Debug, Clone)]
@@ -64,6 +65,7 @@ struct RawGlobalConfig {
     indexer_bin: Option<String>,
     #[serde(default)]
     indexer_args: Vec<String>,
+    finish_hook: Option<RawHookConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -143,6 +145,11 @@ impl AppConfig {
             git_bin,
             indexer_bin,
             indexer_args: raw.global.indexer_args,
+            finish_hook: raw
+                .global
+                .finish_hook
+                .map(|hook| build_hook(hook, "global.finish_hook"))
+                .transpose()?,
         };
 
         let mut repos = Vec::with_capacity(raw.repos.len());
@@ -156,6 +163,12 @@ impl AppConfig {
     pub fn validate_config(&self) -> Result<()> {
         if self.repos.is_empty() {
             bail!("config must include at least one [[repo]] entry");
+        }
+
+        if let Some(hook) = &self.global.finish_hook {
+            if hook.command.trim().is_empty() {
+                bail!("global.finish_hook.command must not be empty");
+            }
         }
 
         for repo in &self.repos {
@@ -232,13 +245,13 @@ fn build_repo(raw: RawRepoConfig, default_interval: Duration) -> Result<RepoConf
     let pre_index_hooks = raw
         .pre_index_hooks
         .into_iter()
-        .map(|hook| build_hook(hook, &raw.name, "pre_index_hooks"))
+        .map(|hook| build_hook(hook, &format!("repo '{}'.pre_index_hooks", raw.name)))
         .collect::<Result<Vec<_>>>()?;
 
     let post_upload_hooks = raw
         .post_upload_hooks
         .into_iter()
-        .map(|hook| build_hook(hook, &raw.name, "post_upload_hooks"))
+        .map(|hook| build_hook(hook, &format!("repo '{}'.post_upload_hooks", raw.name)))
         .collect::<Result<Vec<_>>>()?;
 
     let per_branch = raw
@@ -269,11 +282,11 @@ fn build_repo(raw: RawRepoConfig, default_interval: Duration) -> Result<RepoConf
     })
 }
 
-fn build_hook(raw: RawHookConfig, repo_name: &str, section: &str) -> Result<HookConfig> {
+fn build_hook(raw: RawHookConfig, context: &str) -> Result<HookConfig> {
     let timeout = if let Some(timeout) = raw.timeout.as_deref() {
         Some(parse_duration_string(
             timeout,
-            &format!("repo '{}'.{section}.timeout", repo_name),
+            &format!("{context}.timeout"),
         )?)
     } else {
         None
@@ -363,6 +376,59 @@ mod tests {
             cfg.repos[0].indexer_args,
             vec!["--keep-latest".to_string(), "3".to_string()]
         );
+    }
+
+    #[test]
+    fn parses_global_finish_hook() {
+        let raw = r#"
+            [global.finish_hook]
+            command = "echo done"
+            timeout = "10s"
+
+            [[repo]]
+            name = "foo"
+            url = "git@example.com:foo.git"
+            branches = ["main"]
+        "#;
+        let parsed: FileConfig = toml::from_str(raw).expect("parse config");
+        let cfg = AppConfig::from_raw(parsed).expect("normalize");
+        let hook = cfg.global.finish_hook.expect("finish hook");
+        assert_eq!(hook.command, "echo done");
+        assert_eq!(hook.timeout.expect("timeout"), Duration::from_secs(10));
+    }
+
+    #[test]
+    fn rejects_empty_global_finish_hook_command() {
+        let raw = r#"
+            [global.finish_hook]
+            command = "   "
+
+            [[repo]]
+            name = "foo"
+            url = "git@example.com:foo.git"
+            branches = ["main"]
+        "#;
+        let parsed: FileConfig = toml::from_str(raw).expect("parse config");
+        let cfg = AppConfig::from_raw(parsed).expect("normalize");
+        let err = cfg.validate_config().expect_err("should fail");
+        assert!(err.to_string().contains("global.finish_hook.command"));
+    }
+
+    #[test]
+    fn rejects_zero_global_finish_hook_timeout() {
+        let raw = r#"
+            [global.finish_hook]
+            command = "echo done"
+            timeout = "0s"
+
+            [[repo]]
+            name = "foo"
+            url = "git@example.com:foo.git"
+            branches = ["main"]
+        "#;
+        let parsed: FileConfig = toml::from_str(raw).expect("parse config");
+        let err = AppConfig::from_raw(parsed).expect_err("should fail");
+        assert!(err.to_string().contains("greater than zero"));
     }
 
     #[test]

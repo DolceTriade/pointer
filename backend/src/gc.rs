@@ -346,9 +346,9 @@ pub async fn prune_commit_data(
                AND crc.ref_count > 0
          )",
     )
-        .execute(&mut *tx)
-        .await
-        .map_err(ApiErrorKind::from)?;
+    .execute(&mut *tx)
+    .await
+    .map_err(ApiErrorKind::from)?;
 
     tx.commit().await.map_err(ApiErrorKind::from)?;
 
@@ -495,9 +495,9 @@ pub async fn prune_repository_data(
                    AND crc.ref_count > 0
              )",
         )
-            .execute(&mut *tx)
-            .await
-            .map_err(ApiErrorKind::from)?;
+        .execute(&mut *tx)
+        .await
+        .map_err(ApiErrorKind::from)?;
         tx.commit().await.map_err(ApiErrorKind::from)?;
     }
 

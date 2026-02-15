@@ -6,6 +6,12 @@
 }:
 with lib; let
   cfg = config.services.pointer;
+  tomlFormat = pkgs.formats.toml {};
+  repoServerConfig = recursiveUpdate cfg.repoServer.config {
+    global.state_dir = cfg.repoServer.stateDirectory;
+  };
+  repoServerConfigFile = tomlFormat.generate "pointer-reposerver.toml" repoServerConfig;
+  repoServerArgs = ["--config" repoServerConfigFile] ++ cfg.repoServer.extraArgs;
 
   # Helper function to create environment variables for a service component
   mkEnv = {
@@ -100,6 +106,41 @@ in {
         description = "Sets the GC_INTERVAL_SECS environment variable for the 'pointer-backend' service.";
       };
     };
+
+    # --- Reposerver Configuration ---
+    repoServer = {
+      enable = mkEnableOption "the Pointer reposerver component.";
+
+      config = mkOption {
+        type = tomlFormat.type;
+        default = {};
+        description = "Inline reposerver TOML configuration rendered by the module.";
+      };
+
+      extraArgs = mkOption {
+        type = types.listOf types.str;
+        default = [];
+        description = "Additional command-line arguments passed to reposerver.";
+      };
+
+      user = mkOption {
+        type = types.str;
+        default = "pointer";
+        description = "User account for the reposerver systemd service.";
+      };
+
+      group = mkOption {
+        type = types.str;
+        default = "pointer";
+        description = "Group for the reposerver systemd service.";
+      };
+
+      stateDirectory = mkOption {
+        type = types.str;
+        default = "/home/pointer";
+        description = "State directory for pointer-reposerver; also used as WorkingDirectory and written to global.state_dir.";
+      };
+    };
   };
 
   config = mkIf cfg.enable {
@@ -140,6 +181,20 @@ in {
         Group = "pointer";
         Restart = "always";
         WorkingDirectory = "/home/pointer";
+      };
+    };
+
+    # --- Systemd Service for Reposerver ---
+    systemd.services.pointer-reposerver = mkIf cfg.repoServer.enable {
+      description = "Pointer Reposerver Service";
+      wantedBy = ["multi-user.target"];
+      after = ["network.target"];
+      serviceConfig = {
+        ExecStart = "${cfg.package}/bin/pointer-reposerver ${escapeShellArgs repoServerArgs}";
+        User = cfg.repoServer.user;
+        Group = cfg.repoServer.group;
+        WorkingDirectory = cfg.repoServer.stateDirectory;
+        Restart = "always";
       };
     };
 

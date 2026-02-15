@@ -6,6 +6,10 @@ git_bin = "git"
 indexer_bin = "pointer-indexer"
 indexer_args = ["--upload-url", "http://127.0.0.1:8080/api/v1/index"]
 
+[global.finish_hook]
+command = "echo pointer-reposerver sweep finished"
+timeout = "30s"
+
 [[repo]]
 name = "pointer"
 url = "git@github.com:org/pointer.git"

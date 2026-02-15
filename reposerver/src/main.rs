@@ -17,7 +17,7 @@ use tracing::{error, info};
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "reposerver",
+    name = "pointer-reposerver",
     version,
     about = "Poll and index git repositories"
 )]
@@ -39,7 +39,7 @@ async fn main() -> Result<()> {
         stage = "startup",
         event = "startup.begin",
         config_path = %cli.config.display(),
-        "reposerver process starting"
+        "pointer-reposerver process starting"
     );
 
     let load_start = std::time::Instant::now();
@@ -49,7 +49,8 @@ async fn main() -> Result<()> {
         config_path = %cli.config.display(),
         "loading configuration file"
     );
-    let cfg = match AppConfig::load(&cli.config).context("failed to load reposerver config") {
+    let cfg = match AppConfig::load(&cli.config).context("failed to load pointer-reposerver config")
+    {
         Ok(cfg) => {
             info!(
                 stage = "startup",

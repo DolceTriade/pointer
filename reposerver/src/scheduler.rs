@@ -1,5 +1,6 @@
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use tokio::process::Command;
@@ -181,7 +182,6 @@ impl Scheduler {
         );
 
         let mut handles = Vec::new();
-
         for repo in &self.cfg.repos {
             let repo = repo.clone();
             let this = self.clone();
@@ -191,8 +191,18 @@ impl Scheduler {
         }
 
         for handle in handles {
-            let _ = handle.await;
+            if let Err(err) = handle.await {
+                error!(
+                    stage = "cycle",
+                    event = "cycle.join",
+                    result = "fail",
+                    error = %err,
+                    "repo cycle task panicked or was cancelled"
+                );
+            }
         }
+
+        let _ = self.run_global_finish_hook("once", 1).await;
     }
 
     pub async fn run_forever(&self) {
@@ -204,18 +214,80 @@ impl Scheduler {
             "scheduler starting in forever mode"
         );
 
-        for repo in &self.cfg.repos {
-            let repo = repo.clone();
-            let this = self.clone();
-            tokio::spawn(async move {
-                loop {
-                    this.run_repo_cycle(repo.clone()).await;
-                    tokio::time::sleep(repo.interval).await;
-                }
-            });
-        }
+        let mut next_due: HashMap<String, Instant> = self
+            .cfg
+            .repos
+            .iter()
+            .map(|repo| (repo.name.clone(), Instant::now()))
+            .collect();
 
-        futures_signal().await;
+        let mut sweep_completed: HashSet<String> = HashSet::new();
+        let mut sweep_id: u64 = 1;
+
+        loop {
+            let now = Instant::now();
+            let mut due_repos = Vec::new();
+
+            for repo in &self.cfg.repos {
+                if let Some(next) = next_due.get(&repo.name) {
+                    if *next <= now {
+                        due_repos.push(repo.clone());
+                    }
+                }
+            }
+
+            if due_repos.is_empty() {
+                let next_wake = next_due
+                    .values()
+                    .min()
+                    .copied()
+                    .unwrap_or_else(|| now + Duration::from_secs(1));
+
+                tokio::select! {
+                    _ = tokio::time::sleep_until(tokio::time::Instant::from_std(next_wake)) => {}
+                    _ = tokio::signal::ctrl_c() => {
+                        info!(stage = "startup", event = "startup.shutdown", "received ctrl-c, shutting down");
+                        return;
+                    }
+                }
+
+                continue;
+            }
+
+            let mut handles = Vec::new();
+            for repo in due_repos {
+                next_due.insert(repo.name.clone(), Instant::now() + repo.interval);
+                let repo_name = repo.name.clone();
+                let this = self.clone();
+                handles.push(tokio::spawn(async move {
+                    this.run_repo_cycle(repo).await;
+                    repo_name
+                }));
+            }
+
+            for handle in handles {
+                match handle.await {
+                    Ok(repo_name) => {
+                        sweep_completed.insert(repo_name);
+                    }
+                    Err(err) => {
+                        error!(
+                            stage = "cycle",
+                            event = "cycle.join",
+                            result = "fail",
+                            error = %err,
+                            "repo cycle task panicked or was cancelled"
+                        );
+                    }
+                }
+            }
+
+            if sweep_completed.len() == self.cfg.repos.len() {
+                let _ = self.run_global_finish_hook("forever", sweep_id).await;
+                sweep_completed.clear();
+                sweep_id = sweep_id.saturating_add(1);
+            }
+        }
     }
 
     async fn run_repo_cycle(&self, repo: RepoConfig) {
@@ -285,7 +357,12 @@ impl Scheduler {
         let mut stats = CycleStats::default();
 
         let fetch_start = Instant::now();
-        info!(stage = "cycle", event = "cycle.fetch.begin", repo = %repo.name, "starting branch fetch");
+        info!(
+            stage = "cycle",
+            event = "cycle.fetch.begin",
+            repo = %repo.name,
+            "starting branch fetch"
+        );
         self.git
             .fetch_configured_patterns(repo, paths)
             .await
@@ -300,7 +377,12 @@ impl Scheduler {
         );
 
         let resolve_start = Instant::now();
-        info!(stage = "cycle", event = "cycle.resolve.begin", repo = %repo.name, "resolving tracked branches");
+        info!(
+            stage = "cycle",
+            event = "cycle.resolve.begin",
+            repo = %repo.name,
+            "resolving tracked branches"
+        );
         let branches = self
             .git
             .resolve_branches(repo, paths)
@@ -648,6 +730,65 @@ impl Scheduler {
 
         BranchOutcome::Succeeded
     }
+
+    async fn run_global_finish_hook(&self, mode: &str, sweep_id: u64) -> Result<()> {
+        let Some(hook) = self.cfg.global.finish_hook.as_ref() else {
+            return Ok(());
+        };
+
+        let start = Instant::now();
+        info!(
+            stage = "global_hook",
+            event = "global.finish_hook.begin",
+            mode = %mode,
+            sweep_id,
+            command = %hook.command,
+            "running global finish hook"
+        );
+
+        match hooks::run_hook(
+            hook,
+            "global_finish",
+            1,
+            "__global__",
+            "__sweep__",
+            "__none__",
+            self.cfg.global.state_dir.as_path(),
+            self.cfg.global.state_dir.as_path(),
+        )
+        .await
+        {
+            Ok(result) => {
+                info!(
+                    stage = "global_hook",
+                    event = "global.finish_hook.end",
+                    result = "ok",
+                    mode = %mode,
+                    sweep_id,
+                    duration_ms = start.elapsed().as_millis(),
+                    hook_duration_ms = result.duration.as_millis(),
+                    status_code = ?result.status_code,
+                    stdout = %result.stdout,
+                    stderr = %result.stderr,
+                    "global finish hook completed"
+                );
+            }
+            Err(err) => {
+                error!(
+                    stage = "global_hook",
+                    event = "global.finish_hook.end",
+                    result = "fail",
+                    mode = %mode,
+                    sweep_id,
+                    duration_ms = start.elapsed().as_millis(),
+                    error = %format!("{err:#}"),
+                    "global finish hook failed; continuing"
+                );
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl Clone for Scheduler {
@@ -673,14 +814,6 @@ fn summarize_output(prefix: &str, stdout: &str, stderr: &str) -> String {
     } else {
         prefix.to_string()
     }
-}
-
-async fn futures_signal() {
-    let ctrl_c = async {
-        let _ = tokio::signal::ctrl_c().await;
-    };
-
-    ctrl_c.await;
 }
 
 async fn validate_binary_exists(bin: &str) -> Result<()> {

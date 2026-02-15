@@ -1,5 +1,5 @@
 [workspace]
-members = ["indexer", "backend"]
+members = ["indexer", "backend", "reposerver"]
 resolver = "2"
 
 [package]
