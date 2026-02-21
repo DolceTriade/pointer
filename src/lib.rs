@@ -9,6 +9,8 @@ pub mod services;
 pub mod utils;
 
 #[cfg(feature = "ssr")]
+pub mod mcp;
+#[cfg(feature = "ssr")]
 pub mod server;
 
 #[cfg(feature = "hydrate")]

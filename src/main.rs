@@ -37,6 +37,7 @@ async fn main() -> anyhow::Result<()> {
     use leptos::prelude::*;
     use leptos_axum::{LeptosRoutes, generate_route_list_with_exclusions_and_ssg_and_context};
     use pointer::app::*;
+    use pointer::mcp;
     use sqlx::postgres::PgPoolOptions;
     use tower_http::compression::CompressionLayer;
 
@@ -69,6 +70,7 @@ async fn main() -> anyhow::Result<()> {
             let val = shell_options.clone();
             move || shell(val.clone())
         })
+        .merge(mcp::server::router(state.clone()))
         .fallback(leptos_axum::file_and_error_handler_with_context(
             move || provide_context(file_state.clone()),
             shell,
