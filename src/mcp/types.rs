@@ -62,9 +62,25 @@ where
 #[derive(Debug, Deserialize)]
 pub struct SearchToolRequest {
     #[serde(default)]
-    pub query: Option<String>,
+    pub repo: Option<String>,
     #[serde(default)]
-    pub queries: Option<Vec<String>>,
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub lang: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub file: Option<String>,
+    #[serde(default)]
+    pub regex: Option<String>,
+    #[serde(default)]
+    pub case: Option<SearchCaseMode>,
+    #[serde(default)]
+    pub historical: Option<bool>,
+    #[serde(default)]
+    pub all_terms: Vec<String>,
+    #[serde(default)]
+    pub any_terms: Vec<String>,
     #[serde(default = "default_page")]
     pub page: u32,
     #[serde(default = "default_search_dedupe")]
@@ -91,6 +107,14 @@ pub enum SearchDedupeMode {
     RepoPathLine,
     RepoPath,
     None,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SearchCaseMode {
+    Yes,
+    No,
+    Auto,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -185,6 +209,8 @@ pub struct FileListToolResponse {
     pub root_path: String,
     pub requested_depth: u8,
     pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncated_reason: Option<String>,
     pub entries: Vec<FileListEntry>,
     pub index_freshness: IndexFreshness,
 }

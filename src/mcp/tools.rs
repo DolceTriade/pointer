@@ -1,7 +1,8 @@
 use axum::Json;
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use tokio::time::{Duration, timeout};
 
 use crate::db::models::{FacetCount, SearchResult, SearchResultsPage};
 use crate::db::{Database, postgres::PostgresDb};
@@ -9,8 +10,8 @@ use crate::mcp::types::{
     ApiResponse, BranchFreshness, FileContentToolRequest, FileContentToolResponse, FileListEntry,
     FileListToolRequest, FileListToolResponse, IndexFreshness, PathSearchToolRequest,
     PathSearchToolResponse, RepoBranchesToolRequest, RepoBranchesToolResponse,
-    RepositoriesToolRequest, RepositoriesToolResponse, SearchDedupeMode, SearchToolRequest,
-    SymbolInsightsToolRequest, SymbolInsightsToolResponse,
+    RepositoriesToolRequest, RepositoriesToolResponse, SearchCaseMode, SearchDedupeMode,
+    SearchToolRequest, SymbolInsightsToolRequest, SymbolInsightsToolResponse,
 };
 use crate::pages::file_viewer::{fetch_symbol_insights, search_repo_paths};
 use crate::pages::repo_detail::{RepoBranchDisplay, get_repo_branches};
@@ -18,9 +19,11 @@ use crate::services::repo_service::get_repositories;
 use crate::services::search_service::search;
 
 const MAX_BATCH_QUERIES: usize = 8;
+const FILE_LIST_QUERY_TIMEOUT: Duration = Duration::from_secs(8);
+const FILE_LIST_MAX_SOURCE_ROWS: usize = 200_000;
 
 pub async fn execute_search(payload: SearchToolRequest) -> Result<Value, String> {
-    let mode = validate_search_mode(payload)?;
+    let mode = build_search_execution_mode(payload)?;
     match mode {
         SearchExecutionMode::Single { query, page } => execute_single_search(query, page).await,
         SearchExecutionMode::Batch {
@@ -63,8 +66,11 @@ pub async fn execute_file_content(
     payload: FileContentToolRequest,
 ) -> Result<FileContentToolResponse, String> {
     let state = leptos::prelude::expect_context::<crate::server::GlobalAppState>();
-    let state = state.lock().await;
-    let db = PostgresDb::new(state.pool.clone());
+    let pool = {
+        let state = state.lock().await;
+        state.pool.clone()
+    };
+    let db = PostgresDb::new(pool);
 
     let commit = db
         .resolve_branch_head(&payload.repo, &payload.branch)
@@ -97,8 +103,11 @@ pub async fn execute_file_list(
     payload: FileListToolRequest,
 ) -> Result<FileListToolResponse, String> {
     let state = leptos::prelude::expect_context::<crate::server::GlobalAppState>();
-    let state = state.lock().await;
-    let db = PostgresDb::new(state.pool.clone());
+    let pool = {
+        let state = state.lock().await;
+        state.pool.clone()
+    };
+    let db = PostgresDb::new(pool.clone());
 
     let commit = db
         .resolve_branch_head(&payload.repo, &payload.branch)
@@ -106,65 +115,59 @@ pub async fn execute_file_list(
         .map_err(|err| err.to_string())?
         .unwrap_or_else(|| payload.branch.clone());
 
-    let root_path = payload
-        .path
-        .unwrap_or_default()
-        .trim_matches('/')
-        .to_string();
+    let root_path = normalize_repo_path(payload.path.unwrap_or_default());
     let requested_depth = payload.depth.clamp(1, 10);
     let limit = payload.limit.clamp(1, 5000);
 
-    let mut queue: VecDeque<(String, u8)> = VecDeque::new();
-    queue.push_back((root_path.clone(), 0));
-    let mut visited_dirs = HashSet::new();
-    visited_dirs.insert(root_path.clone());
+    let like_pattern = if root_path.is_empty() {
+        "%".to_string()
+    } else {
+        format!("{}/%", root_path)
+    };
 
-    let mut entries: Vec<FileListEntry> = Vec::new();
-    let mut truncated = false;
+    let query_future = sqlx::query_scalar::<_, String>(
+        "SELECT file_path
+         FROM files
+         WHERE repository = $1
+         AND commit_sha = $2
+         AND (file_path = $3 OR file_path LIKE $4)
+         ORDER BY file_path
+         LIMIT $5",
+    )
+    .bind(&payload.repo)
+    .bind(&commit)
+    .bind(&root_path)
+    .bind(&like_pattern)
+    .bind((FILE_LIST_MAX_SOURCE_ROWS + 1) as i64)
+    .fetch_all(&pool);
 
-    while let Some((dir_path, dir_depth)) = queue.pop_front() {
-        let tree = db
-            .get_repo_tree(
-                &payload.repo,
-                crate::db::RepoTreeQuery {
-                    commit: commit.clone(),
-                    path: Some(dir_path.clone()),
-                },
-            )
-            .await
-            .map_err(|err| err.to_string())?;
+    let rows = match timeout(FILE_LIST_QUERY_TIMEOUT, query_future).await {
+        Ok(Ok(rows)) => rows,
+        Ok(Err(err)) => return Err(err.to_string()),
+        Err(_) => return Err("file_list source query timed out".to_string()),
+    };
 
-        let child_depth = dir_depth.saturating_add(1);
-        for entry in tree.entries {
-            entries.push(FileListEntry {
-                name: entry.name.clone(),
-                path: entry.path.clone(),
-                kind: entry.kind.clone(),
-                depth: child_depth,
-            });
-
-            if entries.len() >= limit {
-                truncated = true;
-                break;
-            }
-
-            if entry.kind == "dir" && child_depth < requested_depth {
-                if visited_dirs.insert(entry.path.clone()) {
-                    queue.push_back((entry.path, child_depth));
-                }
-            }
-        }
-
-        if truncated {
-            break;
-        }
+    if rows.is_empty() && !root_path.is_empty() {
+        return Err("path not found".to_string());
     }
 
-    entries.sort_by(|a, b| match (a.kind.as_str(), b.kind.as_str()) {
-        ("dir", "file") => std::cmp::Ordering::Less,
-        ("file", "dir") => std::cmp::Ordering::Greater,
-        _ => a.path.cmp(&b.path),
-    });
+    let mut truncated = false;
+    let mut truncated_reason: Option<String> = None;
+    let mut source_rows = rows;
+    if source_rows.len() > FILE_LIST_MAX_SOURCE_ROWS {
+        source_rows.truncate(FILE_LIST_MAX_SOURCE_ROWS);
+        truncated = true;
+        truncated_reason = Some("file_list source row limit reached".to_string());
+    }
+
+    let mut entries = build_file_list_entries(&source_rows, &root_path, requested_depth);
+    if entries.len() > limit {
+        entries.truncate(limit);
+        truncated = true;
+        if truncated_reason.is_none() {
+            truncated_reason = Some("file_list reached entry limit".to_string());
+        }
+    }
 
     let index_freshness = resolve_branch_freshness(&payload.repo, &payload.branch, Some(&commit))
         .await
@@ -176,6 +179,7 @@ pub async fn execute_file_list(
         root_path,
         requested_depth,
         truncated,
+        truncated_reason,
         entries,
         index_freshness,
     })
@@ -390,46 +394,63 @@ enum SearchExecutionMode {
     },
 }
 
-fn validate_search_mode(payload: SearchToolRequest) -> Result<SearchExecutionMode, String> {
-    let query = payload.query.unwrap_or_default().trim().to_string();
-    let queries = payload.queries.unwrap_or_default();
-    let has_query = !query.is_empty();
-    let has_queries = !queries.is_empty();
+fn build_search_execution_mode(payload: SearchToolRequest) -> Result<SearchExecutionMode, String> {
+    let filters = compile_filter_tokens(&payload);
 
-    match (has_query, has_queries) {
-        (true, true) => Err("provide exactly one of 'query' or 'queries' for search".to_string()),
-        (false, false) => {
-            Err("missing search input: provide 'query' or non-empty 'queries'".to_string())
-        }
-        (true, false) => Ok(SearchExecutionMode::Single {
-            query,
-            page: payload.page.max(1),
-        }),
-        (false, true) => {
-            if queries.len() > MAX_BATCH_QUERIES {
-                return Err(format!(
-                    "too many queries in batch: max {}",
-                    MAX_BATCH_QUERIES
-                ));
-            }
-            let normalized: Vec<String> = queries
-                .into_iter()
-                .map(|q| q.trim().to_string())
-                .filter(|q| !q.is_empty())
-                .collect();
-            if normalized.is_empty() {
-                return Err("queries must contain at least one non-empty query".to_string());
-            }
-            Ok(SearchExecutionMode::Batch {
-                queries: normalized,
-                dedupe: payload.dedupe,
-                max_results_per_query: payload.max_results_per_query.max(1) as usize,
-            })
-        }
+    let all_terms: Vec<String> = payload
+        .all_terms
+        .into_iter()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .collect();
+    let any_terms: Vec<String> = payload
+        .any_terms
+        .into_iter()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .collect();
+
+    if any_terms.len() > MAX_BATCH_QUERIES {
+        return Err(format!(
+            "too many any_terms values: max {}",
+            MAX_BATCH_QUERIES
+        ));
     }
+    let has_content = !all_terms.is_empty() || !any_terms.is_empty() || payload.regex.is_some();
+    if !has_content {
+        return Err(
+            "structured search requires at least one of: all_terms, any_terms, or regex"
+                .to_string(),
+        );
+    }
+
+    let page = payload.page.max(1);
+    if any_terms.is_empty() {
+        let query = compile_query(&filters, &all_terms, None);
+        return Ok(SearchExecutionMode::Single { query, page });
+    }
+
+    let queries = any_terms
+        .iter()
+        .map(|any_term| compile_query(&filters, &all_terms, Some(any_term)))
+        .collect();
+
+    Ok(SearchExecutionMode::Batch {
+        queries,
+        dedupe: payload.dedupe,
+        max_results_per_query: payload.max_results_per_query.max(1) as usize,
+    })
 }
 
 async fn execute_single_search(query: String, page: u32) -> Result<Value, String> {
+    tracing::trace!(
+        target: "pointer::mcp_search",
+        mode = "single",
+        page = page,
+        query = %query,
+        "mcp search query"
+    );
+
     let page_data = search(query.clone(), page)
         .await
         .map_err(|err| err.to_string())?;
@@ -450,7 +471,7 @@ async fn execute_single_search(query: String, page: u32) -> Result<Value, String
     let top_filetypes = compute_top_filetypes(&page_data.results);
     let mut guidance = Vec::new();
     if page_data.results.is_empty() {
-        guidance = build_no_result_guidance(&query);
+        guidance.extend(build_no_result_guidance(&query));
     } else if page_data.has_more {
         guidance.push(
             "Results are truncated for this page. Use truncation.next_page_args to continue."
@@ -486,6 +507,16 @@ async fn execute_batch_search(
     dedupe: SearchDedupeMode,
     max_results_per_query: usize,
 ) -> Result<Value, String> {
+    tracing::trace!(
+        target: "pointer::mcp_search",
+        mode = "batch",
+        query_count = queries.len(),
+        dedupe = ?dedupe,
+        max_results_per_query = max_results_per_query,
+        queries = ?queries,
+        "mcp search batch queries"
+    );
+
     let mut pages: Vec<(String, SearchResultsPage)> = Vec::with_capacity(queries.len());
     for query in &queries {
         let page = search(query.clone(), 1)
@@ -604,6 +635,9 @@ fn build_no_result_guidance(query: &str) -> Vec<String> {
         "Try broadening the query by removing one filter at a time (path:, file:, lang:, branch:)."
             .to_string(),
     ];
+    guidance.push(
+        "For OR semantics, use structured any_terms:[\"termA\", \"termB\", ...].".to_string(),
+    );
     if query.contains('*') && !query.contains("regex:") {
         guidance.push(
             "Wildcard syntax is not supported in plain terms. Use regex:\"...\" for pattern matching."
@@ -622,6 +656,163 @@ fn build_no_result_guidance(query: &str) -> Vec<String> {
         );
     }
     guidance
+}
+
+fn compile_filter_tokens(payload: &SearchToolRequest) -> Vec<String> {
+    let mut parts = Vec::new();
+    if let Some(repo) = payload.repo.as_deref() {
+        parts.push(format!("repo:{}", quote_if_needed(repo)));
+    }
+    if let Some(branch) = payload.branch.as_deref() {
+        parts.push(format!("branch:{}", quote_if_needed(branch)));
+    }
+    if let Some(lang) = payload.lang.as_deref() {
+        parts.push(format!("lang:{}", quote_if_needed(lang)));
+    }
+    if let Some(path) = payload.path.as_deref() {
+        parts.push(format!("path:{}", quote_if_needed(path)));
+    }
+    if let Some(file) = payload.file.as_deref() {
+        parts.push(format!("file:{}", quote_if_needed(file)));
+    }
+    if let Some(regex) = payload.regex.as_deref() {
+        parts.push(format!("regex:\"{}\"", escape_quoted(regex)));
+    }
+    if let Some(case) = payload.case.as_ref() {
+        let value = match case {
+            SearchCaseMode::Yes => "yes",
+            SearchCaseMode::No => "no",
+            SearchCaseMode::Auto => "auto",
+        };
+        parts.push(format!("case:{value}"));
+    }
+    if let Some(historical) = payload.historical {
+        parts.push(format!(
+            "historical:{}",
+            if historical { "yes" } else { "no" }
+        ));
+    }
+    parts
+}
+
+fn compile_query(filters: &[String], all_terms: &[String], any_term: Option<&str>) -> String {
+    let mut parts: Vec<String> = filters.to_vec();
+    parts.extend(all_terms.iter().map(|term| quote_if_needed(term)));
+    if let Some(any_term) = any_term {
+        parts.push(quote_if_needed(any_term));
+    }
+    parts.join(" ")
+}
+
+fn quote_if_needed(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return "\"\"".to_string();
+    }
+    let needs_quotes = trimmed
+        .chars()
+        .any(|c| c.is_whitespace() || c == '"' || c == ':');
+    if needs_quotes {
+        format!("\"{}\"", escape_quoted(trimmed))
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn escape_quoted(raw: &str) -> String {
+    raw.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn normalize_repo_path(raw: String) -> String {
+    let trimmed = raw.trim().trim_matches('/');
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let mut normalized = String::with_capacity(trimmed.len());
+    let mut prev_slash = false;
+    for ch in trimmed.chars() {
+        if ch == '/' {
+            if !prev_slash {
+                normalized.push(ch);
+            }
+            prev_slash = true;
+        } else {
+            normalized.push(ch);
+            prev_slash = false;
+        }
+    }
+    normalized
+}
+
+fn build_file_list_entries(
+    file_paths: &[String],
+    root_path: &str,
+    requested_depth: u8,
+) -> Vec<FileListEntry> {
+    let mut by_path: BTreeMap<String, FileListEntry> = BTreeMap::new();
+
+    for file_path in file_paths {
+        let normalized_file = normalize_repo_path(file_path.clone());
+        let relative = if root_path.is_empty() {
+            normalized_file.clone()
+        } else if normalized_file == root_path {
+            String::new()
+        } else if let Some(tail) = normalized_file.strip_prefix(root_path) {
+            tail.trim_start_matches('/').to_string()
+        } else {
+            continue;
+        };
+
+        if relative.is_empty() {
+            continue;
+        }
+
+        let segments: Vec<&str> = relative.split('/').filter(|s| !s.is_empty()).collect();
+        if segments.is_empty() {
+            continue;
+        }
+
+        if segments.len() > 1 {
+            let max_dir_depth = (segments.len() - 1).min(requested_depth as usize);
+            for depth in 1..=max_dir_depth {
+                let dir_rel = segments[..depth].join("/");
+                let dir_full = if root_path.is_empty() {
+                    dir_rel
+                } else {
+                    format!("{}/{}", root_path, dir_rel)
+                };
+                by_path
+                    .entry(dir_full.clone())
+                    .or_insert_with(|| FileListEntry {
+                        name: segments[depth - 1].to_string(),
+                        path: dir_full,
+                        kind: "dir".to_string(),
+                        depth: depth as u8,
+                    });
+            }
+        }
+
+        let file_depth = segments.len() as u8;
+        if file_depth <= requested_depth {
+            by_path
+                .entry(normalized_file.clone())
+                .or_insert_with(|| FileListEntry {
+                    name: segments.last().unwrap_or(&"").to_string(),
+                    path: normalized_file,
+                    kind: "file".to_string(),
+                    depth: file_depth,
+                });
+        }
+    }
+
+    let mut entries: Vec<FileListEntry> = by_path.into_values().collect();
+    entries.sort_by(|a, b| match (a.kind.as_str(), b.kind.as_str()) {
+        ("dir", "file") => std::cmp::Ordering::Less,
+        ("file", "dir") => std::cmp::Ordering::Greater,
+        _ => a.path.cmp(&b.path),
+    });
+    entries
 }
 
 fn compute_top_filetypes(results: &[SearchResult]) -> Vec<FacetCount> {
@@ -767,4 +958,67 @@ fn split_query_tokens(query: &str) -> Vec<String> {
     }
 
     tokens
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        build_file_list_entries, build_no_result_guidance, compile_query, normalize_repo_path,
+        quote_if_needed,
+    };
+
+    #[test]
+    fn quote_if_needed_quotes_spaces() {
+        assert_eq!(quote_if_needed("foo bar"), "\"foo bar\"");
+    }
+
+    #[test]
+    fn compile_query_appends_any_term() {
+        let filters = vec!["repo:pointer".to_string(), "lang:rust".to_string()];
+        let all_terms = vec!["search".to_string()];
+        let query = compile_query(&filters, &all_terms, Some("symbol"));
+        assert_eq!(query, "repo:pointer lang:rust search symbol");
+    }
+
+    #[test]
+    fn no_result_guidance_mentions_any_terms() {
+        let guidance = build_no_result_guidance("repo:pointer shadow");
+        assert!(guidance.iter().any(|g| g.contains("any_terms")));
+    }
+
+    #[test]
+    fn normalize_repo_path_collapses_slashes_and_trims() {
+        assert_eq!(normalize_repo_path("//src///mcp//".to_string()), "src/mcp");
+        assert_eq!(normalize_repo_path("/".to_string()), "");
+    }
+
+    #[test]
+    fn build_file_list_entries_respects_depth() {
+        let files = vec![
+            "src/main.rs".to_string(),
+            "src/mcp/server.rs".to_string(),
+            "src/mcp/tools.rs".to_string(),
+            "README.md".to_string(),
+        ];
+        let depth1 = build_file_list_entries(&files, "", 1);
+        assert!(depth1.iter().any(|e| e.kind == "dir" && e.path == "src"));
+        assert!(
+            depth1
+                .iter()
+                .any(|e| e.kind == "file" && e.path == "README.md")
+        );
+        assert!(!depth1.iter().any(|e| e.path == "src/main.rs"));
+
+        let depth2 = build_file_list_entries(&files, "", 2);
+        assert!(
+            depth2
+                .iter()
+                .any(|e| e.kind == "file" && e.path == "src/main.rs")
+        );
+        assert!(
+            depth2
+                .iter()
+                .any(|e| e.kind == "dir" && e.path == "src/mcp")
+        );
+    }
 }

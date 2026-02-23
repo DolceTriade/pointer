@@ -11,6 +11,12 @@ use crate::dsl::{DEFAULT_PAGE_SIZE, TextSearchRequest};
 #[server]
 pub async fn search(query: String, page: u32) -> Result<SearchResultsPage, ServerFnError> {
     let normalized_page = page.max(1);
+    tracing::info!(
+        target: "pointer::search",
+        page = normalized_page,
+        query = %query,
+        "search request"
+    );
     let request =
         TextSearchRequest::from_query_str_with_page(&query, normalized_page, DEFAULT_PAGE_SIZE)
             .map_err(|e| ServerFnError::new(e.to_string()))?;
