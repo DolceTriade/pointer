@@ -87,6 +87,7 @@ async fn mcp_docs() -> impl IntoResponse {
             "regex": "Use regex field to enable regex content matching.",
             "path_search_behavior": "path_search requires a non-empty query and is for fuzzy path matching only.",
             "file_list_behavior": "file_list enumerates directories and files with optional recursive depth and limit.",
+            "file_content_behavior": "file_content supports optional start_line/end_line (1-based, inclusive) to return snippets instead of full files.",
             "recency_workflow": "For recent or older change questions: repositories -> repo_branches -> search by branch and compare indexed_at or is_live.",
             "search_fields": [
                 "repo: string",
@@ -116,10 +117,11 @@ async fn mcp_docs() -> impl IntoResponse {
             "5) search({repo, regex:\"pattern\"}) for regex matching",
             "6) file_list(repo, branch, path, depth, limit) for enumeration",
             "7) path_search(repo, branch, query) for fuzzy path lookup",
-            "8) file_content(repo, branch, path) for raw source text",
-            "9) symbol_insights(params) for definitions and references",
-            "10) OR behavior: search({repo, any_terms:[\"termA\",\"termB\"], dedupe:\"repo_path_line\"})",
-            "11) For no results, broaden filters and retry per branch"
+            "8) file_content(repo, branch, path, start_line?, end_line?) for raw source text or snippets",
+            "9) For large files, prefer file_content with line snippets first, then expand only if needed",
+            "10) symbol_insights(params) for definitions and references",
+            "11) OR behavior: search({repo, any_terms:[\"termA\",\"termB\"], dedupe:\"repo_path_line\"})",
+            "12) For no results, broaden filters and retry per branch"
         ]
     }));
     (StatusCode::OK, Json(payload))
@@ -188,7 +190,7 @@ async fn mcp_rpc(Json(req): Json<JsonRpcRequest>) -> Response {
                     "name": "pointer-mcp",
                     "version": env!("CARGO_PKG_VERSION"),
                 },
-                "instructions": "Use tools to query indexed code and symbol information. Operational flow: repositories -> repo_branches -> file_list/path_search -> file_content/search/symbol_insights. Use structured search fields: all_terms are AND semantics and any_terms are OR semantics (fanout + dedupe). For recency/version questions like 'recent change', call repo_branches first, then run search with explicit branch values and compare indexed_at/is_live metadata; add historical:true when historical snapshots should be included. Plain terms do not support wildcard matching; use regex for pattern matching. path_search requires a non-empty query and is not a directory listing endpoint; use file_list for enumeration.",
+                "instructions": "Use tools to query indexed code and symbol information. Operational flow: repositories -> repo_branches -> file_list/path_search -> file_content/search/symbol_insights. Use structured search fields: all_terms are AND semantics and any_terms are OR semantics (fanout + dedupe). For recency/version questions like 'recent change', call repo_branches first, then run search with explicit branch values and compare indexed_at/is_live metadata; add historical:true when historical snapshots should be included. Plain terms do not support wildcard matching; use regex for pattern matching. path_search requires a non-empty query and is not a directory listing endpoint; use file_list for enumeration. For large files, call file_content with start_line/end_line first to limit context size.",
             });
             jsonrpc_result(req.id, result)
         }
@@ -373,13 +375,15 @@ fn mcp_tools() -> Vec<Value> {
         }),
         json!({
             "name": "file_content",
-            "description": "Read raw indexed file content (no syntax highlighting) for an exact repo/branch/path from the index. Use this after file_list/path_search to inspect implementation details. Includes branch freshness metadata.",
+            "description": "Read raw indexed file content (no syntax highlighting) for an exact repo/branch/path from the index. Supports optional start_line/end_line (1-based, inclusive) for snippets to reduce context usage. Use this after file_list/path_search to inspect implementation details. Includes branch freshness metadata.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "repo": { "type": "string" },
                     "branch": { "type": "string" },
-                    "path": { "type": "string" }
+                    "path": { "type": "string" },
+                    "start_line": { "type": "integer", "minimum": 1, "description": "Optional 1-based inclusive start line for snippet responses." },
+                    "end_line": { "type": "integer", "minimum": 1, "description": "Optional 1-based inclusive end line for snippet responses." }
                 },
                 "required": ["repo", "branch", "path"],
                 "additionalProperties": false

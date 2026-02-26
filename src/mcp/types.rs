@@ -135,6 +135,10 @@ pub struct FileContentToolRequest {
     pub repo: String,
     pub branch: String,
     pub path: String,
+    #[serde(default)]
+    pub start_line: Option<u32>,
+    #[serde(default)]
+    pub end_line: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -171,7 +175,16 @@ pub struct FileContentToolResponse {
     pub language: Option<String>,
     pub content: String,
     pub line_count: usize,
+    pub returned_line_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snippet: Option<FileContentSnippet>,
     pub index_freshness: IndexFreshness,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FileContentSnippet {
+    pub start_line: u32,
+    pub end_line: u32,
 }
 
 #[derive(Debug, Deserialize)]

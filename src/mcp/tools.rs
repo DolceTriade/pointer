@@ -7,11 +7,11 @@ use tokio::time::{Duration, timeout};
 use crate::db::models::{FacetCount, SearchResult, SearchResultsPage};
 use crate::db::{Database, postgres::PostgresDb};
 use crate::mcp::types::{
-    ApiResponse, BranchFreshness, FileContentToolRequest, FileContentToolResponse, FileListEntry,
-    FileListToolRequest, FileListToolResponse, IndexFreshness, PathSearchToolRequest,
-    PathSearchToolResponse, RepoBranchesToolRequest, RepoBranchesToolResponse,
-    RepositoriesToolRequest, RepositoriesToolResponse, SearchCaseMode, SearchDedupeMode,
-    SearchToolRequest, SymbolInsightsToolRequest, SymbolInsightsToolResponse,
+    ApiResponse, BranchFreshness, FileContentSnippet, FileContentToolRequest,
+    FileContentToolResponse, FileListEntry, FileListToolRequest, FileListToolResponse,
+    IndexFreshness, PathSearchToolRequest, PathSearchToolResponse, RepoBranchesToolRequest,
+    RepoBranchesToolResponse, RepositoriesToolRequest, RepositoriesToolResponse, SearchCaseMode,
+    SearchDedupeMode, SearchToolRequest, SymbolInsightsToolRequest, SymbolInsightsToolResponse,
 };
 use crate::pages::file_viewer::{fetch_symbol_insights, search_repo_paths};
 use crate::pages::repo_detail::{RepoBranchDisplay, get_repo_branches};
@@ -84,6 +84,12 @@ pub async fn execute_file_content(
         .map_err(|err| err.to_string())?;
 
     let line_count = raw.content.lines().count();
+    let (content, snippet, returned_line_count) = slice_file_content(
+        &raw.content,
+        payload.start_line,
+        payload.end_line,
+        line_count,
+    )?;
     let index_freshness = resolve_branch_freshness(&payload.repo, &payload.branch, Some(&commit))
         .await
         .unwrap_or_else(|_| unknown_freshness());
@@ -93,10 +99,64 @@ pub async fn execute_file_content(
         commit_sha: raw.commit_sha,
         file_path: raw.file_path,
         language: raw.language,
-        content: raw.content,
+        content,
         line_count,
+        returned_line_count,
+        snippet,
         index_freshness,
     })
+}
+
+fn slice_file_content(
+    content: &str,
+    start_line: Option<u32>,
+    end_line: Option<u32>,
+    total_line_count: usize,
+) -> Result<(String, Option<FileContentSnippet>, usize), String> {
+    if start_line.is_none() && end_line.is_none() {
+        return Ok((content.to_string(), None, total_line_count));
+    }
+
+    let start = start_line.unwrap_or(1);
+    let end = end_line.unwrap_or(total_line_count as u32);
+
+    if start == 0 {
+        return Err("start_line must be >= 1".to_string());
+    }
+    if end == 0 {
+        return Err("end_line must be >= 1".to_string());
+    }
+    if end < start {
+        return Err("end_line must be >= start_line".to_string());
+    }
+    if total_line_count == 0 {
+        return Err("cannot request line snippets from an empty file".to_string());
+    }
+    if start as usize > total_line_count {
+        return Err(format!(
+            "start_line {} exceeds file line count {}",
+            start, total_line_count
+        ));
+    }
+
+    let bounded_end = end.min(total_line_count as u32);
+    let start_idx = (start - 1) as usize;
+    let count = (bounded_end - start + 1) as usize;
+    let snippet_content = content
+        .lines()
+        .skip(start_idx)
+        .take(count)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    Ok((
+        snippet_content,
+        Some(FileContentSnippet {
+            start_line: start,
+            end_line: bounded_end,
+        }),
+        count,
+    ))
 }
 
 pub async fn execute_file_list(
@@ -964,7 +1024,7 @@ fn split_query_tokens(query: &str) -> Vec<String> {
 mod tests {
     use super::{
         build_file_list_entries, build_no_result_guidance, compile_query, normalize_repo_path,
-        quote_if_needed,
+        quote_if_needed, slice_file_content,
     };
 
     #[test]
@@ -1020,5 +1080,34 @@ mod tests {
                 .iter()
                 .any(|e| e.kind == "dir" && e.path == "src/mcp")
         );
+    }
+
+    #[test]
+    fn slice_file_content_returns_full_content_without_bounds() {
+        let content = "a\nb\nc\n";
+        let (sliced, snippet, returned_line_count) =
+            slice_file_content(content, None, None, 3).expect("slice should succeed");
+        assert_eq!(sliced, content);
+        assert!(snippet.is_none());
+        assert_eq!(returned_line_count, 3);
+    }
+
+    #[test]
+    fn slice_file_content_returns_requested_snippet() {
+        let content = "a\nb\nc\nd";
+        let (sliced, snippet, returned_line_count) =
+            slice_file_content(content, Some(2), Some(3), 4).expect("slice should succeed");
+        assert_eq!(sliced, "b\nc");
+        assert_eq!(returned_line_count, 2);
+        let snippet = snippet.expect("snippet metadata must be present");
+        assert_eq!(snippet.start_line, 2);
+        assert_eq!(snippet.end_line, 3);
+    }
+
+    #[test]
+    fn slice_file_content_rejects_invalid_bounds() {
+        let content = "a\nb\nc";
+        let err = slice_file_content(content, Some(4), None, 3).expect_err("must reject");
+        assert!(err.contains("exceeds file line count"));
     }
 }
