@@ -87,6 +87,9 @@ jobs:
       - name: Build pointer-indexer
         run: cargo build --locked --release -p pointer-indexer --target x86_64-unknown-linux-musl --features vendored
 
+      - name: Build pointer-reposerver
+        run: cargo build --locked --release -p pointer-reposerver --target x86_64-unknown-linux-musl
+
       - name: Package artifacts
         run: |
           set -euo pipefail
@@ -99,8 +102,8 @@ jobs:
           cp Cargo.toml pointer/Cargo.toml
           tar -czf artifacts/pointer.tar.gz -C pointer .
 
-          # Package backend and indexer binaries
-          for bin in pointer-backend pointer-indexer; do
+          # Package backend, indexer, and reposerver binaries
+          for bin in pointer-backend pointer-indexer pointer-reposerver; do
             BIN_PATH="$(find target -path "*/release/${bin}" -type f | head -n1)"
             cp "$BIN_PATH" "artifacts/${bin}"
           done
