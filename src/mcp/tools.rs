@@ -126,9 +126,6 @@ fn slice_file_content(
     if end == 0 {
         return Err("end_line must be >= 1".to_string());
     }
-    if end < start {
-        return Err("end_line must be >= start_line".to_string());
-    }
     if total_line_count == 0 {
         return Err("cannot request line snippets from an empty file".to_string());
     }
@@ -137,6 +134,9 @@ fn slice_file_content(
             "start_line {} exceeds file line count {}",
             start, total_line_count
         ));
+    }
+    if end < start {
+        return Err("end_line must be >= start_line".to_string());
     }
 
     let bounded_end = end.min(total_line_count as u32);
