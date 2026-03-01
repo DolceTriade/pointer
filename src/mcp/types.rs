@@ -59,7 +59,8 @@ where
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SearchToolRequest {
     #[serde(default)]
     pub repo: Option<String>,
@@ -126,11 +127,13 @@ pub struct IndexFreshness {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RepoBranchesToolRequest {
     pub repo: String,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FileContentToolRequest {
     pub repo: String,
     pub branch: String,
@@ -142,6 +145,7 @@ pub struct FileContentToolRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PathSearchToolRequest {
     pub repo: String,
     pub branch: String,
@@ -157,6 +161,7 @@ pub struct PathSearchToolResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SymbolInsightsToolRequest {
     pub params: SymbolInsightsParams,
 }
@@ -188,6 +193,7 @@ pub struct FileContentSnippet {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FileListToolRequest {
     pub repo: String,
     pub branch: String,
@@ -235,6 +241,7 @@ pub struct SymbolInsightsToolResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RepositoriesToolRequest {
     #[serde(default = "default_repositories_limit")]
     pub limit: usize,

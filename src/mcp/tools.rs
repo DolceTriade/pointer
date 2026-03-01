@@ -1,6 +1,6 @@
 use axum::Json;
 use chrono::{DateTime, Utc};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use tokio::time::{Duration, timeout};
 
@@ -23,14 +23,24 @@ const FILE_LIST_QUERY_TIMEOUT: Duration = Duration::from_secs(8);
 const FILE_LIST_MAX_SOURCE_ROWS: usize = 200_000;
 
 pub async fn execute_search(payload: SearchToolRequest) -> Result<Value, String> {
-    let mode = build_search_execution_mode(payload)?;
+    let request_echo = search_request_echo(&payload, None);
+    let mode = build_search_execution_mode(&payload)?;
     match mode {
-        SearchExecutionMode::Single { query, page } => execute_single_search(query, page).await,
+        SearchExecutionMode::Single { query, page } => {
+            execute_single_search(
+                query,
+                page,
+                request_echo,
+                payload.repo.clone(),
+                payload.branch.clone(),
+            )
+            .await
+        }
         SearchExecutionMode::Batch {
             queries,
             dedupe,
             max_results_per_query,
-        } => execute_batch_search(queries, dedupe, max_results_per_query).await,
+        } => execute_batch_search(queries, dedupe, max_results_per_query, request_echo).await,
     }
 }
 
@@ -251,6 +261,12 @@ pub async fn execute_path_search(
     if payload.query.trim().is_empty() {
         return Err("query must be non-empty for path_search".to_string());
     }
+    if looks_like_search_filter_query(&payload.query) {
+        return Err(
+            "path_search query must be plain fuzzy text, not filter syntax such as repo: or path:"
+                .to_string(),
+        );
+    }
     let repo = payload.repo.clone();
     let branch = payload.branch.clone();
     let entries = search_repo_paths(repo.clone(), branch.clone(), payload.query, payload.limit)
@@ -297,6 +313,27 @@ pub async fn execute_repositories(
 pub fn normalize_tool_error(tool: &str, err: String) -> (String, String, Option<String>) {
     let lower = err.to_ascii_lowercase();
 
+    if tool == "search" && lower.contains("unknown field `query`") {
+        return (
+            "search_legacy_query_removed".to_string(),
+            "search no longer accepts a free-form query string".to_string(),
+            Some(
+                "Do not send `query`. Use structured fields like all_terms, any_terms, regex, repo, branch, path, and file."
+                    .to_string(),
+            ),
+        );
+    }
+    if tool == "file_list" && lower.contains("unknown field `query`") {
+        return (
+            "file_list_invalid_params".to_string(),
+            "file_list does not accept `query`".to_string(),
+            Some(
+                "Use `path` as an exact directory prefix for file_list, or call path_search with a plain fuzzy `query`."
+                    .to_string(),
+            ),
+        );
+    }
+
     if lower.contains("params must not have additional properties")
         || lower.contains("unknown field")
         || lower.contains("invalid type")
@@ -330,6 +367,16 @@ pub fn normalize_tool_error(tool: &str, err: String) -> (String, String, Option<
             err,
             Some(
                 "Use path_search with a non-empty query, or file_list to enumerate directories."
+                    .to_string(),
+            ),
+        );
+    }
+    if tool == "path_search" && lower.contains("plain fuzzy text") {
+        return (
+            "path_search_invalid_query_syntax".to_string(),
+            err,
+            Some(
+                "Use plain fuzzy text like `mcp serv` for path_search. Use file_list.path for directory prefixes and search.path/search.file for filters."
                     .to_string(),
             ),
         );
@@ -448,24 +495,29 @@ enum SearchExecutionMode {
         page: u32,
     },
     Batch {
-        queries: Vec<String>,
+        queries: Vec<BatchSearchQuery>,
         dedupe: SearchDedupeMode,
         max_results_per_query: usize,
     },
 }
 
-fn build_search_execution_mode(payload: SearchToolRequest) -> Result<SearchExecutionMode, String> {
-    let filters = compile_filter_tokens(&payload);
+struct BatchSearchQuery {
+    any_term: String,
+    query: String,
+}
+
+fn build_search_execution_mode(payload: &SearchToolRequest) -> Result<SearchExecutionMode, String> {
+    let filters = compile_filter_tokens(payload);
 
     let all_terms: Vec<String> = payload
         .all_terms
-        .into_iter()
+        .iter()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
         .collect();
     let any_terms: Vec<String> = payload
         .any_terms
-        .into_iter()
+        .iter()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
         .collect();
@@ -492,17 +544,26 @@ fn build_search_execution_mode(payload: SearchToolRequest) -> Result<SearchExecu
 
     let queries = any_terms
         .iter()
-        .map(|any_term| compile_query(&filters, &all_terms, Some(any_term)))
+        .map(|any_term| BatchSearchQuery {
+            any_term: any_term.clone(),
+            query: compile_query(&filters, &all_terms, Some(any_term)),
+        })
         .collect();
 
     Ok(SearchExecutionMode::Batch {
         queries,
-        dedupe: payload.dedupe,
+        dedupe: payload.dedupe.clone(),
         max_results_per_query: payload.max_results_per_query.max(1) as usize,
     })
 }
 
-async fn execute_single_search(query: String, page: u32) -> Result<Value, String> {
+async fn execute_single_search(
+    query: String,
+    page: u32,
+    request_echo: Value,
+    repo: Option<String>,
+    branch: Option<String>,
+) -> Result<Value, String> {
     tracing::trace!(
         target: "pointer::mcp_search",
         mode = "single",
@@ -511,16 +572,11 @@ async fn execute_single_search(query: String, page: u32) -> Result<Value, String
         "mcp search query"
     );
 
-    let page_data = search(query.clone(), page)
-        .await
-        .map_err(|err| err.to_string())?;
+    let page_data = search(query, page).await.map_err(|err| err.to_string())?;
 
     let mut freshness = freshness_from_search_results(&page_data.results);
     if freshness.indexed_at.is_none() {
-        if let (Some(repo), Some(branch)) = (
-            extract_filter_value(&query, "repo"),
-            extract_filter_value(&query, "branch"),
-        ) {
+        if let (Some(repo), Some(branch)) = (repo, branch) {
             freshness = resolve_branch_freshness(&repo, &branch, None)
                 .await
                 .unwrap_or_else(|_| unknown_freshness());
@@ -531,17 +587,22 @@ async fn execute_single_search(query: String, page: u32) -> Result<Value, String
     let top_filetypes = compute_top_filetypes(&page_data.results);
     let mut guidance = Vec::new();
     if page_data.results.is_empty() {
-        guidance.extend(build_no_result_guidance(&query));
+        guidance.extend(build_no_result_guidance());
     } else if page_data.has_more {
         guidance.push(
-            "Results are truncated for this page. Use truncation.next_page_args to continue."
+            "Results are truncated for this page. Reuse truncation.next_page_args as the next structured search call."
                 .to_string(),
         );
     }
+    let next_page_args = if page_data.has_more {
+        search_request_echo_from_value(&request_echo, page + 1)
+    } else {
+        Value::Null
+    };
 
     Ok(json!({
         "mode": "single",
-        "query": page_data.query,
+        "request_echo": request_echo,
         "page": page_data.page,
         "page_size": page_data.page_size,
         "has_more": page_data.has_more,
@@ -556,16 +617,17 @@ async fn execute_single_search(query: String, page: u32) -> Result<Value, String
         "index_freshness": freshness,
         "truncation": {
             "has_more": page_data.has_more,
-            "next_page_args": if page_data.has_more { json!({"query": query, "page": page + 1}) } else { Value::Null },
+            "next_page_args": next_page_args,
         },
         "guidance": guidance,
     }))
 }
 
 async fn execute_batch_search(
-    queries: Vec<String>,
+    queries: Vec<BatchSearchQuery>,
     dedupe: SearchDedupeMode,
     max_results_per_query: usize,
+    request_echo: Value,
 ) -> Result<Value, String> {
     tracing::trace!(
         target: "pointer::mcp_search",
@@ -573,28 +635,28 @@ async fn execute_batch_search(
         query_count = queries.len(),
         dedupe = ?dedupe,
         max_results_per_query = max_results_per_query,
-        queries = ?queries,
+        queries = ?queries.iter().map(|entry| &entry.query).collect::<Vec<_>>(),
         "mcp search batch queries"
     );
 
     let mut pages: Vec<(String, SearchResultsPage)> = Vec::with_capacity(queries.len());
     for query in &queries {
-        let page = search(query.clone(), 1)
+        let page = search(query.query.clone(), 1)
             .await
             .map_err(|err| err.to_string())?;
-        pages.push((query.clone(), page));
+        pages.push((query.any_term.clone(), page));
     }
 
     let mut all_results: Vec<SearchResult> = Vec::new();
     let mut per_query_counts = Vec::new();
     let mut any_has_more = false;
 
-    for (query, mut page) in pages {
+    for (any_term, mut page) in pages {
         if page.results.len() > max_results_per_query {
             page.results.truncate(max_results_per_query);
         }
         per_query_counts.push(json!({
-            "query": query,
+            "any_term": any_term,
             "count": page.results.len(),
             "has_more": page.has_more,
         }));
@@ -609,9 +671,9 @@ async fn execute_batch_search(
         vec![
             "No matches found in this batch. Broaden terms or remove restrictive filters."
                 .to_string(),
-            "For OR semantics, keep separate alternatives in queries and inspect per_query_counts."
+            "For OR semantics, keep separate alternatives in any_terms and inspect per_query_counts."
                 .to_string(),
-            "For older snapshots, include historical:yes and rerun per branch.".to_string(),
+            "For older snapshots, include historical:true and rerun per branch.".to_string(),
         ]
     } else {
         Vec::new()
@@ -619,7 +681,7 @@ async fn execute_batch_search(
 
     Ok(json!({
         "mode": "batch",
-        "queries": queries,
+        "request_echo": request_echo,
         "dedupe": dedupe,
         "results": enrich_results(&deduped_results),
         "facets": {
@@ -688,7 +750,7 @@ fn enrich_results(results: &[SearchResult]) -> Vec<Value> {
         .collect()
 }
 
-fn build_no_result_guidance(query: &str) -> Vec<String> {
+fn build_no_result_guidance() -> Vec<String> {
     let mut guidance = vec![
         "No results found. Verify repository name with repositories and branch with repo_branches."
             .to_string(),
@@ -698,24 +760,120 @@ fn build_no_result_guidance(query: &str) -> Vec<String> {
     guidance.push(
         "For OR semantics, use structured any_terms:[\"termA\", \"termB\", ...].".to_string(),
     );
-    if query.contains('*') && !query.contains("regex:") {
-        guidance.push(
-            "Wildcard syntax is not supported in plain terms. Use regex:\"...\" for pattern matching."
-                .to_string(),
-        );
-    }
-    if !query.contains("historical:yes") {
-        guidance.push(
-            "If you are looking for older/newer versions, retry with historical:yes.".to_string(),
-        );
-    }
-    if !query.contains("branch:") {
-        guidance.push(
-            "For recency checks, run repo_branches and repeat search with explicit branch:<name>."
-                .to_string(),
-        );
-    }
+    guidance.push(
+        "Wildcard syntax is not supported in all_terms/any_terms. Use the regex field for pattern matching."
+            .to_string(),
+    );
+    guidance.push(
+        "If you are looking for older or newer snapshots, retry with historical:true.".to_string(),
+    );
+    guidance.push(
+        "For recency checks, run repo_branches and repeat search with an explicit branch field."
+            .to_string(),
+    );
     guidance
+}
+
+fn search_request_echo(payload: &SearchToolRequest, page_override: Option<u32>) -> Value {
+    let mut out = Map::new();
+
+    if let Some(repo) = payload
+        .repo
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        out.insert("repo".to_string(), json!(repo));
+    }
+    if let Some(branch) = payload
+        .branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        out.insert("branch".to_string(), json!(branch));
+    }
+    if let Some(lang) = payload
+        .lang
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        out.insert("lang".to_string(), json!(lang));
+    }
+    if let Some(path) = payload
+        .path
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        out.insert("path".to_string(), json!(path));
+    }
+    if let Some(file) = payload
+        .file
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        out.insert("file".to_string(), json!(file));
+    }
+    if let Some(regex) = payload
+        .regex
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        out.insert("regex".to_string(), json!(regex));
+    }
+    if let Some(case) = payload.case.as_ref() {
+        out.insert("case".to_string(), json!(case));
+    }
+    if let Some(historical) = payload.historical {
+        out.insert("historical".to_string(), json!(historical));
+    }
+
+    let all_terms: Vec<String> = payload
+        .all_terms
+        .iter()
+        .map(|term| term.trim().to_string())
+        .filter(|term| !term.is_empty())
+        .collect();
+    if !all_terms.is_empty() {
+        out.insert("all_terms".to_string(), json!(all_terms));
+    }
+
+    let any_terms: Vec<String> = payload
+        .any_terms
+        .iter()
+        .map(|term| term.trim().to_string())
+        .filter(|term| !term.is_empty())
+        .collect();
+    if !any_terms.is_empty() {
+        out.insert("any_terms".to_string(), json!(any_terms));
+        out.insert("dedupe".to_string(), json!(payload.dedupe));
+        if payload.max_results_per_query != 25 {
+            out.insert(
+                "max_results_per_query".to_string(),
+                json!(payload.max_results_per_query.max(1)),
+            );
+        }
+    }
+
+    let page = page_override.unwrap_or_else(|| payload.page.max(1));
+    if page > 1 {
+        out.insert("page".to_string(), json!(page));
+    }
+
+    Value::Object(out)
+}
+
+fn search_request_echo_from_value(request_echo: &Value, next_page: u32) -> Value {
+    let mut out = match request_echo {
+        Value::Object(map) => map.clone(),
+        _ => Map::new(),
+    };
+    out.insert("page".to_string(), json!(next_page.max(1)));
+    Value::Object(out)
 }
 
 fn compile_filter_tokens(payload: &SearchToolRequest) -> Vec<String> {
@@ -979,53 +1137,33 @@ fn format_age_human(age_seconds: i64) -> String {
     }
 }
 
-fn extract_filter_value(query: &str, key: &str) -> Option<String> {
-    let prefix = format!("{key}:");
-    for token in split_query_tokens(query) {
-        if let Some(value) = token.strip_prefix(&prefix) {
-            let trimmed = value.trim().trim_matches('"');
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
-            }
-        }
-    }
-    None
-}
-
-fn split_query_tokens(query: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut current = String::new();
-    let mut in_quotes = false;
-
-    for c in query.chars() {
-        match c {
-            '"' => {
-                in_quotes = !in_quotes;
-                current.push(c);
-            }
-            ' ' | '\t' if !in_quotes => {
-                if !current.trim().is_empty() {
-                    tokens.push(current.trim().to_string());
-                }
-                current.clear();
-            }
-            _ => current.push(c),
-        }
-    }
-
-    if !current.trim().is_empty() {
-        tokens.push(current.trim().to_string());
-    }
-
-    tokens
+fn looks_like_search_filter_query(query: &str) -> bool {
+    query.split_whitespace().any(|token| {
+        let lower = token.to_ascii_lowercase();
+        [
+            "repo:",
+            "branch:",
+            "path:",
+            "file:",
+            "regex:",
+            "lang:",
+            "case:",
+            "historical:",
+        ]
+        .iter()
+        .any(|prefix| lower.starts_with(prefix))
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        build_file_list_entries, build_no_result_guidance, compile_query, normalize_repo_path,
-        quote_if_needed, slice_file_content,
+        build_file_list_entries, build_no_result_guidance, compile_query,
+        looks_like_search_filter_query, normalize_repo_path, normalize_tool_error, quote_if_needed,
+        search_request_echo, slice_file_content,
     };
+    use crate::mcp::types::{SearchDedupeMode, SearchToolRequest};
+    use serde_json::json;
 
     #[test]
     fn quote_if_needed_quotes_spaces() {
@@ -1042,8 +1180,61 @@ mod tests {
 
     #[test]
     fn no_result_guidance_mentions_any_terms() {
-        let guidance = build_no_result_guidance("repo:pointer shadow");
+        let guidance = build_no_result_guidance();
         assert!(guidance.iter().any(|g| g.contains("any_terms")));
+    }
+
+    #[test]
+    fn search_request_deserialization_rejects_unknown_query_field() {
+        let err = serde_json::from_value::<SearchToolRequest>(json!({
+            "query": "repo:pointer search"
+        }))
+        .expect_err("legacy query should be rejected");
+        assert!(err.to_string().contains("unknown field `query`"));
+    }
+
+    #[test]
+    fn normalize_tool_error_maps_legacy_search_query() {
+        let (code, message, suggestion) =
+            normalize_tool_error("search", "unknown field `query`".to_string());
+        assert_eq!(code, "search_legacy_query_removed");
+        assert!(message.contains("free-form query string"));
+        assert!(suggestion.unwrap_or_default().contains("all_terms"));
+    }
+
+    #[test]
+    fn looks_like_search_filter_query_detects_prefixed_tokens() {
+        assert!(looks_like_search_filter_query("path:src/mcp"));
+        assert!(!looks_like_search_filter_query("mcp serv"));
+    }
+
+    #[test]
+    fn search_request_echo_emits_structured_pagination_args() {
+        let payload = SearchToolRequest {
+            repo: Some("pointer".to_string()),
+            branch: Some("main".to_string()),
+            lang: None,
+            path: Some("src/mcp/**".to_string()),
+            file: None,
+            regex: Some("\\bQueryParser\\(".to_string()),
+            case: None,
+            historical: Some(true),
+            all_terms: vec!["symbol".to_string(), " resolver ".to_string()],
+            any_terms: vec!["panic".to_string(), "unwrap".to_string()],
+            page: 1,
+            dedupe: SearchDedupeMode::RepoPath,
+            max_results_per_query: 25,
+        };
+
+        let echo = search_request_echo(&payload, Some(2));
+        assert_eq!(echo["repo"], "pointer");
+        assert_eq!(echo["branch"], "main");
+        assert_eq!(echo["path"], "src/mcp/**");
+        assert_eq!(echo["regex"], "\\bQueryParser\\(");
+        assert_eq!(echo["all_terms"], json!(["symbol", "resolver"]));
+        assert_eq!(echo["any_terms"], json!(["panic", "unwrap"]));
+        assert_eq!(echo["page"], 2);
+        assert!(echo.get("query").is_none());
     }
 
     #[test]

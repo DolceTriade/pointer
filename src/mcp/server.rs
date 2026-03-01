@@ -79,34 +79,44 @@ async fn mcp_info() -> impl IntoResponse {
 }
 
 async fn mcp_docs() -> impl IntoResponse {
-    let payload = ApiResponse::success(json!({
-        "dsl": {
-            "semantics": "Structured search payload",
-            "or_support": "Use structured any_terms:[...] for OR semantics. all_terms are ANDed.",
-            "wildcards": "Use path/file as glob-like filters. Plain terms are literal term matches.",
-            "regex": "Use regex field to enable regex content matching.",
-            "path_search_behavior": "path_search requires a non-empty query and is for fuzzy path matching only.",
-            "file_list_behavior": "file_list enumerates directories and files with optional recursive depth and limit.",
+    let payload = ApiResponse::success(mcp_docs_payload());
+    (StatusCode::OK, Json(payload))
+}
+
+fn mcp_docs_payload() -> Value {
+    json!({
+        "search_payload": {
+            "semantics": "search accepts structured JSON fields only. Do not send a free-form query string.",
+            "or_support": "Use any_terms:[...] for OR semantics. all_terms are ANDed.",
+            "wildcards": "Use path/file as glob-like filters. all_terms and any_terms are literal terms, not wildcard patterns.",
+            "regex": "Use the regex field for content regex matching. Provide only the pattern string and JSON-escape backslashes.",
+            "path_search_behavior": "path_search requires a non-empty plain fuzzy query and is for fuzzy path matching only.",
+            "file_list_behavior": "file_list enumerates directories and files with optional recursive depth and limit. Use path as a directory prefix, not a search query.",
             "file_content_behavior": "file_content supports optional start_line/end_line (1-based, inclusive) to return snippets instead of full files.",
             "recency_workflow": "For recent or older change questions: repositories -> repo_branches -> search by branch and compare indexed_at or is_live.",
             "search_fields": [
-                "repo: string",
-                "branch: string",
-                "lang: string",
-                "path: glob-like string",
-                "file: glob-like string",
-                "regex: string",
+                "repo: exact repository key from repositories",
+                "branch: exact branch name from repo_branches",
+                "lang: language filter",
+                "path: glob-like path filter",
+                "file: glob-like filename/path filter",
+                "regex: regex pattern string (JSON-escaped)",
                 "case: yes|no|auto",
                 "historical: boolean",
                 "all_terms: string[] (AND)",
                 "any_terms: string[] (OR)"
             ],
+            "escaping": [
+                "Do not prefix field values with repo:, path:, file:, or regex:.",
+                "Regex patterns are JSON strings, so escape backslashes. Example: \"\\\\bQueryParser\\\\(\".",
+                "If a JSON string contains double quotes, escape them as \\\"."
+            ],
             "troubleshooting": [
-                "No results with repo filter: call repositories and use exact repo key.",
-                "No branch results: call repo_branches and use exact branch name.",
+                "No results with repo filter: call repositories and use the exact repo key.",
+                "No branch results: call repo_branches and use the exact branch name.",
                 "Need OR behavior: place alternatives in any_terms:[\"termA\",\"termB\"].",
-                "Need regex matching: use regex:<pattern> instead of wildcard plain terms.",
-                "Need directory listing: use file_list instead of path_search with empty query."
+                "Need regex matching: set the regex field instead of using wildcard plain terms.",
+                "Need directory listing: use file_list. Need fuzzy path lookup: use path_search."
             ]
         },
         "cookbook": [
@@ -114,17 +124,16 @@ async fn mcp_docs() -> impl IntoResponse {
             "2) repo_branches(repo) to discover branch names and freshness",
             "3) search({repo, branch, all_terms:[\"term\"]}) for scoped search",
             "4) search({repo, branch, historical:true, all_terms:[\"term\"]}) for older snapshots",
-            "5) search({repo, regex:\"pattern\"}) for regex matching",
-            "6) file_list(repo, branch, path, depth, limit) for enumeration",
-            "7) path_search(repo, branch, query) for fuzzy path lookup",
-            "8) file_content(repo, branch, path, start_line?, end_line?) for raw source text or snippets",
+            "5) search({repo, regex:\"\\\\bQueryParser\\\\(\"}) for regex matching",
+            "6) file_list({repo, branch, path:\"src/mcp\", depth:2}) for directory enumeration",
+            "7) path_search({repo, branch, query:\"mcp serv\"}) for fuzzy path lookup",
+            "8) file_content({repo, branch, path, start_line?, end_line?}) for raw source text or snippets",
             "9) For large files, prefer file_content with line snippets first, then expand only if needed",
-            "10) symbol_insights(params) for definitions and references",
+            "10) symbol_insights({params:{...}}) for definitions and references",
             "11) OR behavior: search({repo, any_terms:[\"termA\",\"termB\"], dedupe:\"repo_path_line\"})",
             "12) For no results, broaden filters and retry per branch"
         ]
-    }));
-    (StatusCode::OK, Json(payload))
+    })
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -190,7 +199,7 @@ async fn mcp_rpc(Json(req): Json<JsonRpcRequest>) -> Response {
                     "name": "pointer-mcp",
                     "version": env!("CARGO_PKG_VERSION"),
                 },
-                "instructions": "Use tools to query indexed code and symbol information. Operational flow: repositories -> repo_branches -> file_list/path_search -> file_content/search/symbol_insights. Use structured search fields: all_terms are AND semantics and any_terms are OR semantics (fanout + dedupe). For recency/version questions like 'recent change', call repo_branches first, then run search with explicit branch values and compare indexed_at/is_live metadata; add historical:true when historical snapshots should be included. Plain terms do not support wildcard matching; use regex for pattern matching. path_search requires a non-empty query and is not a directory listing endpoint; use file_list for enumeration. For large files, call file_content with start_line/end_line first to limit context size.",
+                "instructions": "Use tools to query indexed code and symbol information; do not fall back to local filesystem reads for indexed lookup. Operational flow: repositories -> repo_branches -> file_list/path_search -> file_content/search/symbol_insights. search accepts structured JSON fields only; do not send a free-form `query` string. Keep filter values plain: do not include prefixes like `repo:`, `path:`, or `regex:` inside field values. all_terms are AND semantics and any_terms are OR semantics (fanout + dedupe). For recency/version questions like 'recent change', call repo_branches first, then run search with explicit branch values and compare indexed_at/is_live metadata; add historical:true when historical snapshots should be included. Plain terms do not support wildcard matching; use the regex field for pattern matching. path_search requires a non-empty plain fuzzy query and is not a directory listing endpoint; use file_list for enumeration. For large files, call file_content with start_line/end_line first to limit context size.",
             });
             jsonrpc_result(req.id, result)
         }
@@ -322,20 +331,20 @@ fn mcp_tools() -> Vec<Value> {
     vec![
         json!({
             "name": "search",
-            "description": "Search indexed source code using structured fields (not a free-form DSL string). Use all_terms for AND semantics (all terms must match). Use any_terms for OR semantics (server executes one query per term, then merges/deduplicates using dedupe). Include repo/branch filters for version-aware questions, and set historical:true for older snapshots. path/file are glob-like filters, regex is a content regex filter, and case controls case sensitivity (yes|no|auto). At least one of all_terms, any_terms, or regex is required.",
+            "description": "Search indexed source code using structured JSON fields only. This tool does not accept a free-form `query` string. Use all_terms for AND semantics (all terms must match). Use any_terms for OR semantics (server executes one query per term, then merges/deduplicates using dedupe). Include repo/branch filters for version-aware questions, and set historical:true for older snapshots. path/file are glob-like filters, regex is a content regex filter, and case controls case sensitivity (yes|no|auto). At least one of all_terms, any_terms, or regex is required. Do not include prefixes like repo:, path:, file:, or regex: inside field values.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "repo": { "type": "string" },
-                    "branch": { "type": "string" },
-                    "lang": { "type": "string" },
-                    "path": { "type": "string", "description": "Glob-like path filter" },
-                    "file": { "type": "string", "description": "Glob-like file filter" },
-                    "regex": { "type": "string", "description": "Regex content filter" },
+                    "repo": { "type": "string", "description": "Exact repository key from repositories. Example: \"pointer\"." },
+                    "branch": { "type": "string", "description": "Exact branch name from repo_branches. Example: \"main\"." },
+                    "lang": { "type": "string", "description": "Language filter. Example: \"rust\"." },
+                    "path": { "type": "string", "description": "Glob-like path filter only. Example: \"src/mcp/**\". Do not use this for fuzzy lookup." },
+                    "file": { "type": "string", "description": "Glob-like filename/path filter. Example: \"*.rs\"." },
+                    "regex": { "type": "string", "description": "Content regex pattern only. Do not prefix with `regex:`. JSON-escape backslashes, for example \"\\\\bQueryParser\\\\(\"." },
                     "case": { "type": "string", "enum": ["yes", "no", "auto"] },
                     "historical": { "type": "boolean" },
-                    "all_terms": { "type": "array", "items": { "type": "string" } },
-                    "any_terms": { "type": "array", "items": { "type": "string" }, "maxItems": 8 },
+                    "all_terms": { "type": "array", "items": { "type": "string" }, "description": "Literal AND terms. Example: [\"symbol\", \"resolver\"]. Do not wrap these with content:." },
+                    "any_terms": { "type": "array", "items": { "type": "string" }, "maxItems": 8, "description": "Literal OR alternatives. Example: [\"panic\", \"unwrap\"]." },
                     "page": { "type": "integer", "minimum": 1 },
                     "dedupe": {
                         "type": "string",
@@ -344,6 +353,12 @@ fn mcp_tools() -> Vec<Value> {
                     },
                     "max_results_per_query": { "type": "integer", "minimum": 1, "maximum": 100 }
                 },
+                "examples": [
+                    { "repo": "pointer", "branch": "main", "all_terms": ["search"] },
+                    { "repo": "pointer", "branch": "main", "any_terms": ["panic", "unwrap"], "dedupe": "repo_path_line" },
+                    { "repo": "pointer", "regex": "\\\\bQueryParser\\\\(" },
+                    { "repo": "pointer", "branch": "main", "historical": true, "all_terms": ["symbol"] }
+                ],
                 "anyOf": [
                     { "required": ["all_terms"] },
                     { "required": ["any_terms"] },
@@ -375,47 +390,56 @@ fn mcp_tools() -> Vec<Value> {
         }),
         json!({
             "name": "file_content",
-            "description": "Read raw indexed file content (no syntax highlighting) for an exact repo/branch/path from the index. Supports optional start_line/end_line (1-based, inclusive) for snippets to reduce context usage. Use this after file_list/path_search to inspect implementation details. Includes branch freshness metadata.",
+            "description": "Read raw indexed file content (no syntax highlighting) for an exact repo/branch/path from the index. Supports optional start_line/end_line (1-based, inclusive) for snippets to reduce context usage. Use this after file_list/path_search to inspect implementation details; prefer exact paths returned by those tools. Includes branch freshness metadata.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "repo": { "type": "string" },
                     "branch": { "type": "string" },
-                    "path": { "type": "string" },
+                    "path": { "type": "string", "description": "Exact file path returned by file_list or path_search. Example: \"src/mcp/server.rs\"." },
                     "start_line": { "type": "integer", "minimum": 1, "description": "Optional 1-based inclusive start line for snippet responses." },
                     "end_line": { "type": "integer", "minimum": 1, "description": "Optional 1-based inclusive end line for snippet responses." }
                 },
+                "examples": [
+                    { "repo": "pointer", "branch": "main", "path": "src/mcp/server.rs", "start_line": 1, "end_line": 40 }
+                ],
                 "required": ["repo", "branch", "path"],
                 "additionalProperties": false
             }
         }),
         json!({
             "name": "file_list",
-            "description": "Enumerate files/directories under a path for a repository+branch from the index. Supports bounded recursive traversal with depth and limit. Use this for directory listing workflows and then call file_content on specific files. Response includes truncated flag, branch freshness, and stable paths.",
+            "description": "Enumerate files/directories under a path for a repository+branch from the index. Supports bounded recursive traversal with depth and limit. Use this for directory listing workflows and then call file_content on specific files. `path` is a directory prefix, not a fuzzy search query. Response includes truncated flag, branch freshness, and stable paths.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "repo": { "type": "string" },
                     "branch": { "type": "string" },
-                    "path": { "type": "string" },
+                    "path": { "type": "string", "description": "Directory prefix to enumerate from. Example: \"src/mcp\". Do not send a fuzzy query here." },
                     "depth": { "type": "integer", "minimum": 1, "maximum": 10 },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 5000 }
                 },
+                "examples": [
+                    { "repo": "pointer", "branch": "main", "path": "src/mcp", "depth": 2, "limit": 100 }
+                ],
                 "required": ["repo", "branch"],
                 "additionalProperties": false
             }
         }),
         json!({
             "name": "path_search",
-            "description": "Search file and directory paths within a repository and branch using a non-empty query (fuzzy path lookup). This is path-only matching and does not enumerate full directory contents; use file_list for enumeration and file_content for file bodies. Includes freshness metadata.",
+            "description": "Search file and directory paths within a repository and branch using a non-empty plain fuzzy query (fuzzy path lookup). This is path-only matching and does not enumerate full directory contents; use file_list for enumeration and file_content for file bodies. Do not send filter syntax like `path:` or glob patterns here. Includes freshness metadata.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "repo": { "type": "string" },
                     "branch": { "type": "string" },
-                    "query": { "type": "string" },
+                    "query": { "type": "string", "description": "Plain fuzzy text only. Example: \"mcp serv\". Do not send `path:src/mcp` or glob syntax here." },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 50 }
                 },
+                "examples": [
+                    { "repo": "pointer", "branch": "main", "query": "mcp serv", "limit": 10 }
+                ],
                 "required": ["repo", "branch", "query"],
                 "additionalProperties": false
             }
@@ -456,4 +480,40 @@ fn mcp_tools() -> Vec<Value> {
             }
         }),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{mcp_docs_payload, mcp_tools};
+
+    #[test]
+    fn docs_payload_uses_structured_search_key() {
+        let payload = mcp_docs_payload();
+        assert!(payload.get("search_payload").is_some());
+        assert!(payload.get("dsl").is_none());
+    }
+
+    #[test]
+    fn search_tool_schema_mentions_structured_only_usage() {
+        let tools = mcp_tools();
+        let search_tool = tools
+            .iter()
+            .find(|tool| tool.get("name").and_then(|name| name.as_str()) == Some("search"))
+            .expect("search tool must be present");
+
+        let description = search_tool["description"]
+            .as_str()
+            .expect("search description must be a string");
+        assert!(description.contains("does not accept a free-form `query` string"));
+
+        let regex_description = search_tool["inputSchema"]["properties"]["regex"]["description"]
+            .as_str()
+            .expect("regex description must be a string");
+        assert!(regex_description.contains("JSON-escape backslashes"));
+
+        let examples = search_tool["inputSchema"]["examples"]
+            .as_array()
+            .expect("search examples must be present");
+        assert!(!examples.is_empty());
+    }
 }
