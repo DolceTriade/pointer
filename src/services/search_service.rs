@@ -21,7 +21,6 @@ pub async fn search(query: String, page: u32) -> Result<SearchResultsPage, Serve
         TextSearchRequest::from_query_str_with_page(&query, normalized_page, DEFAULT_PAGE_SIZE)
             .map_err(|e| ServerFnError::new(e.to_string()))?;
     let state = expect_context::<crate::server::GlobalAppState>();
-    let state = state.lock().await;
     let db = PostgresDb::new(state.pool.clone());
     db.text_search(&request)
         .await
@@ -34,7 +33,6 @@ pub async fn autocomplete_repositories(
     limit: i64,
 ) -> Result<Vec<String>, ServerFnError> {
     let state = expect_context::<crate::server::GlobalAppState>();
-    let state = state.lock().await;
     let db = PostgresDb::new(state.pool.clone());
     let normalized_limit = limit.max(1).min(20);
     db.autocomplete_repositories(term.trim(), normalized_limit)
@@ -49,7 +47,6 @@ pub async fn autocomplete_paths(
     limit: i64,
 ) -> Result<Vec<String>, ServerFnError> {
     let state = expect_context::<crate::server::GlobalAppState>();
-    let state = state.lock().await;
     let db = PostgresDb::new(state.pool.clone());
     let normalized_limit = limit.max(1).min(20);
     let repos: Vec<String> = repositories
@@ -72,7 +69,6 @@ pub async fn autocomplete_symbols(
         return Ok(Vec::new());
     }
     let state = expect_context::<crate::server::GlobalAppState>();
-    let state = state.lock().await;
     let db = PostgresDb::new(state.pool.clone());
     let normalized_limit = limit.max(1).min(20);
     db.autocomplete_symbols(trimmed, normalized_limit)
@@ -87,7 +83,6 @@ pub async fn autocomplete_languages(
     limit: i64,
 ) -> Result<Vec<String>, ServerFnError> {
     let state = expect_context::<crate::server::GlobalAppState>();
-    let state = state.lock().await;
     let db = PostgresDb::new(state.pool.clone());
     let normalized_limit = limit.max(1).min(20);
     let repos: Vec<String> = repositories
@@ -107,7 +102,6 @@ pub async fn autocomplete_branches(
     limit: i64,
 ) -> Result<Vec<String>, ServerFnError> {
     let state = expect_context::<crate::server::GlobalAppState>();
-    let state = state.lock().await;
     let db = PostgresDb::new(state.pool.clone());
     let normalized_limit = limit.max(1).min(20);
     let repos: Vec<String> = repositories
@@ -127,7 +121,6 @@ pub async fn autocomplete_files(
     limit: i64,
 ) -> Result<Vec<String>, ServerFnError> {
     let state = expect_context::<crate::server::GlobalAppState>();
-    let state = state.lock().await;
     let db = PostgresDb::new(state.pool.clone());
     let normalized_limit = limit.max(1).min(20);
     let repos: Vec<String> = repositories

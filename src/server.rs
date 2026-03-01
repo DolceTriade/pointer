@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use clap::Parser;
 use sqlx::postgres::PgPool;
-use tokio::sync::Mutex;
 
 #[derive(Debug, Parser)]
 pub struct ServerConfig {
@@ -22,4 +21,4 @@ pub struct AppState {
     pub pool: PgPool,
 }
 
-pub type GlobalAppState = Arc<Mutex<AppState>>;
+pub type GlobalAppState = Arc<AppState>;

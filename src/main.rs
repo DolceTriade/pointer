@@ -11,7 +11,6 @@ async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
     let config = crate::server::ServerConfig::parse();
 
-    use tokio::sync::Mutex;
     // Initialize logging system with colored output
     use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
@@ -47,7 +46,7 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("failed to connect to postgres")?;
 
-    let state = Arc::new(Mutex::new(pointer::server::AppState { pool }));
+    let state = Arc::new(pointer::server::AppState { pool });
     let file_state = state.clone();
     let render_state = state.clone();
 

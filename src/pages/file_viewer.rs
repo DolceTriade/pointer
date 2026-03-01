@@ -104,7 +104,6 @@ pub async fn get_file_viewer_data(
     use std::path::Path;
 
     let state = expect_context::<crate::server::GlobalAppState>();
-    let state = state.lock().await;
     let db = PostgresDb::new(state.pool.clone());
 
     let commit = db
@@ -216,7 +215,6 @@ pub async fn search_repo_paths(
     }
 
     let state = expect_context::<crate::server::GlobalAppState>();
-    let state = state.lock().await;
     let db = PostgresDb::new(state.pool.clone());
 
     let commit = db
@@ -246,7 +244,6 @@ pub async fn fetch_symbol_insights(
     }
 
     let state = expect_context::<crate::server::GlobalAppState>();
-    let state = state.lock().await;
     let db = PostgresDb::new(state.pool.clone());
 
     let commit = db

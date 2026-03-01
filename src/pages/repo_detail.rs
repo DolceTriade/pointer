@@ -26,7 +26,6 @@ pub async fn get_repo_branches(repo: String) -> Result<Vec<RepoBranchDisplay>, S
     use crate::db::{Database, postgres::PostgresDb};
 
     let state = expect_context::<crate::server::GlobalAppState>();
-    let state = state.lock().await;
     let db = PostgresDb::new(state.pool.clone());
 
     let branches = db

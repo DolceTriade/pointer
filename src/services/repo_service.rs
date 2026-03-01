@@ -7,7 +7,6 @@ use crate::db::{Database, postgres::PostgresDb};
 #[server]
 pub async fn get_repositories(limit: usize) -> Result<Vec<RepoSummary>, ServerFnError> {
     let state = expect_context::<crate::server::GlobalAppState>();
-    let state = state.lock().await;
 
     // Create a database instance using the pool
     let db = PostgresDb::new(state.pool.clone());

@@ -76,10 +76,7 @@ pub async fn execute_file_content(
     payload: FileContentToolRequest,
 ) -> Result<FileContentToolResponse, String> {
     let state = leptos::prelude::expect_context::<crate::server::GlobalAppState>();
-    let pool = {
-        let state = state.lock().await;
-        state.pool.clone()
-    };
+    let pool = state.pool.clone();
     let db = PostgresDb::new(pool);
 
     let commit = db
@@ -173,10 +170,7 @@ pub async fn execute_file_list(
     payload: FileListToolRequest,
 ) -> Result<FileListToolResponse, String> {
     let state = leptos::prelude::expect_context::<crate::server::GlobalAppState>();
-    let pool = {
-        let state = state.lock().await;
-        state.pool.clone()
-    };
+    let pool = state.pool.clone();
     let db = PostgresDb::new(pool.clone());
 
     let commit = db
