@@ -359,11 +359,6 @@ fn mcp_tools() -> Vec<Value> {
                     { "repo": "pointer", "regex": "\\\\bQueryParser\\\\(" },
                     { "repo": "pointer", "branch": "main", "historical": true, "all_terms": ["symbol"] }
                 ],
-                "anyOf": [
-                    { "required": ["all_terms"] },
-                    { "required": ["any_terms"] },
-                    { "required": ["regex"] }
-                ],
                 "additionalProperties": false
             }
         }),
