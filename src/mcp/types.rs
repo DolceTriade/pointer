@@ -152,11 +152,24 @@ pub struct PathSearchToolRequest {
     pub query: String,
     #[serde(default)]
     pub limit: Option<u16>,
+    #[serde(default)]
+    pub cursor: Option<String>,
+    #[serde(default)]
+    pub auto_paginate: Option<bool>,
+    #[serde(default)]
+    pub max_pages: Option<u8>,
+    #[serde(default)]
+    pub max_total_entries: Option<u16>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct PathSearchToolResponse {
     pub entries: Vec<TreeEntry>,
+    pub has_more: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pages_fetched: Option<u8>,
     pub index_freshness: IndexFreshness,
 }
 
@@ -203,6 +216,14 @@ pub struct FileListToolRequest {
     pub depth: u8,
     #[serde(default = "default_file_list_limit")]
     pub limit: usize,
+    #[serde(default)]
+    pub cursor: Option<String>,
+    #[serde(default)]
+    pub auto_paginate: Option<bool>,
+    #[serde(default)]
+    pub max_pages: Option<u8>,
+    #[serde(default)]
+    pub max_total_entries: Option<usize>,
 }
 
 fn default_file_list_depth() -> u8 {
@@ -230,6 +251,11 @@ pub struct FileListToolResponse {
     pub truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub truncated_reason: Option<String>,
+    pub has_more: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pages_fetched: Option<u8>,
     pub entries: Vec<FileListEntry>,
     pub index_freshness: IndexFreshness,
 }
@@ -263,4 +289,51 @@ pub struct BranchFreshness {
     pub indexed_at: Option<String>,
     pub age_seconds: Option<i64>,
     pub age_human: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SymbolInsightsToolRequest;
+
+    #[test]
+    fn symbol_insights_scope_is_case_insensitive() {
+        let upper = serde_json::json!({
+            "params": {
+                "repo": "pointer",
+                "branch": "main",
+                "symbol": "MyType",
+                "scope": "Repository"
+            }
+        });
+        let parsed_upper: SymbolInsightsToolRequest =
+            serde_json::from_value(upper).expect("Repository scope should deserialize");
+        assert_eq!(parsed_upper.params.scope.as_str(), "repository");
+
+        let lower = serde_json::json!({
+            "params": {
+                "repo": "pointer",
+                "branch": "main",
+                "symbol": "MyType",
+                "scope": "file"
+            }
+        });
+        let parsed_lower: SymbolInsightsToolRequest =
+            serde_json::from_value(lower).expect("file scope should deserialize");
+        assert_eq!(parsed_lower.params.scope.as_str(), "file");
+    }
+
+    #[test]
+    fn symbol_insights_scope_rejects_invalid_values() {
+        let invalid = serde_json::json!({
+            "params": {
+                "repo": "pointer",
+                "branch": "main",
+                "symbol": "MyType",
+                "scope": "repo"
+            }
+        });
+        let err = serde_json::from_value::<SymbolInsightsToolRequest>(invalid)
+            .expect_err("invalid scope should fail");
+        assert!(err.to_string().contains("invalid scope"));
+    }
 }

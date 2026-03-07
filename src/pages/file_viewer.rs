@@ -4,7 +4,7 @@ use leptos::prelude::*;
 use leptos_router::components::A;
 use leptos_router::hooks::use_params;
 use leptos_router::params::Params;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de};
 use std::collections::HashSet;
 
 use crate::components::breadcrumbs::{Breadcrumbs, CopyPathButton};
@@ -37,7 +37,7 @@ pub enum FileViewerData {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SymbolSearchScope {
     Repository,
     Directory,
@@ -79,11 +79,38 @@ impl SymbolSearchScope {
     }
 
     pub fn from_str(value: &str) -> Self {
-        match value {
+        match value.trim().to_ascii_lowercase().as_str() {
             "directory" => SymbolSearchScope::Directory,
             "file" => SymbolSearchScope::File,
             "custom" => SymbolSearchScope::Custom,
             _ => SymbolSearchScope::Repository,
+        }
+    }
+}
+
+impl Serialize for SymbolSearchScope {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for SymbolSearchScope {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "repository" => Ok(SymbolSearchScope::Repository),
+            "directory" => Ok(SymbolSearchScope::Directory),
+            "file" => Ok(SymbolSearchScope::File),
+            "custom" => Ok(SymbolSearchScope::Custom),
+            _ => Err(de::Error::custom(format!(
+                "invalid scope `{raw}`; expected one of repository, directory, file, custom"
+            ))),
         }
     }
 }

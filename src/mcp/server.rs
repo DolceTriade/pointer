@@ -90,7 +90,7 @@ fn mcp_docs_payload() -> Value {
             "or_support": "Use any_terms:[...] for OR semantics. all_terms are ANDed.",
             "wildcards": "Use path/file as glob-like filters. all_terms and any_terms are literal terms, not wildcard patterns.",
             "regex": "Use the regex field for content regex matching. Provide only the pattern string and JSON-escape backslashes.",
-            "path_search_behavior": "path_search requires a non-empty plain fuzzy query and is for fuzzy path matching only.",
+            "path_search_behavior": "path_search requires a non-empty plain query string and performs case-insensitive substring matching on paths only.",
             "file_list_behavior": "file_list enumerates directories and files with optional recursive depth and limit. Use path as a directory prefix, not a search query.",
             "file_content_behavior": "file_content supports optional start_line/end_line (1-based, inclusive) to return snippets instead of full files.",
             "recency_workflow": "For recent or older change questions: repositories -> repo_branches -> search by branch and compare indexed_at or is_live.",
@@ -116,7 +116,7 @@ fn mcp_docs_payload() -> Value {
                 "No branch results: call repo_branches and use the exact branch name.",
                 "Need OR behavior: place alternatives in any_terms:[\"termA\",\"termB\"].",
                 "Need regex matching: set the regex field instead of using wildcard plain terms.",
-                "Need directory listing: use file_list. Need fuzzy path lookup: use path_search."
+                "Need directory listing: use file_list. Need case-insensitive substring path lookup: use path_search."
             ]
         },
         "cookbook": [
@@ -126,7 +126,7 @@ fn mcp_docs_payload() -> Value {
             "4) search({repo, branch, historical:true, all_terms:[\"term\"]}) for older snapshots",
             "5) search({repo, regex:\"\\\\bQueryParser\\\\(\"}) for regex matching",
             "6) file_list({repo, branch, path:\"src/mcp\", depth:2}) for directory enumeration",
-            "7) path_search({repo, branch, query:\"mcp serv\"}) for fuzzy path lookup",
+            "7) path_search({repo, branch, query:\"mcp_serv\"}) for case-insensitive substring path lookup",
             "8) file_content({repo, branch, path, start_line?, end_line?}) for raw source text or snippets",
             "9) For large files, prefer file_content with line snippets first, then expand only if needed",
             "10) symbol_insights({params:{...}}) for definitions and references",
@@ -199,7 +199,7 @@ async fn mcp_rpc(Json(req): Json<JsonRpcRequest>) -> Response {
                     "name": "pointer-mcp",
                     "version": env!("CARGO_PKG_VERSION"),
                 },
-                "instructions": "Use tools to query indexed code and symbol information; do not fall back to local filesystem reads for indexed lookup. Operational flow: repositories -> repo_branches -> file_list/path_search -> file_content/search/symbol_insights. search accepts structured JSON fields only; do not send a free-form `query` string. Keep filter values plain: do not include prefixes like `repo:`, `path:`, or `regex:` inside field values. all_terms are AND semantics and any_terms are OR semantics (fanout + dedupe). For recency/version questions like 'recent change', call repo_branches first, then run search with explicit branch values and compare indexed_at/is_live metadata; add historical:true when historical snapshots should be included. Plain terms do not support wildcard matching; use the regex field for pattern matching. path_search requires a non-empty plain fuzzy query and is not a directory listing endpoint; use file_list for enumeration. For large files, call file_content with start_line/end_line first to limit context size.",
+                "instructions": "Use tools to query indexed code and symbol information; do not fall back to local filesystem reads for indexed lookup. Operational flow: repositories -> repo_branches -> file_list/path_search -> file_content/search/symbol_insights. search accepts structured JSON fields only; do not send a free-form `query` string. Keep filter values plain: do not include prefixes like `repo:`, `path:`, or `regex:` inside field values. all_terms are AND semantics and any_terms are OR semantics (fanout + dedupe). For recency/version questions like 'recent change', call repo_branches first, then run search with explicit branch values and compare indexed_at/is_live metadata; add historical:true when historical snapshots should be included. Plain terms do not support wildcard matching; use the regex field for pattern matching. path_search requires a non-empty plain query string and performs case-insensitive substring matching over paths; it is not a directory listing endpoint, so use file_list for enumeration. For large files, call file_content with start_line/end_line first to limit context size.",
             });
             jsonrpc_result(req.id, result)
         }
@@ -338,7 +338,7 @@ fn mcp_tools() -> Vec<Value> {
                     "repo": { "type": "string", "description": "Exact repository key from repositories. Example: \"pointer\"." },
                     "branch": { "type": "string", "description": "Exact branch name from repo_branches. Example: \"main\"." },
                     "lang": { "type": "string", "description": "Language filter. Example: \"rust\"." },
-                    "path": { "type": "string", "description": "Glob-like path filter only. Example: \"src/mcp/**\". Do not use this for fuzzy lookup." },
+                    "path": { "type": "string", "description": "Glob-like path filter only. Example: \"src/mcp/**\". Do not use this for path substring lookup." },
                     "file": { "type": "string", "description": "Glob-like filename/path filter. Example: \"*.rs\"." },
                     "regex": { "type": "string", "description": "Content regex pattern only. Do not prefix with `regex:`. JSON-escape backslashes, for example \"\\\\bQueryParser\\\\(\"." },
                     "case": { "type": "string", "enum": ["yes", "no", "auto"] },
@@ -404,18 +404,24 @@ fn mcp_tools() -> Vec<Value> {
         }),
         json!({
             "name": "file_list",
-            "description": "Enumerate files/directories under a path for a repository+branch from the index. Supports bounded recursive traversal with depth and limit. Use this for directory listing workflows and then call file_content on specific files. `path` is a directory prefix, not a fuzzy search query. Response includes truncated flag, branch freshness, and stable paths.",
+            "description": "Enumerate files/directories under a path for a repository+branch from the index. Supports bounded recursive traversal with depth and limit. Use this for directory listing workflows and then call file_content on specific files. `path` is a directory prefix, not a substring search query. Optional cursor/auto_paginate can fetch more results while preserving truncation and narrowing guidance. Response includes truncated flag, branch freshness, and stable paths.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "repo": { "type": "string" },
                     "branch": { "type": "string" },
-                    "path": { "type": "string", "description": "Directory prefix to enumerate from. Example: \"src/mcp\". Do not send a fuzzy query here." },
+                    "path": { "type": "string", "description": "Directory prefix to enumerate from. Example: \"src/mcp\". Do not send a substring search query here." },
                     "depth": { "type": "integer", "minimum": 1, "maximum": 10 },
-                    "limit": { "type": "integer", "minimum": 1, "maximum": 5000 }
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 5000 },
+                    "cursor": { "type": "string", "description": "Optional pagination cursor from prior file_list response." },
+                    "auto_paginate": { "type": "boolean", "description": "If true, server attempts to return multiple pages up to max_pages/max_total_entries." },
+                    "max_pages": { "type": "integer", "minimum": 1, "maximum": 5 },
+                    "max_total_entries": { "type": "integer", "minimum": 1, "maximum": 5000 }
                 },
                 "examples": [
-                    { "repo": "pointer", "branch": "main", "path": "src/mcp", "depth": 2, "limit": 100 }
+                    { "repo": "pointer", "branch": "main", "path": "src/mcp", "depth": 2, "limit": 100 },
+                    { "repo": "pointer", "branch": "main", "path": "src", "limit": 100, "cursor": "100" },
+                    { "repo": "pointer", "branch": "main", "path": "src", "limit": 100, "auto_paginate": true, "max_pages": 3, "max_total_entries": 250 }
                 ],
                 "required": ["repo", "branch"],
                 "additionalProperties": false
@@ -423,17 +429,23 @@ fn mcp_tools() -> Vec<Value> {
         }),
         json!({
             "name": "path_search",
-            "description": "Search file and directory paths within a repository and branch using a non-empty plain fuzzy query (fuzzy path lookup). This is path-only matching and does not enumerate full directory contents; use file_list for enumeration and file_content for file bodies. Do not send filter syntax like `path:` or glob patterns here. Includes freshness metadata.",
+            "description": "Search file and directory paths within a repository and branch using a non-empty plain query string. Matching is case-insensitive substring matching on path text (single query string, not OR-token search). This is path-only matching and does not enumerate full directory contents; use file_list for enumeration and file_content for file bodies. Do not send filter syntax like `path:` or glob patterns here. Optional cursor/auto_paginate can fetch additional path matches. Includes freshness metadata.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "repo": { "type": "string" },
                     "branch": { "type": "string" },
-                    "query": { "type": "string", "description": "Plain fuzzy text only. Example: \"mcp serv\". Do not send `path:src/mcp` or glob syntax here." },
-                    "limit": { "type": "integer", "minimum": 1, "maximum": 50 }
+                    "query": { "type": "string", "description": "Plain query string only. Example: \"mcp_serv\". Matching is case-insensitive substring matching over path text. This is a single query string, not OR token search. Do not send `path:src/mcp` or glob syntax here." },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 50 },
+                    "cursor": { "type": "string", "description": "Optional pagination cursor from prior path_search response." },
+                    "auto_paginate": { "type": "boolean", "description": "If true, server attempts to return multiple pages up to max_pages/max_total_entries." },
+                    "max_pages": { "type": "integer", "minimum": 1, "maximum": 5 },
+                    "max_total_entries": { "type": "integer", "minimum": 1, "maximum": 200 }
                 },
                 "examples": [
-                    { "repo": "pointer", "branch": "main", "query": "mcp serv", "limit": 10 }
+                    { "repo": "pointer", "branch": "main", "query": "mcp_serv", "limit": 10 },
+                    { "repo": "pointer", "branch": "main", "query": "mcp_serv", "limit": 10, "cursor": "10" },
+                    { "repo": "pointer", "branch": "main", "query": "mcp_serv", "limit": 10, "auto_paginate": true, "max_pages": 3, "max_total_entries": 25 }
                 ],
                 "required": ["repo", "branch", "query"],
                 "additionalProperties": false
@@ -455,6 +467,7 @@ fn mcp_tools() -> Vec<Value> {
                             "language": { "type": "string" },
                             "scope": {
                                 "type": "string",
+                                "description": "Scope selector. Accepted values are case-insensitive.",
                                 "enum": ["repository", "directory", "file", "custom"]
                             },
                             "include_paths": {

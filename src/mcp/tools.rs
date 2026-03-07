@@ -21,6 +21,9 @@ use crate::services::search_service::search;
 const MAX_BATCH_QUERIES: usize = 8;
 const FILE_LIST_QUERY_TIMEOUT: Duration = Duration::from_secs(8);
 const FILE_LIST_MAX_SOURCE_ROWS: usize = 200_000;
+const MAX_AUTO_PAGES: u8 = 5;
+const MAX_AUTO_TOTAL_PATH_ENTRIES: usize = 200;
+const MAX_AUTO_TOTAL_FILE_LIST_ENTRIES: usize = 5000;
 
 pub async fn execute_search(payload: SearchToolRequest) -> Result<Value, String> {
     let request_echo = search_request_echo(&payload, None);
@@ -182,6 +185,14 @@ pub async fn execute_file_list(
     let root_path = normalize_repo_path(payload.path.unwrap_or_default());
     let requested_depth = payload.depth.clamp(1, 10);
     let limit = payload.limit.clamp(1, 5000);
+    let offset = parse_cursor_offset(payload.cursor.as_deref())?;
+    let auto_paginate = payload.auto_paginate.unwrap_or(false);
+    let max_pages = payload.max_pages.unwrap_or(1).clamp(1, MAX_AUTO_PAGES);
+    let max_total_entries = payload
+        .max_total_entries
+        .unwrap_or(limit)
+        .clamp(limit, MAX_AUTO_TOTAL_FILE_LIST_ENTRIES)
+        .min(limit.saturating_mul(max_pages as usize));
 
     let like_pattern = if root_path.is_empty() {
         "%".to_string()
@@ -225,11 +236,51 @@ pub async fn execute_file_list(
     }
 
     let mut entries = build_file_list_entries(&source_rows, &root_path, requested_depth);
-    if entries.len() > limit {
-        entries.truncate(limit);
+    let total_entries = entries.len();
+
+    if auto_paginate {
+        let slice_start = offset.min(total_entries);
+        let slice_len = max_total_entries.min(total_entries.saturating_sub(slice_start));
+        entries = entries
+            .into_iter()
+            .skip(slice_start)
+            .take(slice_len)
+            .collect();
+    } else {
+        let slice_start = offset.min(total_entries);
+        let slice_len = limit.min(total_entries.saturating_sub(slice_start));
+        entries = entries
+            .into_iter()
+            .skip(slice_start)
+            .take(slice_len)
+            .collect();
+    }
+
+    let visible_limit = if auto_paginate {
+        max_total_entries
+    } else {
+        limit
+    };
+    let has_more = offset.saturating_add(visible_limit) < total_entries;
+    let next_cursor = has_more.then(|| (offset + entries.len()).to_string());
+    let pages_fetched = if auto_paginate {
+        let per_page = limit.max(1);
+        let fetched = entries.len().div_ceil(per_page).max(1) as u8;
+        Some(fetched.min(max_pages))
+    } else {
+        None
+    };
+
+    if total_entries > limit {
         truncated = true;
         if truncated_reason.is_none() {
-            truncated_reason = Some("file_list reached entry limit".to_string());
+            let mut reason = "file_list reached entry limit".to_string();
+            if has_more {
+                reason.push_str("; narrow path/depth or continue with cursor");
+            } else {
+                reason.push_str("; narrow path/depth for fewer results");
+            }
+            truncated_reason = Some(reason);
         }
     }
 
@@ -244,6 +295,9 @@ pub async fn execute_file_list(
         requested_depth,
         truncated,
         truncated_reason,
+        has_more,
+        next_cursor,
+        pages_fetched,
         entries,
         index_freshness,
     })
@@ -257,22 +311,74 @@ pub async fn execute_path_search(
     }
     if looks_like_search_filter_query(&payload.query) {
         return Err(
-            "path_search query must be plain fuzzy text, not filter syntax such as repo: or path:"
+            "path_search query must be a plain query string, not filter syntax such as repo: or path:"
                 .to_string(),
         );
     }
     let repo = payload.repo.clone();
     let branch = payload.branch.clone();
-    let entries = search_repo_paths(repo.clone(), branch.clone(), payload.query, payload.limit)
-        .await
-        .map_err(|err| err.to_string())?;
+    let limit = payload.limit.unwrap_or(10).clamp(1, 50) as usize;
+    let offset = parse_cursor_offset(payload.cursor.as_deref())?;
+    let auto_paginate = payload.auto_paginate.unwrap_or(false);
+    let max_pages = payload.max_pages.unwrap_or(1).clamp(1, MAX_AUTO_PAGES);
+    let max_total_entries = (payload
+        .max_total_entries
+        .unwrap_or(limit as u16)
+        .clamp(limit as u16, MAX_AUTO_TOTAL_PATH_ENTRIES as u16)
+        as usize)
+        .min(limit.saturating_mul(max_pages as usize));
+
+    let target_count = if auto_paginate {
+        max_total_entries
+    } else {
+        limit
+    };
+    let fetch_limit = (offset + target_count + 1).min(MAX_AUTO_TOTAL_PATH_ENTRIES + 1);
+    let fetched = search_repo_paths(
+        repo.clone(),
+        branch.clone(),
+        payload.query,
+        Some(fetch_limit as u16),
+    )
+    .await
+    .map_err(|err| err.to_string())?;
+    let has_more = fetched.len() > offset + target_count;
+    let entries: Vec<_> = fetched
+        .into_iter()
+        .skip(offset)
+        .take(target_count)
+        .collect();
+    let next_cursor = has_more.then(|| (offset + entries.len()).to_string());
+    let pages_fetched = if auto_paginate {
+        let fetched_pages = entries.len().div_ceil(limit).max(1) as u8;
+        Some(fetched_pages.min(max_pages))
+    } else {
+        None
+    };
+
     let index_freshness = resolve_branch_freshness(&repo, &branch, None)
         .await
         .unwrap_or_else(|_| unknown_freshness());
     Ok(PathSearchToolResponse {
         entries,
+        has_more,
+        next_cursor,
+        pages_fetched,
         index_freshness,
     })
+}
+
+fn parse_cursor_offset(cursor: Option<&str>) -> Result<usize, String> {
+    let Some(cursor) = cursor else {
+        return Ok(0);
+    };
+    let trimmed = cursor.trim();
+    if trimmed.is_empty() {
+        return Ok(0);
+    }
+    trimmed
+        .parse::<usize>()
+        .map_err(|_| "invalid cursor; expected a numeric offset".to_string())
 }
 
 pub async fn execute_symbol_insights(
@@ -322,7 +428,7 @@ pub fn normalize_tool_error(tool: &str, err: String) -> (String, String, Option<
             "file_list_invalid_params".to_string(),
             "file_list does not accept `query`".to_string(),
             Some(
-                "Use `path` as an exact directory prefix for file_list, or call path_search with a plain fuzzy `query`."
+                "Use `path` as an exact directory prefix for file_list, or call path_search with a plain query string (case-insensitive substring matching)."
                     .to_string(),
             ),
         );
@@ -365,12 +471,12 @@ pub fn normalize_tool_error(tool: &str, err: String) -> (String, String, Option<
             ),
         );
     }
-    if tool == "path_search" && lower.contains("plain fuzzy text") {
+    if tool == "path_search" && lower.contains("plain query string") {
         return (
             "path_search_invalid_query_syntax".to_string(),
             err,
             Some(
-                "Use plain fuzzy text like `mcp serv` for path_search. Use file_list.path for directory prefixes and search.path/search.file for filters."
+                "Use a plain query string like `mcp_serv` for path_search (case-insensitive substring matching). Use file_list.path for directory prefixes and search.path/search.file for filters."
                     .to_string(),
             ),
         );
