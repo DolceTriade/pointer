@@ -1,6 +1,6 @@
 use crate::db::models::{
-    FacetCount, FileReference as DbFileReference, RepoBranchInfo, SearchResultsPage,
-    SearchResultsStats, SearchSnippet, SymbolSuggestion,
+    FacetCount, FileReference as DbFileReference, RepoBranchInfo, SearchMatchSpan,
+    SearchResultsPage, SearchResultsStats, SearchSnippet, SymbolSuggestion,
 };
 use crate::db::{
     Database, DbError, DbUniqueChunk, FileReference, RawFileContent, ReferenceResult, RepoSummary,
@@ -1861,6 +1861,8 @@ ORDER BY idx
                 cbc.chunk_line_count AS line_count,
                 ctx.context_snippet AS content_text,
                 ctx.match_line_number,
+                ctx.snippet_start_line_number,
+                ctx.match_spans,
                 pf.branches,
                 pf.live_branches,
                 pf.is_historical,
@@ -1943,8 +1945,10 @@ ORDER BY idx
                 .into_iter()
                 .map(|mut agg| {
                     agg.entries.sort_by(|a, b| {
-                        let (exact_a, marks_a, signal_a) = snippet_signal_score(&a.content_text);
-                        let (exact_b, marks_b, signal_b) = snippet_signal_score(&b.content_text);
+                        let (exact_a, marks_a, signal_a) =
+                            snippet_signal_score(&a.content_text, &a.match_spans.0);
+                        let (exact_b, marks_b, signal_b) =
+                            snippet_signal_score(&b.content_text, &b.match_spans.0);
                         exact_b
                             .cmp(&exact_a)
                             .then_with(|| marks_b.cmp(&marks_a))
@@ -1961,8 +1965,9 @@ ORDER BY idx
                     let chunk_start_line: i32 = best_row.start_line.try_into().unwrap_or(i32::MAX);
                     let best_match_line =
                         chunk_start_line.saturating_add(best_row.match_line_number - 1);
-                    let (best_start_line, best_end_line) =
-                        snippet_bounds(&best_row.content_text, best_match_line);
+                    let best_start_line = chunk_start_line
+                        .saturating_add(best_row.snippet_start_line_number - 1);
+                    let best_end_line = snippet_end_line(&best_row.content_text, best_start_line);
 
                     let mut snippets = Vec::new();
                     snippets.push(SearchSnippet {
@@ -1970,19 +1975,22 @@ ORDER BY idx
                         end_line: best_end_line,
                         match_line: best_match_line,
                         content_text: best_row.content_text.clone(),
+                        match_spans: best_row.match_spans.0.clone(),
                     });
 
                     for row in entries_iter {
                         let chunk_start_line: i32 = row.start_line.try_into().unwrap_or(i32::MAX);
                         let snippet_match =
                             chunk_start_line.saturating_add(row.match_line_number - 1);
-                        let (snippet_start, snippet_end) =
-                            snippet_bounds(&row.content_text, snippet_match);
+                        let snippet_start =
+                            chunk_start_line.saturating_add(row.snippet_start_line_number - 1);
+                        let snippet_end = snippet_end_line(&row.content_text, snippet_start);
                         snippets.push(SearchSnippet {
                             start_line: snippet_start,
                             end_line: snippet_end,
                             match_line: snippet_match,
                             content_text: row.content_text,
+                            match_spans: row.match_spans.0,
                         });
                     }
 
@@ -1997,10 +2005,11 @@ ORDER BY idx
                         .or_else(|| merged_snippets.first().cloned())
                         .unwrap_or_else(|| SearchSnippet {
                             start_line: best_start_line,
-                            end_line: best_end_line,
-                            match_line: best_match_line,
-                            content_text: best_row.content_text.clone(),
-                        });
+                        end_line: best_end_line,
+                        match_line: best_match_line,
+                        content_text: best_row.content_text.clone(),
+                        match_spans: best_row.match_spans.0.clone(),
+                    });
 
                     SearchResult {
                         repository: best_row.repository,
@@ -2010,6 +2019,7 @@ ORDER BY idx
                         end_line: primary_snippet.end_line,
                         match_line: primary_snippet.match_line,
                         content_text: primary_snippet.content_text.clone(),
+                        match_spans: primary_snippet.match_spans.clone(),
                         snippets: merged_snippets,
                         branches: best_row.branches,
                         live_branches: best_row.live_branches,
@@ -2746,6 +2756,8 @@ struct SearchResultRow {
     line_count: i32,
     content_text: String,
     match_line_number: i32,
+    snippet_start_line_number: i32,
+    match_spans: Json<Vec<SearchMatchSpan>>,
     branches: Vec<String>,
     live_branches: Vec<String>,
     is_historical: bool,
@@ -2823,45 +2835,36 @@ struct FileAggregate {
 
 const FACET_LIMIT: usize = 8;
 
-fn snippet_signal_score(text: &str) -> (i32, i32, i32) {
-    let mark_count = text.matches("<mark>").count() as i32;
-    let exact_count = count_exact_mark_matches(text);
+fn snippet_signal_score(text: &str, spans: &[SearchMatchSpan]) -> (i32, i32, i32) {
+    let span_count = spans.len() as i32;
+    let exact_count = count_exact_match_spans(text, spans);
     let signal_count = text
         .bytes()
         .filter(|byte| matches!(byte, b':' | b'=' | b'(' | b')'))
         .count() as i32;
-    (exact_count, mark_count, signal_count)
+    (exact_count, span_count, signal_count)
 }
 
-fn count_exact_mark_matches(text: &str) -> i32 {
-    const OPEN: &str = "<mark>";
-    const CLOSE: &str = "</mark>";
+fn count_exact_match_spans(text: &str, spans: &[SearchMatchSpan]) -> i32 {
     let mut count = 0;
-    let mut idx = 0;
     let bytes = text.as_bytes();
 
-    while let Some(open_rel) = text[idx..].find(OPEN) {
-        let open_idx = idx + open_rel;
-        let content_start = open_idx + OPEN.len();
-        let Some(close_rel) = text[content_start..].find(CLOSE) else {
-            break;
-        };
-        let close_idx = content_start + close_rel;
-        let before = if open_idx == 0 {
+    for span in spans {
+        if span.start > span.end || span.end > bytes.len() {
+            continue;
+        }
+        let before = if span.start == 0 {
             None
         } else {
-            bytes.get(open_idx.wrapping_sub(1)).copied()
+            bytes.get(span.start - 1).copied()
         };
-        let after_idx = close_idx + CLOSE.len();
-        let after = bytes.get(after_idx).copied();
+        let after = bytes.get(span.end).copied();
 
         let before_ident = before.map(is_identifier_byte).unwrap_or(false);
         let after_ident = after.map(is_identifier_byte).unwrap_or(false);
         if !before_ident && !after_ident {
             count += 1;
         }
-
-        idx = after_idx;
     }
 
     count
@@ -2871,19 +2874,9 @@ fn is_identifier_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
-fn snippet_bounds(content_text: &str, match_line: i32) -> (i32, i32) {
-    let lines: Vec<&str> = content_text.split('\n').collect();
-    let line_count = lines.len().max(1) as i32;
-    let match_offset = lines
-        .iter()
-        .position(|line| line.contains("<mark>"))
-        .unwrap_or(0) as i32;
-    let mut start_line = match_line.saturating_sub(match_offset);
-    if start_line < 1 {
-        start_line = 1;
-    }
-    let end_line = start_line.saturating_add(line_count.saturating_sub(1));
-    (start_line, end_line)
+fn snippet_end_line(content_text: &str, start_line: i32) -> i32 {
+    let line_count = content_text.split('\n').count().max(1) as i32;
+    start_line.saturating_add(line_count.saturating_sub(1))
 }
 
 fn merge_overlapping_snippets(mut snippets: Vec<SearchSnippet>) -> Vec<SearchSnippet> {
@@ -2931,44 +2924,87 @@ fn merge_overlapping_snippets(mut snippets: Vec<SearchSnippet>) -> Vec<SearchSni
     merged
 }
 
-fn build_snippet_line_map(snippet: &SearchSnippet) -> BTreeMap<i32, (String, i32)> {
+fn build_snippet_line_map(snippet: &SearchSnippet) -> BTreeMap<i32, (String, Vec<SearchMatchSpan>)> {
     let mut map = BTreeMap::new();
-    for (idx, line) in snippet.content_text.split('\n').enumerate() {
+    for (idx, (line, spans)) in split_snippet_lines(snippet).into_iter().enumerate() {
         let line_number = snippet.start_line.saturating_add(idx as i32);
-        insert_snippet_line(&mut map, line_number, line);
+        insert_snippet_line(&mut map, line_number, line, spans);
     }
     map
 }
 
-fn merge_snippet_line_map(map: &mut BTreeMap<i32, (String, i32)>, snippet: &SearchSnippet) {
-    for (idx, line) in snippet.content_text.split('\n').enumerate() {
+fn merge_snippet_line_map(
+    map: &mut BTreeMap<i32, (String, Vec<SearchMatchSpan>)>,
+    snippet: &SearchSnippet,
+) {
+    for (idx, (line, spans)) in split_snippet_lines(snippet).into_iter().enumerate() {
         let line_number = snippet.start_line.saturating_add(idx as i32);
-        insert_snippet_line(map, line_number, line);
+        insert_snippet_line(map, line_number, line, spans);
     }
 }
 
-fn insert_snippet_line(map: &mut BTreeMap<i32, (String, i32)>, line: i32, text: &str) {
-    let mark_count = text.matches("<mark>").count() as i32;
+fn insert_snippet_line(
+    map: &mut BTreeMap<i32, (String, Vec<SearchMatchSpan>)>,
+    line: i32,
+    text: String,
+    spans: Vec<SearchMatchSpan>,
+) {
+    let span_count = spans.len();
     match map.get(&line) {
-        Some((_, existing_marks)) if *existing_marks >= mark_count => {}
+        Some((_, existing_spans)) if existing_spans.len() >= span_count => {}
         _ => {
-            map.insert(line, (text.to_string(), mark_count));
+            map.insert(line, (text, spans));
         }
     }
+}
+
+fn split_snippet_lines(snippet: &SearchSnippet) -> Vec<(String, Vec<SearchMatchSpan>)> {
+    let mut lines = Vec::new();
+    let mut line_start = 0usize;
+    for line in snippet.content_text.split('\n') {
+        let line_end = line_start + line.len();
+        let spans = snippet
+            .match_spans
+            .iter()
+            .filter(|span| span.start >= line_start && span.end <= line_end)
+            .map(|span| SearchMatchSpan {
+                start: span.start - line_start,
+                end: span.end - line_start,
+            })
+            .collect();
+        lines.push((line.to_string(), spans));
+        line_start = line_end + 1;
+    }
+    if lines.is_empty() {
+        lines.push((String::new(), Vec::new()));
+    }
+    lines
 }
 
 fn build_snippet_from_map(
     start_line: i32,
     end_line: i32,
     match_line: i32,
-    map: &BTreeMap<i32, (String, i32)>,
+    map: &BTreeMap<i32, (String, Vec<SearchMatchSpan>)>,
 ) -> SearchSnippet {
     let mut lines = Vec::new();
+    let mut match_spans = Vec::new();
+    let mut offset = 0usize;
     for line_number in start_line..=end_line {
-        if let Some((line, _)) = map.get(&line_number) {
+        if let Some((line, local_spans)) = map.get(&line_number) {
             lines.push(line.clone());
+            for span in local_spans {
+                match_spans.push(SearchMatchSpan {
+                    start: offset + span.start,
+                    end: offset + span.end,
+                });
+            }
+            offset += line.len();
         } else {
             lines.push(String::new());
+        }
+        if line_number < end_line {
+            offset += 1;
         }
     }
 
@@ -2977,6 +3013,7 @@ fn build_snippet_from_map(
         end_line,
         match_line,
         content_text: lines.join("\n"),
+        match_spans,
     }
 }
 
@@ -3023,26 +3060,27 @@ mod tests {
     }
 
     #[test]
-    fn snippet_bounds_use_match_offset() {
-        let text = "alpha\n<mark>ip_rcv</mark>\nomega";
-        let (start, end) = snippet_bounds(text, 100);
-        assert_eq!(start, 99);
+    fn snippet_end_line_uses_plain_text_line_count() {
+        let text = "alpha\nip_rcv\nomega";
+        let end = snippet_end_line(text, 99);
         assert_eq!(end, 101);
     }
 
     #[test]
-    fn merge_overlapping_snippets_merges_adjacent_and_preserves_marks() {
+    fn merge_overlapping_snippets_merges_adjacent_and_preserves_spans() {
         let snippet_a = SearchSnippet {
             start_line: 10,
             end_line: 12,
             match_line: 11,
-            content_text: "line10\n<mark>hit_a</mark>\nline12".to_string(),
+            content_text: "line10\nhit_a\nline12".to_string(),
+            match_spans: vec![SearchMatchSpan { start: 7, end: 12 }],
         };
         let snippet_b = SearchSnippet {
             start_line: 13,
             end_line: 14,
             match_line: 13,
-            content_text: "<mark>hit_b</mark>\nline14".to_string(),
+            content_text: "hit_b\nline14".to_string(),
+            match_spans: vec![SearchMatchSpan { start: 0, end: 5 }],
         };
 
         let merged = merge_overlapping_snippets(vec![snippet_a, snippet_b]);
@@ -3053,23 +3091,32 @@ mod tests {
         assert_eq!(merged_snippet.match_line, 11);
         let lines: Vec<&str> = merged_snippet.content_text.split('\n').collect();
         assert_eq!(lines.len(), 5);
-        assert!(merged_snippet.content_text.contains("<mark>hit_a</mark>"));
-        assert!(merged_snippet.content_text.contains("<mark>hit_b</mark>"));
+        assert_eq!(merged_snippet.match_spans.len(), 2);
+        assert_eq!(
+            &merged_snippet.content_text[merged_snippet.match_spans[0].start..merged_snippet.match_spans[0].end],
+            "hit_a"
+        );
+        assert_eq!(
+            &merged_snippet.content_text[merged_snippet.match_spans[1].start..merged_snippet.match_spans[1].end],
+            "hit_b"
+        );
     }
 
     #[test]
-    fn merge_overlapping_snippets_prefers_more_marks_on_overlap() {
+    fn merge_overlapping_snippets_prefers_more_spans_on_overlap() {
         let snippet_a = SearchSnippet {
             start_line: 10,
             end_line: 12,
             match_line: 11,
             content_text: "line10\nline11\nline12".to_string(),
+            match_spans: Vec::new(),
         };
         let snippet_b = SearchSnippet {
             start_line: 12,
             end_line: 14,
             match_line: 12,
-            content_text: "<mark>hit_b</mark>\nline13\nline14".to_string(),
+            content_text: "hit_b\nline13\nline14".to_string(),
+            match_spans: vec![SearchMatchSpan { start: 0, end: 5 }],
         };
 
         let merged = merge_overlapping_snippets(vec![snippet_a, snippet_b]);
@@ -3079,7 +3126,8 @@ mod tests {
         assert_eq!(merged_snippet.end_line, 14);
         let lines: Vec<&str> = merged_snippet.content_text.split('\n').collect();
         assert_eq!(lines.len(), 5);
-        assert_eq!(lines[2], "<mark>hit_b</mark>");
+        assert_eq!(lines[2], "hit_b");
+        assert_eq!(merged_snippet.match_spans, vec![SearchMatchSpan { start: 14, end: 19 }]);
     }
 
     #[test]

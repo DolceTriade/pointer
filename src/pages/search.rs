@@ -1,5 +1,6 @@
 use crate::db::models::{
-    FacetCount, SearchResult, SearchResultsPage, SearchResultsStats, SearchSnippet,
+    FacetCount, SearchMatchSpan, SearchResult, SearchResultsPage, SearchResultsStats,
+    SearchSnippet,
 };
 use crate::dsl::DEFAULT_PAGE_SIZE;
 use crate::services::search_service::search;
@@ -1047,6 +1048,7 @@ fn SearchResultCard(result: SearchResult) -> impl IntoView {
         end_line,
         match_line,
         content_text,
+        match_spans,
         branches,
         live_branches,
         is_historical,
@@ -1062,6 +1064,7 @@ fn SearchResultCard(result: SearchResult) -> impl IntoView {
                 end_line,
                 match_line,
                 content_text,
+                match_spans,
             },
             Vec::new(),
         )
@@ -1069,7 +1072,9 @@ fn SearchResultCard(result: SearchResult) -> impl IntoView {
         let primary_idx = snippet_vec
             .iter()
             .position(|snippet| {
-                snippet.match_line == match_line && snippet.content_text == content_text
+                snippet.match_line == match_line
+                    && snippet.content_text == content_text
+                    && snippet.match_spans == match_spans
             })
             .unwrap_or(0);
         let primary = snippet_vec.swap_remove(primary_idx);
@@ -1172,7 +1177,10 @@ fn SearchResultCard(result: SearchResult) -> impl IntoView {
                                                 </p>
                                                 <pre class="bg-gray-100 dark:bg-gray-900 p-2 rounded-md mt-2 text-sm overflow-x-auto max-w-full">
                                                     <code>
-                                                        {render_highlighted_snippet(snippet.content_text.clone())}
+                                                        {render_highlighted_snippet(
+                                                            snippet.content_text.clone(),
+                                                            snippet.match_spans.clone(),
+                                                        )}
                                                     </code>
                                                 </pre>
                                             </div>
@@ -1237,15 +1245,20 @@ fn SearchResultCard(result: SearchResult) -> impl IntoView {
                 }}
             </div>
             <pre class="bg-gray-100 dark:bg-gray-900 p-2 rounded-md mt-2 text-sm overflow-x-auto max-w-full">
-                <code>{render_highlighted_snippet(primary_snippet.content_text.clone())}</code>
+                <code>
+                    {render_highlighted_snippet(
+                        primary_snippet.content_text.clone(),
+                        primary_snippet.match_spans.clone(),
+                    )}
+                </code>
             </pre>
             {extra_section}
         </div>
     }
 }
 
-fn render_highlighted_snippet(text: String) -> impl IntoView {
-    parse_highlight_segments(&text)
+fn render_highlighted_snippet(text: String, spans: Vec<SearchMatchSpan>) -> impl IntoView {
+    segment_snippet_by_spans(&text, &spans)
         .into_iter()
         .map(|(segment, highlighted)| {
             if highlighted {
@@ -1261,34 +1274,30 @@ fn render_highlighted_snippet(text: String) -> impl IntoView {
         .collect_view()
 }
 
-fn parse_highlight_segments(input: &str) -> Vec<(String, bool)> {
-    const OPEN: &str = "<mark>";
-    const CLOSE: &str = "</mark>";
-
+fn segment_snippet_by_spans(input: &str, spans: &[SearchMatchSpan]) -> Vec<(String, bool)> {
     let mut segments = Vec::new();
     let mut cursor = 0;
-    while let Some(start_rel) = input[cursor..].find(OPEN) {
-        let start_idx = cursor + start_rel;
-        if start_idx > cursor {
-            segments.push((input[cursor..start_idx].to_string(), false));
+    for span in spans {
+        if span.start > span.end || span.end > input.len() {
+            return vec![(input.to_string(), false)];
         }
-
-        let highlight_start = start_idx + OPEN.len();
-        if let Some(end_rel) = input[highlight_start..].find(CLOSE) {
-            let highlight_end = highlight_start + end_rel;
-            segments.push((input[highlight_start..highlight_end].to_string(), true));
-            cursor = highlight_end + CLOSE.len();
-        } else {
-            segments.push((input[start_idx..].to_string(), false));
-            cursor = input.len();
-            break;
+        if !input.is_char_boundary(span.start) || !input.is_char_boundary(span.end) {
+            return vec![(input.to_string(), false)];
         }
+        if span.start < cursor {
+            continue;
+        }
+        if span.start > cursor {
+            segments.push((input[cursor..span.start].to_string(), false));
+        }
+        if span.end > span.start {
+            segments.push((input[span.start..span.end].to_string(), true));
+        }
+        cursor = span.end;
     }
-
     if cursor < input.len() {
         segments.push((input[cursor..].to_string(), false));
     }
-
     segments.retain(|(segment, _)| !segment.is_empty());
     segments
 }

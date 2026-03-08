@@ -65,12 +65,19 @@ pub struct ReferenceResult {
     pub column: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SearchMatchSpan {
+    pub start: usize,
+    pub end: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchSnippet {
     pub start_line: i32,
     pub end_line: i32,
     pub match_line: i32,
     pub content_text: String,
+    pub match_spans: Vec<SearchMatchSpan>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,6 +96,7 @@ pub struct SearchResult {
     pub end_line: i32,
     pub match_line: i32, // The actual line where the match occurs
     pub content_text: String,
+    pub match_spans: Vec<SearchMatchSpan>,
     pub snippets: Vec<SearchSnippet>,
     pub branches: Vec<String>,
     pub live_branches: Vec<String>,
