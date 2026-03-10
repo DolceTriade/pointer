@@ -385,7 +385,7 @@ fn mcp_tools() -> Vec<Value> {
         }),
         json!({
             "name": "file_content",
-            "description": "Read raw indexed file content (no syntax highlighting) for an exact repo/branch/path from the index. Supports optional start_line/end_line (1-based, inclusive) for snippets to reduce context usage. Use this after file_list/path_search to inspect implementation details; prefer exact paths returned by those tools. Includes branch freshness metadata.",
+            "description": "Read raw indexed file content (no syntax highlighting) for an exact repo/branch/path from the index. Supports optional start_line/end_line (1-based, inclusive) for snippets to reduce context usage; out-of-bounds line requests are clamped to valid file bounds and reported in the response message. Use this after file_list/path_search to inspect implementation details; prefer exact paths returned by those tools. Includes branch freshness metadata.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

@@ -94,7 +94,7 @@ pub async fn execute_file_content(
         .map_err(|err| err.to_string())?;
 
     let line_count = raw.content.lines().count();
-    let (content, snippet, returned_line_count) = slice_file_content(
+    let (content, snippet, returned_line_count, message) = slice_file_content(
         &raw.content,
         payload.start_line,
         payload.end_line,
@@ -113,6 +113,7 @@ pub async fn execute_file_content(
         line_count,
         returned_line_count,
         snippet,
+        message,
         index_freshness,
     })
 }
@@ -122,50 +123,57 @@ fn slice_file_content(
     start_line: Option<u32>,
     end_line: Option<u32>,
     total_line_count: usize,
-) -> Result<(String, Option<FileContentSnippet>, usize), String> {
+) -> Result<(String, Option<FileContentSnippet>, usize, Option<String>), String> {
     if start_line.is_none() && end_line.is_none() {
-        return Ok((content.to_string(), None, total_line_count));
-    }
-
-    let start = start_line.unwrap_or(1);
-    let end = end_line.unwrap_or(total_line_count as u32);
-
-    if start == 0 {
-        return Err("start_line must be >= 1".to_string());
-    }
-    if end == 0 {
-        return Err("end_line must be >= 1".to_string());
+        return Ok((content.to_string(), None, total_line_count, None));
     }
     if total_line_count == 0 {
         return Err("cannot request line snippets from an empty file".to_string());
     }
-    if start as usize > total_line_count {
-        return Err(format!(
-            "start_line {} exceeds file line count {}",
-            start, total_line_count
-        ));
-    }
-    if end < start {
+
+    let max_line = total_line_count as u32;
+    let requested_start = start_line.unwrap_or(1);
+    let requested_end = end_line.unwrap_or(max_line);
+    let clamped_start = requested_start.clamp(1, max_line);
+    let clamped_end = requested_end.clamp(clamped_start, max_line);
+
+    if end_line.is_some() && requested_end >= 1 && requested_end < requested_start {
         return Err("end_line must be >= start_line".to_string());
     }
 
-    let bounded_end = end.min(total_line_count as u32);
-    let start_idx = (start - 1) as usize;
-    let count = (bounded_end - start + 1) as usize;
+    let start_idx = (clamped_start - 1) as usize;
+    let count = (clamped_end - clamped_start + 1) as usize;
     let snippet_content = content
         .lines()
         .skip(start_idx)
         .take(count)
         .collect::<Vec<_>>()
         .join("\n");
+    let was_clamped = requested_start != clamped_start || requested_end != clamped_end;
+    let message = was_clamped.then(|| match (start_line, end_line) {
+        (Some(_), Some(_)) => format!(
+            "Requested line range {}-{} was clamped to {}-{} for file length {}.",
+            requested_start, requested_end, clamped_start, clamped_end, total_line_count
+        ),
+        (Some(_), None) => format!(
+            "Requested start_line {} was clamped to {} for file length {}.",
+            requested_start, clamped_start, total_line_count
+        ),
+        (None, Some(_)) => format!(
+            "Requested end_line {} was clamped to {} for file length {}.",
+            requested_end, clamped_end, total_line_count
+        ),
+        (None, None) => unreachable!("unbounded requests return early"),
+    });
 
     Ok((
         snippet_content,
         Some(FileContentSnippet {
-            start_line: start,
-            end_line: bounded_end,
+            start_line: clamped_start,
+            end_line: clamped_end,
         }),
         count,
+        message,
     ))
 }
 
@@ -1376,29 +1384,63 @@ mod tests {
     #[test]
     fn slice_file_content_returns_full_content_without_bounds() {
         let content = "a\nb\nc\n";
-        let (sliced, snippet, returned_line_count) =
+        let (sliced, snippet, returned_line_count, message) =
             slice_file_content(content, None, None, 3).expect("slice should succeed");
         assert_eq!(sliced, content);
         assert!(snippet.is_none());
         assert_eq!(returned_line_count, 3);
+        assert!(message.is_none());
     }
 
     #[test]
     fn slice_file_content_returns_requested_snippet() {
         let content = "a\nb\nc\nd";
-        let (sliced, snippet, returned_line_count) =
+        let (sliced, snippet, returned_line_count, message) =
             slice_file_content(content, Some(2), Some(3), 4).expect("slice should succeed");
         assert_eq!(sliced, "b\nc");
         assert_eq!(returned_line_count, 2);
         let snippet = snippet.expect("snippet metadata must be present");
         assert_eq!(snippet.start_line, 2);
         assert_eq!(snippet.end_line, 3);
+        assert!(message.is_none());
     }
 
     #[test]
-    fn slice_file_content_rejects_invalid_bounds() {
+    fn slice_file_content_clamps_out_of_bounds_request() {
         let content = "a\nb\nc";
-        let err = slice_file_content(content, Some(4), None, 3).expect_err("must reject");
-        assert!(err.contains("exceeds file line count"));
+        let (sliced, snippet, returned_line_count, message) =
+            slice_file_content(content, Some(4), None, 3).expect("must clamp");
+        assert_eq!(sliced, "c");
+        assert_eq!(returned_line_count, 1);
+        let snippet = snippet.expect("snippet metadata must be present");
+        assert_eq!(snippet.start_line, 3);
+        assert_eq!(snippet.end_line, 3);
+        assert_eq!(
+            message.as_deref(),
+            Some("Requested start_line 4 was clamped to 3 for file length 3.")
+        );
+    }
+
+    #[test]
+    fn slice_file_content_clamps_zero_bounds() {
+        let content = "a\nb\nc";
+        let (sliced, snippet, returned_line_count, message) =
+            slice_file_content(content, Some(0), Some(0), 3).expect("must clamp");
+        assert_eq!(sliced, "a");
+        assert_eq!(returned_line_count, 1);
+        let snippet = snippet.expect("snippet metadata must be present");
+        assert_eq!(snippet.start_line, 1);
+        assert_eq!(snippet.end_line, 1);
+        assert_eq!(
+            message.as_deref(),
+            Some("Requested line range 0-0 was clamped to 1-1 for file length 3.")
+        );
+    }
+
+    #[test]
+    fn slice_file_content_rejects_reversed_in_range_bounds() {
+        let content = "a\nb\nc";
+        let err = slice_file_content(content, Some(3), Some(2), 3).expect_err("must reject");
+        assert!(err.contains("end_line must be >= start_line"));
     }
 }

@@ -196,6 +196,8 @@ pub struct FileContentToolResponse {
     pub returned_line_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snippet: Option<FileContentSnippet>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
     pub index_freshness: IndexFreshness,
 }
 
