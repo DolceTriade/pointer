@@ -199,7 +199,22 @@ async fn mcp_rpc(Json(req): Json<JsonRpcRequest>) -> Response {
                     "name": "pointer-mcp",
                     "version": env!("CARGO_PKG_VERSION"),
                 },
-                "instructions": "Use tools to query indexed code and symbol information; do not fall back to local filesystem reads for indexed lookup. Operational flow: repositories -> repo_branches -> file_list/path_search -> file_content/search/symbol_insights. search accepts structured JSON fields only; do not send a free-form `query` string. Keep filter values plain: do not include prefixes like `repo:`, `path:`, or `regex:` inside field values. all_terms are AND semantics and any_terms are OR semantics (fanout + dedupe). For recency/version questions like 'recent change', call repo_branches first, then run search with explicit branch values and compare indexed_at/is_live metadata; add historical:true when historical snapshots should be included. Plain terms do not support wildcard matching; use the regex field for pattern matching. path_search requires a non-empty plain query string and performs case-insensitive substring matching over paths; it is not a directory listing endpoint, so use file_list for enumeration. For large files, call file_content with start_line/end_line first to limit context size.",
+                "instructions": r#"Use MCP tools for indexed repository inspection. Start with `repositories` to discover the exact repo key, then `repo_branches` when branch selection matters. Use `path_search` for fuzzy path lookup, `file_list` for directory enumeration, `file_content` for targeted snippet reads, `search` for structured content search, and `symbol_insights` for symbol definitions and references.
+
+      Tool requirements:
+      - `search` accepts structured JSON fields only. Do not send a free-form `query` string.
+      - Keep filter values plain. Do not include prefixes like `repo:`, `path:`, or `regex:` inside field values.
+      - `path_search.query` is plain fuzzy text only.
+      - `file_list.path` is a directory prefix, not a search query.
+      - `file_content.path` must be an exact path, preferably one returned by `path_search` or `file_list`.
+
+      Usage guidance:
+      - Prefer narrow, incremental reads with `file_content` using `start_line` and `end_line`.
+      - Use `all_terms` for AND semantics, `any_terms` for OR semantics, and `regex` only for regex content matching.
+      - If branch recency or version differences matter, call `repo_branches` first and compare explicit branch results.
+
+      Citation requirement:
+      - When citing code, use the MCP server UI hyperlink format: https://{mcp_server_host}/repo/{repo}/tree/{branch|commit}/{path}#L{Line number}"#,
             });
             jsonrpc_result(req.id, result)
         }
