@@ -1863,6 +1863,8 @@ ORDER BY idx
                 ctx.match_line_number,
                 ctx.snippet_start_line_number,
                 ctx.match_spans,
+                pf.highlight_pattern,
+                pf.highlight_case_sensitive,
                 pf.branches,
                 pf.live_branches,
                 pf.is_historical,
@@ -1968,6 +1970,12 @@ ORDER BY idx
                     let best_start_line = chunk_start_line
                         .saturating_add(best_row.snippet_start_line_number - 1);
                     let best_end_line = snippet_end_line(&best_row.content_text, best_start_line);
+                    let best_match_spans = normalize_literal_match_spans(
+                        &best_row.content_text,
+                        &best_row.match_spans.0,
+                        &best_row.highlight_pattern,
+                        best_row.highlight_case_sensitive,
+                    );
 
                     let mut snippets = Vec::new();
                     snippets.push(SearchSnippet {
@@ -1975,7 +1983,7 @@ ORDER BY idx
                         end_line: best_end_line,
                         match_line: best_match_line,
                         content_text: best_row.content_text.clone(),
-                        match_spans: best_row.match_spans.0.clone(),
+                        match_spans: best_match_spans.clone(),
                     });
 
                     for row in entries_iter {
@@ -1985,12 +1993,18 @@ ORDER BY idx
                         let snippet_start =
                             chunk_start_line.saturating_add(row.snippet_start_line_number - 1);
                         let snippet_end = snippet_end_line(&row.content_text, snippet_start);
+                        let match_spans = normalize_literal_match_spans(
+                            &row.content_text,
+                            &row.match_spans.0,
+                            &row.highlight_pattern,
+                            row.highlight_case_sensitive,
+                        );
                         snippets.push(SearchSnippet {
                             start_line: snippet_start,
                             end_line: snippet_end,
                             match_line: snippet_match,
                             content_text: row.content_text,
-                            match_spans: row.match_spans.0,
+                            match_spans,
                         });
                     }
 
@@ -2005,11 +2019,11 @@ ORDER BY idx
                         .or_else(|| merged_snippets.first().cloned())
                         .unwrap_or_else(|| SearchSnippet {
                             start_line: best_start_line,
-                        end_line: best_end_line,
-                        match_line: best_match_line,
-                        content_text: best_row.content_text.clone(),
-                        match_spans: best_row.match_spans.0.clone(),
-                    });
+                            end_line: best_end_line,
+                            match_line: best_match_line,
+                            content_text: best_row.content_text.clone(),
+                            match_spans: best_match_spans,
+                        });
 
                     SearchResult {
                         repository: best_row.repository,
@@ -2758,6 +2772,8 @@ struct SearchResultRow {
     match_line_number: i32,
     snippet_start_line_number: i32,
     match_spans: Json<Vec<SearchMatchSpan>>,
+    highlight_pattern: String,
+    highlight_case_sensitive: bool,
     branches: Vec<String>,
     live_branches: Vec<String>,
     is_historical: bool,
@@ -2843,6 +2859,100 @@ fn snippet_signal_score(text: &str, spans: &[SearchMatchSpan]) -> (i32, i32, i32
         .filter(|byte| matches!(byte, b':' | b'=' | b'(' | b')'))
         .count() as i32;
     (exact_count, span_count, signal_count)
+}
+
+fn normalize_literal_match_spans(
+    text: &str,
+    spans: &[SearchMatchSpan],
+    pattern: &str,
+    case_sensitive: bool,
+) -> Vec<SearchMatchSpan> {
+    let Some(terms) = parse_plain_highlight_pattern(pattern) else {
+        return spans.to_vec();
+    };
+
+    let Some(recomputed) = find_literal_match_spans(text, &terms, case_sensitive) else {
+        return spans.to_vec();
+    };
+
+    if recomputed.is_empty() {
+        spans.to_vec()
+    } else {
+        recomputed
+    }
+}
+
+fn parse_plain_highlight_pattern(pattern: &str) -> Option<Vec<String>> {
+    let mut terms = Vec::new();
+    let mut current = String::new();
+    let mut chars = pattern.chars();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' => {
+                let escaped = chars.next()?;
+                match escaped {
+                    '\\' | '.' | '+' | '*' | '?' | '^' | '$' | '(' | ')' | '[' | ']' | '{'
+                    | '}' | '|' => current.push(escaped),
+                    _ => return None,
+                }
+            }
+            '|' => {
+                if current.is_empty() {
+                    return None;
+                }
+                terms.push(std::mem::take(&mut current));
+            }
+            other => current.push(other),
+        }
+    }
+
+    if current.is_empty() {
+        return None;
+    }
+    terms.push(current);
+    Some(terms)
+}
+
+fn find_literal_match_spans(
+    text: &str,
+    terms: &[String],
+    case_sensitive: bool,
+) -> Option<Vec<SearchMatchSpan>> {
+    if terms.is_empty() {
+        return Some(Vec::new());
+    }
+
+    let mut spans = Vec::new();
+
+    if case_sensitive {
+        for term in terms {
+            for (start, matched) in text.match_indices(term) {
+                spans.push(SearchMatchSpan {
+                    start,
+                    end: start + matched.len(),
+                });
+            }
+        }
+    } else {
+        if !text.is_ascii() || terms.iter().any(|term| !term.is_ascii()) {
+            return None;
+        }
+        let lower_text = text.to_ascii_lowercase();
+        for term in terms {
+            let lower_term = term.to_ascii_lowercase();
+            for (start, matched) in lower_text.match_indices(&lower_term) {
+                spans.push(SearchMatchSpan {
+                    start,
+                    end: start + matched.len(),
+                });
+            }
+        }
+    }
+
+    spans.sort_by(|a, b| a.start.cmp(&b.start).then_with(|| a.end.cmp(&b.end)));
+    spans.dedup();
+    Some(spans)
 }
 
 fn count_exact_match_spans(text: &str, spans: &[SearchMatchSpan]) -> i32 {
@@ -3128,6 +3238,77 @@ mod tests {
         assert_eq!(lines.len(), 5);
         assert_eq!(lines[2], "hit_b");
         assert_eq!(merged_snippet.match_spans, vec![SearchMatchSpan { start: 14, end: 19 }]);
+    }
+
+    #[test]
+    fn merged_snippets_preserve_zero_based_end_exclusive_phrase_spans() {
+        let snippet_a = SearchSnippet {
+            start_line: 20,
+            end_line: 22,
+            match_line: 21,
+            content_text: "line20\nseek failed for block\nline22".to_string(),
+            match_spans: vec![SearchMatchSpan { start: 12, end: 28 }],
+        };
+        let snippet_b = SearchSnippet {
+            start_line: 23,
+            end_line: 24,
+            match_line: 23,
+            content_text: "write block with checksum\nline24".to_string(),
+            match_spans: vec![SearchMatchSpan { start: 0, end: 5 }],
+        };
+
+        let merged = merge_overlapping_snippets(vec![snippet_a, snippet_b]);
+        let merged_snippet = &merged[0];
+
+        assert_eq!(
+            &merged_snippet.content_text[merged_snippet.match_spans[0].start..merged_snippet.match_spans[0].end],
+            "failed for block"
+        );
+        assert_eq!(
+            &merged_snippet.content_text[merged_snippet.match_spans[1].start..merged_snippet.match_spans[1].end],
+            "write"
+        );
+    }
+
+    #[test]
+    fn parse_plain_highlight_pattern_round_trips_escaped_literals() {
+        let terms = parse_plain_highlight_pattern(r#"failed for block|pg_fatal\(\)"#)
+            .expect("pattern should parse as plain literals");
+        assert_eq!(
+            terms,
+            vec!["failed for block".to_string(), "pg_fatal()".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_plain_highlight_pattern_rejects_regex_constructs() {
+        assert!(parse_plain_highlight_pattern("foo.*bar").is_none());
+    }
+
+    #[test]
+    fn normalize_literal_match_spans_recomputes_shifted_plain_phrase() {
+        let text = r#"pg_fatal("seek failed for block %u", blockno);"#;
+        let original = vec![SearchMatchSpan { start: 17, end: 33 }];
+
+        let normalized =
+            normalize_literal_match_spans(text, &original, "failed for block", true);
+
+        let expected_start = text.find("failed for block").expect("phrase should exist");
+        assert_eq!(
+            normalized,
+            vec![SearchMatchSpan {
+                start: expected_start,
+                end: expected_start + "failed for block".len(),
+            }]
+        );
+    }
+
+    #[test]
+    fn normalize_literal_match_spans_preserves_regex_patterns() {
+        let original = vec![SearchMatchSpan { start: 5, end: 11 }];
+        let normalized =
+            normalize_literal_match_spans("abcde failed", &original, "fail.*", true);
+        assert_eq!(normalized, original);
     }
 
     #[test]

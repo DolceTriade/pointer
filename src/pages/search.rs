@@ -928,6 +928,7 @@ fn format_indexed_timestamp(ts: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::models::SearchMatchSpan;
 
     #[test]
     fn split_query_tokens_preserves_quoted_filters() {
@@ -966,6 +967,67 @@ mod tests {
                 "-branch: feature:123".to_string(),
                 r#"-branch:"feature:123""#.to_string()
             )
+        );
+    }
+
+    #[test]
+    fn segment_snippet_by_spans_highlights_exact_phrase() {
+        let input = r#"pg_fatal("seek failed for block %u in file \"%s\": %m", blockno, fn);"#;
+        let start = input.find("failed for block").expect("phrase should exist");
+        let end = start + "failed for block".len();
+
+        let segments = segment_snippet_by_spans(
+            input,
+            &[SearchMatchSpan { start, end }],
+        );
+
+        assert!(segments.iter().any(|(text, highlighted)| {
+            *highlighted && text == "failed for block"
+        }));
+    }
+
+    #[test]
+    fn segment_snippet_by_spans_uses_zero_based_end_exclusive_offsets() {
+        let input = "failed for block";
+        let segments = segment_snippet_by_spans(
+            input,
+            &[SearchMatchSpan {
+                start: 0,
+                end: input.len(),
+            }],
+        );
+
+        assert_eq!(segments, vec![("failed for block".to_string(), true)]);
+    }
+
+    #[test]
+    fn segment_snippet_by_spans_rejects_non_char_boundary_spans() {
+        let input = "é failed";
+        let segments = segment_snippet_by_spans(
+            input,
+            &[SearchMatchSpan { start: 1, end: 8 }],
+        );
+
+        assert_eq!(segments, vec![(input.to_string(), false)]);
+    }
+
+    #[test]
+    fn segment_snippet_by_spans_handles_utf8_prefix_with_byte_offsets() {
+        let input = "é failed";
+        let start = input.find("failed").expect("phrase should exist");
+        let end = start + "failed".len();
+
+        let segments = segment_snippet_by_spans(
+            input,
+            &[SearchMatchSpan { start, end }],
+        );
+
+        assert_eq!(
+            segments,
+            vec![
+                ("é ".to_string(), false),
+                ("failed".to_string(), true),
+            ]
         );
     }
 }
