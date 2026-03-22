@@ -1,6 +1,5 @@
 use crate::db::models::{
-    FacetCount, SearchMatchSpan, SearchResult, SearchResultsPage, SearchResultsStats,
-    SearchSnippet,
+    FacetCount, SearchMatchSpan, SearchResult, SearchResultsPage, SearchResultsStats, SearchSnippet,
 };
 use crate::dsl::DEFAULT_PAGE_SIZE;
 use crate::services::search_service::search;
@@ -976,14 +975,13 @@ mod tests {
         let start = input.find("failed for block").expect("phrase should exist");
         let end = start + "failed for block".len();
 
-        let segments = segment_snippet_by_spans(
-            input,
-            &[SearchMatchSpan { start, end }],
-        );
+        let segments = segment_snippet_by_spans(input, &[SearchMatchSpan { start, end }]);
 
-        assert!(segments.iter().any(|(text, highlighted)| {
-            *highlighted && text == "failed for block"
-        }));
+        assert!(
+            segments
+                .iter()
+                .any(|(text, highlighted)| { *highlighted && text == "failed for block" })
+        );
     }
 
     #[test]
@@ -1003,10 +1001,7 @@ mod tests {
     #[test]
     fn segment_snippet_by_spans_rejects_non_char_boundary_spans() {
         let input = "é failed";
-        let segments = segment_snippet_by_spans(
-            input,
-            &[SearchMatchSpan { start: 1, end: 8 }],
-        );
+        let segments = segment_snippet_by_spans(input, &[SearchMatchSpan { start: 1, end: 8 }]);
 
         assert_eq!(segments, vec![(input.to_string(), false)]);
     }
@@ -1017,17 +1012,11 @@ mod tests {
         let start = input.find("failed").expect("phrase should exist");
         let end = start + "failed".len();
 
-        let segments = segment_snippet_by_spans(
-            input,
-            &[SearchMatchSpan { start, end }],
-        );
+        let segments = segment_snippet_by_spans(input, &[SearchMatchSpan { start, end }]);
 
         assert_eq!(
             segments,
-            vec![
-                ("é ".to_string(), false),
-                ("failed".to_string(), true),
-            ]
+            vec![("é ".to_string(), false), ("failed".to_string(), true),]
         );
     }
 }

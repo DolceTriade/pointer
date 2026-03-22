@@ -103,6 +103,57 @@ fn resolve_case(plan: &TextSearchPlan) -> CaseSensitivity {
     }
 }
 
+fn plan_has_regex(plan: &TextSearchPlan) -> bool {
+    plan.required_terms
+        .iter()
+        .chain(plan.excluded_terms.iter())
+        .any(|term| matches!(term, ContentPredicate::Regex(_)))
+}
+
+fn request_has_regex(request: &TextSearchRequest) -> bool {
+    request.plans.iter().any(plan_has_regex)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SearchBudgets {
+    fetch_limit: i64,
+    file_limit: i64,
+    plan_row_limit: i64,
+}
+
+fn compute_search_budgets(request: &TextSearchRequest) -> SearchBudgets {
+    let page_index = u64::from(request.page);
+    let page_size = u64::from(request.page_size.max(1));
+    let (sample_factor, fetch_limit_cap, plan_row_limit) = if request_has_regex(request) {
+        (
+            u64::from(REGEX_FILE_SAMPLE_FACTOR.max(1)),
+            REGEX_FETCH_LIMIT_CAP,
+            REGEX_PLAN_ROW_LIMIT,
+        )
+    } else {
+        (
+            u64::from(FILE_SAMPLE_FACTOR.max(1)),
+            DEFAULT_FETCH_LIMIT_CAP,
+            DEFAULT_PLAN_ROW_LIMIT,
+        )
+    };
+    let base_limit = page_index
+        .saturating_add(1)
+        .saturating_mul(page_size)
+        .saturating_mul(sample_factor);
+    let minimum = page_size.saturating_mul(sample_factor);
+    let fetch_limit_u64 = base_limit.max(minimum).saturating_add(1);
+    let mut fetch_limit = fetch_limit_u64.min(i64::MAX as u64) as i64;
+    fetch_limit = fetch_limit.min(fetch_limit_cap);
+    let file_limit = fetch_limit.min(FILE_LIMIT_CAP);
+
+    SearchBudgets {
+        fetch_limit,
+        file_limit,
+        plan_row_limit,
+    }
+}
+
 fn push_search_ctes<'a>(
     qb: &mut QueryBuilder<'a, Postgres>,
     request: &'a TextSearchRequest,
@@ -151,7 +202,7 @@ fn push_search_ctes<'a>(
 
         let case_mode = resolve_case(plan);
         let highlight_case_sensitive = matches!(case_mode, CaseSensitivity::Yes);
-        let prefer_repo_first = !plan.repos.is_empty();
+        let seed_repo_first = !plan_has_regex(plan) && !plan.repos.is_empty();
 
         qb.push("(");
         qb.push(
@@ -174,7 +225,7 @@ fn push_search_ctes<'a>(
                 ",
         );
         qb.push_bind(plan.include_historical);
-        if prefer_repo_first {
+        if seed_repo_first {
             qb.push(
                 " AS include_historical
                 FROM (
@@ -288,19 +339,19 @@ fn push_search_ctes<'a>(
 
         qb.push(" WHERE TRUE");
 
-        if !prefer_repo_first && !plan.repos.is_empty() {
+        if !seed_repo_first && !plan.repos.is_empty() {
             qb.push(" AND files.repository = ANY(");
             qb.push_bind(&plan.repos);
             qb.push(")");
         }
 
-        if !prefer_repo_first && !plan.excluded_repos.is_empty() {
+        if !seed_repo_first && !plan.excluded_repos.is_empty() {
             qb.push(" AND NOT (files.repository = ANY(");
             qb.push_bind(&plan.excluded_repos);
             qb.push("))");
         }
 
-        if !prefer_repo_first && !plan.file_globs.is_empty() {
+        if !seed_repo_first && !plan.file_globs.is_empty() {
             for pattern in &plan.file_globs {
                 qb.push(" AND files.file_path ILIKE ");
                 qb.push_bind(pattern);
@@ -308,7 +359,7 @@ fn push_search_ctes<'a>(
             }
         }
 
-        if !prefer_repo_first && !plan.excluded_file_globs.is_empty() {
+        if !seed_repo_first && !plan.excluded_file_globs.is_empty() {
             for pattern in &plan.excluded_file_globs {
                 qb.push(" AND files.file_path NOT ILIKE ");
                 qb.push_bind(pattern);
@@ -1692,19 +1743,11 @@ ORDER BY idx
             ));
         }
 
-        let page_index = u64::from(request.page);
-        let page_size = u64::from(request.page_size.max(1));
-        let sample_factor = u64::from(FILE_SAMPLE_FACTOR.max(1));
-        let base_limit = page_index
-            .saturating_add(1)
-            .saturating_mul(page_size)
-            .saturating_mul(sample_factor);
-        let minimum = page_size.saturating_mul(sample_factor);
-        let fetch_limit_u64 = base_limit.max(minimum).saturating_add(1);
-        let mut fetch_limit = fetch_limit_u64.min(i64::MAX as u64) as i64;
-        fetch_limit = fetch_limit.min(5000);
-        let file_limit = fetch_limit.min(25000);
-        let plan_row_limit: i64 = 5000;
+        let SearchBudgets {
+            fetch_limit,
+            file_limit,
+            plan_row_limit,
+        } = compute_search_budgets(request);
 
         let needs_live_branch_filter = request
             .plans
@@ -1967,8 +2010,8 @@ ORDER BY idx
                     let chunk_start_line: i32 = best_row.start_line.try_into().unwrap_or(i32::MAX);
                     let best_match_line =
                         chunk_start_line.saturating_add(best_row.match_line_number - 1);
-                    let best_start_line = chunk_start_line
-                        .saturating_add(best_row.snippet_start_line_number - 1);
+                    let best_start_line =
+                        chunk_start_line.saturating_add(best_row.snippet_start_line_number - 1);
                     let best_end_line = snippet_end_line(&best_row.content_text, best_start_line);
                     let best_match_spans = normalize_literal_match_spans(
                         &best_row.content_text,
@@ -2745,6 +2788,12 @@ impl PostgresDb {
 }
 
 const FILE_SAMPLE_FACTOR: u32 = 6;
+const REGEX_FILE_SAMPLE_FACTOR: u32 = 2;
+const DEFAULT_FETCH_LIMIT_CAP: i64 = 5000;
+const REGEX_FETCH_LIMIT_CAP: i64 = 1000;
+const FILE_LIMIT_CAP: i64 = 25000;
+const DEFAULT_PLAN_ROW_LIMIT: i64 = 5000;
+const REGEX_PLAN_ROW_LIMIT: i64 = 1000;
 const INSERT_BATCH_SIZE: usize = 1000;
 
 #[derive(sqlx::FromRow)]
@@ -3034,7 +3083,9 @@ fn merge_overlapping_snippets(mut snippets: Vec<SearchSnippet>) -> Vec<SearchSni
     merged
 }
 
-fn build_snippet_line_map(snippet: &SearchSnippet) -> BTreeMap<i32, (String, Vec<SearchMatchSpan>)> {
+fn build_snippet_line_map(
+    snippet: &SearchSnippet,
+) -> BTreeMap<i32, (String, Vec<SearchMatchSpan>)> {
     let mut map = BTreeMap::new();
     for (idx, (line, spans)) in split_snippet_lines(snippet).into_iter().enumerate() {
         let line_number = snippet.start_line.saturating_add(idx as i32);
@@ -3132,19 +3183,11 @@ mod tests {
     use super::*;
 
     fn build_phase1_sql(request: &TextSearchRequest) -> String {
-        let page_index = u64::from(request.page);
-        let page_size = u64::from(request.page_size.max(1));
-        let sample_factor = u64::from(FILE_SAMPLE_FACTOR.max(1));
-        let base_limit = page_index
-            .saturating_add(1)
-            .saturating_mul(page_size)
-            .saturating_mul(sample_factor);
-        let minimum = page_size.saturating_mul(sample_factor);
-        let fetch_limit_u64 = base_limit.max(minimum).saturating_add(1);
-        let mut fetch_limit = fetch_limit_u64.min(i64::MAX as u64) as i64;
-        fetch_limit = fetch_limit.min(5000);
-        let file_limit = fetch_limit.min(25000);
-        let plan_row_limit: i64 = 5000;
+        let SearchBudgets {
+            fetch_limit,
+            file_limit,
+            plan_row_limit,
+        } = compute_search_budgets(request);
 
         let needs_live_branch_filter = request
             .plans
@@ -3203,11 +3246,13 @@ mod tests {
         assert_eq!(lines.len(), 5);
         assert_eq!(merged_snippet.match_spans.len(), 2);
         assert_eq!(
-            &merged_snippet.content_text[merged_snippet.match_spans[0].start..merged_snippet.match_spans[0].end],
+            &merged_snippet.content_text
+                [merged_snippet.match_spans[0].start..merged_snippet.match_spans[0].end],
             "hit_a"
         );
         assert_eq!(
-            &merged_snippet.content_text[merged_snippet.match_spans[1].start..merged_snippet.match_spans[1].end],
+            &merged_snippet.content_text
+                [merged_snippet.match_spans[1].start..merged_snippet.match_spans[1].end],
             "hit_b"
         );
     }
@@ -3237,7 +3282,10 @@ mod tests {
         let lines: Vec<&str> = merged_snippet.content_text.split('\n').collect();
         assert_eq!(lines.len(), 5);
         assert_eq!(lines[2], "hit_b");
-        assert_eq!(merged_snippet.match_spans, vec![SearchMatchSpan { start: 14, end: 19 }]);
+        assert_eq!(
+            merged_snippet.match_spans,
+            vec![SearchMatchSpan { start: 14, end: 19 }]
+        );
     }
 
     #[test]
@@ -3261,11 +3309,13 @@ mod tests {
         let merged_snippet = &merged[0];
 
         assert_eq!(
-            &merged_snippet.content_text[merged_snippet.match_spans[0].start..merged_snippet.match_spans[0].end],
+            &merged_snippet.content_text
+                [merged_snippet.match_spans[0].start..merged_snippet.match_spans[0].end],
             "failed for block"
         );
         assert_eq!(
-            &merged_snippet.content_text[merged_snippet.match_spans[1].start..merged_snippet.match_spans[1].end],
+            &merged_snippet.content_text
+                [merged_snippet.match_spans[1].start..merged_snippet.match_spans[1].end],
             "write"
         );
     }
@@ -3290,8 +3340,7 @@ mod tests {
         let text = r#"pg_fatal("seek failed for block %u", blockno);"#;
         let original = vec![SearchMatchSpan { start: 17, end: 33 }];
 
-        let normalized =
-            normalize_literal_match_spans(text, &original, "failed for block", true);
+        let normalized = normalize_literal_match_spans(text, &original, "failed for block", true);
 
         let expected_start = text.find("failed for block").expect("phrase should exist");
         assert_eq!(
@@ -3306,8 +3355,7 @@ mod tests {
     #[test]
     fn normalize_literal_match_spans_preserves_regex_patterns() {
         let original = vec![SearchMatchSpan { start: 5, end: 11 }];
-        let normalized =
-            normalize_literal_match_spans("abcde failed", &original, "fail.*", true);
+        let normalized = normalize_literal_match_spans("abcde failed", &original, "fail.*", true);
         assert_eq!(normalized, original);
     }
 
@@ -3324,6 +3372,56 @@ mod tests {
         let request = TextSearchRequest::from_query_str("polly").unwrap();
         let sql = build_phase1_sql(&request);
         assert!(!sql.contains("INTERSECT"));
+    }
+
+    #[test]
+    fn plain_repo_filtered_search_seeds_from_files() {
+        let request = TextSearchRequest::from_query_str("repo:pointer polly").unwrap();
+        let sql = build_phase1_sql(&request);
+
+        assert!(sql.contains("FROM\n                        files f_seed"));
+        assert!(sql.contains("f_seed.repository = ANY("));
+    }
+
+    #[test]
+    fn regex_repo_filtered_search_seeds_from_chunks() {
+        let request =
+            TextSearchRequest::from_query_str("repo:pointer regex:\"unsafe\\\\s*\\\\{\"").unwrap();
+        let sql = build_phase1_sql(&request);
+
+        assert!(sql.contains("FROM\n                        chunks c"));
+        assert!(!sql.contains("f_seed.repository = ANY("));
+        assert!(sql.contains("files.repository = ANY("));
+    }
+
+    #[test]
+    fn regex_search_uses_smaller_phase1_budgets() {
+        let request = TextSearchRequest::from_query_str("regex:\"foo.*bar\"").unwrap();
+        let budgets = compute_search_budgets(&request);
+
+        assert_eq!(
+            budgets,
+            SearchBudgets {
+                fetch_limit: 51,
+                file_limit: 51,
+                plan_row_limit: REGEX_PLAN_ROW_LIMIT,
+            }
+        );
+    }
+
+    #[test]
+    fn plain_search_keeps_default_phase1_budgets() {
+        let request = TextSearchRequest::from_query_str("polly").unwrap();
+        let budgets = compute_search_budgets(&request);
+
+        assert_eq!(
+            budgets,
+            SearchBudgets {
+                fetch_limit: 151,
+                file_limit: 151,
+                plan_row_limit: DEFAULT_PLAN_ROW_LIMIT,
+            }
+        );
     }
 }
 

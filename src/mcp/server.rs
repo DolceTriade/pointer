@@ -210,7 +210,10 @@ async fn mcp_rpc(Json(req): Json<JsonRpcRequest>) -> Response {
 
       Usage guidance:
       - Prefer narrow, incremental reads with `file_content` using `start_line` and `end_line`.
+      - Prefer `all_terms` and `any_terms` over `regex` whenever literal terms can answer the question.
       - Use `all_terms` for AND semantics, `any_terms` for OR semantics, and `regex` only for regex content matching.
+      - Avoid broad regexes with leading `.*`, trailing `.*`, very common terms, or loose wildcards over large scopes.
+      - When regex is necessary, keep the pattern specific and pair it with restrictive filters such as `repo`, `branch`, `path`, `file`, or `lang`.
       - If branch recency or version differences matter, call `repo_branches` first and compare explicit branch results.
 
       Citation requirement:
