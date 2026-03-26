@@ -2,7 +2,7 @@ use axum::{
     Json, Router,
     body::Body,
     extract::Extension,
-    http::{Request, StatusCode},
+    http::{HeaderMap, Request, StatusCode, Uri},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -167,7 +167,7 @@ struct ToolCallParams {
     arguments: Value,
 }
 
-async fn mcp_rpc(Json(req): Json<JsonRpcRequest>) -> Response {
+async fn mcp_rpc(headers: HeaderMap, uri: Uri, Json(req): Json<JsonRpcRequest>) -> Response {
     let raw_request =
         serde_json::to_string(&req).unwrap_or_else(|_| "<serialize_error>".to_string());
     tracing::trace!(
@@ -190,16 +190,9 @@ async fn mcp_rpc(Json(req): Json<JsonRpcRequest>) -> Response {
 
     match req.method.as_str() {
         "initialize" => {
-            let result = json!({
-                "protocolVersion": "2024-11-05",
-                "capabilities": {
-                    "tools": { "listChanged": false }
-                },
-                "serverInfo": {
-                    "name": "pointer-mcp",
-                    "version": env!("CARGO_PKG_VERSION"),
-                },
-                "instructions": r#"Use MCP tools for indexed repository inspection. Start with `repositories` to discover the exact repo key, then `repo_branches` when branch selection matters. Use `path_search` for fuzzy path lookup, `file_list` for directory enumeration, `file_content` for targeted snippet reads, `search` for structured content search, and `symbol_insights` for symbol definitions and references.
+            let public_base_url = mcp_public_base_url(&headers, &uri);
+            let instructions = format!(
+                r#"Use MCP tools for indexed repository inspection. Start with `repositories` to discover the exact repo key, then `repo_branches` when branch selection matters. Use `path_search` for fuzzy path lookup, `file_list` for directory enumeration, `file_content` for targeted snippet reads, `search` for structured content search, and `symbol_insights` for symbol definitions and references.
 
       Tool requirements:
       - `search` accepts structured JSON fields only. Do not send a free-form `query` string.
@@ -217,7 +210,19 @@ async fn mcp_rpc(Json(req): Json<JsonRpcRequest>) -> Response {
       - If branch recency or version differences matter, call `repo_branches` first and compare explicit branch results.
 
       Citation requirement:
-      - When citing code, use the MCP server UI hyperlink format: https://{mcp_server_host}/repo/{repo}/tree/{branch|commit}/{path}#L{Line number}"#,
+      - When citing code, use the MCP server UI hyperlink format: {mcp_server_host}/repo/{{repo}}/tree/{{branch|commit}}/{{path}}#L{{Line number}}"#,
+                mcp_server_host = public_base_url
+            );
+            let result = json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {
+                    "tools": { "listChanged": false }
+                },
+                "serverInfo": {
+                    "name": "pointer-mcp",
+                    "version": env!("CARGO_PKG_VERSION"),
+                },
+                "instructions": instructions,
             });
             jsonrpc_result(req.id, result)
         }
@@ -273,6 +278,55 @@ async fn mcp_rpc(Json(req): Json<JsonRpcRequest>) -> Response {
         "notifications/initialized" => StatusCode::NO_CONTENT.into_response(),
         _ => jsonrpc_error(req.id, -32601, format!("method not found: {}", req.method)),
     }
+}
+
+fn mcp_public_base_url(headers: &HeaderMap, uri: &Uri) -> String {
+    if let Some((proto, host)) = forwarded_proto_and_host(headers) {
+        return format!("{proto}://{host}");
+    }
+
+    let host = header_value(headers, "x-forwarded-host")
+        .or_else(|| header_value(headers, "host"))
+        .unwrap_or_else(|| "localhost".to_string());
+    let proto = header_value(headers, "x-forwarded-proto")
+        .or_else(|| uri.scheme_str().map(str::to_string))
+        .unwrap_or_else(|| "http".to_string());
+
+    format!("{proto}://{host}")
+}
+
+fn forwarded_proto_and_host(headers: &HeaderMap) -> Option<(String, String)> {
+    let forwarded = header_value(headers, "forwarded")?;
+
+    forwarded.split(',').find_map(|entry| {
+        let mut proto = None;
+        let mut host = None;
+
+        for pair in entry.split(';') {
+            let (key, value) = pair.trim().split_once('=')?;
+            let value = value.trim().trim_matches('"');
+
+            if key.eq_ignore_ascii_case("proto") && !value.is_empty() {
+                proto = Some(value.to_string());
+            } else if key.eq_ignore_ascii_case("host") && !value.is_empty() {
+                host = Some(value.to_string());
+            }
+        }
+
+        match (proto, host) {
+            (Some(proto), Some(host)) => Some((proto, host)),
+            _ => None,
+        }
+    })
+}
+
+fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 async fn execute_tool_call(name: &str, arguments: Value) -> Result<Value, String> {
@@ -510,7 +564,9 @@ fn mcp_tools() -> Vec<Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::{mcp_docs_payload, mcp_tools};
+    use axum::http::{HeaderMap, HeaderValue, Uri};
+
+    use super::{mcp_docs_payload, mcp_public_base_url, mcp_tools};
 
     #[test]
     fn docs_payload_uses_structured_search_key() {
@@ -541,5 +597,46 @@ mod tests {
             .as_array()
             .expect("search examples must be present");
         assert!(!examples.is_empty());
+    }
+
+    #[test]
+    fn public_base_url_prefers_forwarded_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "forwarded",
+            HeaderValue::from_static("for=1.2.3.4;proto=https;host=pointer.example.com"),
+        );
+
+        assert_eq!(
+            mcp_public_base_url(&headers, &Uri::from_static("/mcp/v1")),
+            "https://pointer.example.com"
+        );
+    }
+
+    #[test]
+    fn public_base_url_falls_back_to_x_forwarded_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
+        headers.insert(
+            "x-forwarded-host",
+            HeaderValue::from_static("pointer.example.com"),
+        );
+        headers.insert("host", HeaderValue::from_static("127.0.0.1:3000"));
+
+        assert_eq!(
+            mcp_public_base_url(&headers, &Uri::from_static("/mcp/v1")),
+            "https://pointer.example.com"
+        );
+    }
+
+    #[test]
+    fn public_base_url_uses_host_header_without_proxy_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", HeaderValue::from_static("127.0.0.1:3000"));
+
+        assert_eq!(
+            mcp_public_base_url(&headers, &Uri::from_static("/mcp/v1")),
+            "http://127.0.0.1:3000"
+        );
     }
 }
