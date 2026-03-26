@@ -162,6 +162,7 @@ fn push_search_ctes<'a>(
     file_limit: i64,
     needs_live_branch_filter: bool,
     symbol_terms: &'a [String],
+    definition_terms: &'a [String],
 ) {
     qb.push("WITH ");
 
@@ -304,6 +305,27 @@ fn push_search_ctes<'a>(
                 qb.push(")");
             }
             qb.push(")");
+
+            qb.push(" AND ");
+            if seed_repo_first {
+                qb.push("f_seed.content_hash");
+            } else {
+                qb.push("cbc.content_hash");
+            }
+            qb.push(" IN (");
+            for (idx, predicate) in plan.required_terms.iter().enumerate() {
+                if idx > 0 {
+                    qb.push(" INTERSECT ");
+                }
+                qb.push(
+                    "SELECT DISTINCT cbc_req.content_hash \
+                             FROM content_blob_chunks cbc_req \
+                             JOIN chunks c_req ON c_req.chunk_hash = cbc_req.chunk_hash \
+                             WHERE ",
+                );
+                push_content_predicate(qb, predicate, case_mode, "c_req.text_content");
+            }
+            qb.push(")");
         }
 
         for predicate in &plan.excluded_terms {
@@ -379,23 +401,6 @@ fn push_search_ctes<'a>(
             qb.push("))");
         }
 
-        if plan.required_terms.len() > 1 {
-            qb.push(" AND files.content_hash IN (");
-            for (idx, predicate) in plan.required_terms.iter().enumerate() {
-                if idx > 0 {
-                    qb.push(" INTERSECT ");
-                }
-                qb.push(
-                    "SELECT DISTINCT cbc_req.content_hash \
-                             FROM content_blob_chunks cbc_req \
-                             JOIN chunks c_req ON c_req.chunk_hash = cbc_req.chunk_hash \
-                             WHERE ",
-                );
-                push_content_predicate(qb, predicate, case_mode, "c_req.text_content");
-            }
-            qb.push(")");
-        }
-
         if !plan.branches.is_empty() {
             qb.push(" AND (files.commit_sha = ANY(");
             qb.push_bind(&plan.branches);
@@ -467,7 +472,8 @@ fn push_search_ctes<'a>(
                     sf.file_id,
                     sf.content_hash,
                     sf.include_historical,
-                    sf.score::FLOAT8 AS total_score
+                    sf.score::FLOAT8 AS total_score,
+                    0::INT AS definition_matches
                 FROM scored_files sf
                 ORDER BY sf.score DESC, sf.min_chunk_index ASC
                 LIMIT ",
@@ -505,16 +511,50 @@ fn push_search_ctes<'a>(
                 JOIN scored_files sf ON sf.content_hash = s.content_hash
                 GROUP BY sf.file_id, sf.content_hash
             ),
+            definition_scores AS (
+                SELECT
+                    sf.file_id,
+                    sf.content_hash,
+                    MAX(
+                        CASE
+                            WHEN s.name_lc = query_term.term THEN 2
+                            ELSE 1
+                        END
+                    )::INT AS definition_matches
+                FROM scored_files sf
+                JOIN symbols s
+                  ON s.content_hash = sf.content_hash
+                JOIN UNNEST(
+            ",
+        );
+        qb.push_bind(definition_terms);
+        qb.push(
+            ") AS query_term(term)
+                  ON s.name_lc = query_term.term
+                  OR s.name_lc LIKE query_term.term || '%'
+                JOIN symbol_references sr
+                  ON sr.kind = 'definition'
+                 AND sr.symbol_id = s.id
+                GROUP BY sf.file_id, sf.content_hash
+            ),
             top_files AS (
                 SELECT
                     sf.file_id,
                     sf.content_hash,
                     sf.include_historical,
-                    (sf.score::FLOAT8 + COALESCE(ss.score, 0)::FLOAT8) AS total_score
+                    (sf.score::FLOAT8 + COALESCE(ss.score, 0)::FLOAT8) AS total_score,
+                    COALESCE(ds.definition_matches, 0) AS definition_matches
                 FROM scored_files sf
                 LEFT JOIN symbol_scores ss
                   ON ss.file_id = sf.file_id
                  AND ss.content_hash = sf.content_hash
+                LEFT JOIN definition_scores ds
+                  ON ds.file_id = sf.file_id
+                 AND ds.content_hash = sf.content_hash
+                ORDER BY
+                    COALESCE(ds.definition_matches, 0) DESC,
+                    (sf.score::FLOAT8 + COALESCE(ss.score, 0)::FLOAT8) DESC,
+                    sf.min_chunk_index ASC
                 LIMIT ",
         );
         qb.push_bind(file_limit);
@@ -534,6 +574,7 @@ fn push_search_ctes<'a>(
                     (array_agg(lp.highlight_pattern ORDER BY lp.chunk_index ASC))[1] AS highlight_pattern,
                     (array_agg(lp.highlight_case_sensitive ORDER BY lp.chunk_index ASC))[1] AS highlight_case_sensitive,
                     tf.total_score,
+                    tf.definition_matches,
                     tf.include_historical
                 FROM limited_plan lp
                 JOIN top_files tf
@@ -549,6 +590,7 @@ fn push_search_ctes<'a>(
                     f.file_path,
                     lp.content_hash,
                     tf.total_score,
+                    tf.definition_matches,
                     tf.include_historical
             ),
             ranked_keys AS (
@@ -626,6 +668,7 @@ fn push_search_ctes<'a>(
                     rt.highlight_pattern,
                     rt.highlight_case_sensitive,
                     rt.total_score,
+                    rt.definition_matches,
                     rt.include_historical,
                     COALESCE(bm.branches, bf.fallback_branches, ARRAY[]::TEXT[]) AS branches,
                     COALESCE(
@@ -1758,6 +1801,10 @@ ORDER BY idx
             .into_iter()
             .map(|t| t.to_lowercase())
             .collect();
+        let definition_terms: Vec<String> = collect_definition_terms(request)
+            .into_iter()
+            .map(|t| t.to_lowercase())
+            .collect();
 
         let explain_requested = std::env::var("POINTER_EXPLAIN_SEARCH_SQL").is_ok();
 
@@ -1770,6 +1817,7 @@ ORDER BY idx
             file_limit,
             needs_live_branch_filter,
             &symbol_terms,
+            &definition_terms,
         );
         phase1_qb.push(
             "
@@ -1781,6 +1829,7 @@ ORDER BY idx
                 fr.content_hash,
                 fr.chunk_index,
                 fr.total_score,
+                fr.definition_matches,
                 fr.include_historical,
                 fr.branches,
                 fr.live_branches,
@@ -1790,6 +1839,7 @@ ORDER BY idx
                 fr.highlight_case_sensitive
             FROM filtered_ranked fr
             ORDER BY
+                fr.definition_matches DESC,
                 fr.total_score DESC,
                 fr.repository,
                 fr.commit_sha,
@@ -1902,12 +1952,27 @@ ORDER BY idx
                 pf.content_hash,
                 sl.start_line,
                 cbc.chunk_line_count AS line_count,
-                ctx.context_snippet AS content_text,
-                ctx.match_line_number,
-                ctx.snippet_start_line_number,
-                ctx.match_spans,
+                COALESCE(ctx.context_snippet, c.text_content) AS content_text,
+                COALESCE(ctx.match_line_number, 1) AS match_line_number,
+                COALESCE(ctx.snippet_start_line_number, 1) AS snippet_start_line_number,
+                COALESCE(ctx.match_spans, '[]'::jsonb) AS match_spans,
                 pf.highlight_pattern,
                 pf.highlight_case_sensitive,
+                EXISTS (
+                    SELECT 1
+                    FROM symbol_references sr
+                    JOIN symbols s
+                      ON s.id = sr.symbol_id
+                     AND s.content_hash = pf.content_hash
+                    WHERE sr.kind = 'definition'
+                      AND sr.line_number = sl.start_line + ctx.match_line_number - 1
+                      AND s.name_lc = ANY(
+            ",
+            );
+            phase2_qb.push_bind(&definition_terms);
+            phase2_qb.push(
+                ")
+                ) AS is_definition_match,
                 pf.branches,
                 pf.live_branches,
                 pf.is_historical,
@@ -1918,12 +1983,12 @@ ORDER BY idx
              AND cbc.chunk_index = pf.chunk_index
             JOIN chunks c
               ON c.chunk_hash = cbc.chunk_hash
-            CROSS JOIN LATERAL extract_context_with_highlight(
+            LEFT JOIN LATERAL extract_context_with_highlight(
                 c.text_content,
                 pf.highlight_pattern,
                 3,
                 pf.highlight_case_sensitive
-            ) ctx
+            ) ctx ON TRUE
             LEFT JOIN LATERAL (
                 SELECT
                     1 + COALESCE(SUM(cbc.chunk_line_count), 0) AS start_line
@@ -1933,7 +1998,7 @@ ORDER BY idx
             ) sl ON TRUE
             ORDER BY
                 pf.ord,
-                ctx.match_line_number",
+                COALESCE(ctx.match_line_number, 1)",
             );
 
             let mut phase2_query = phase2_qb.build_query_as::<SearchResultRow>();
@@ -1990,14 +2055,18 @@ ORDER BY idx
                 .into_iter()
                 .map(|mut agg| {
                     agg.entries.sort_by(|a, b| {
-                        let (exact_a, marks_a, signal_a) =
-                            snippet_signal_score(&a.content_text, &a.match_spans.0);
-                        let (exact_b, marks_b, signal_b) =
-                            snippet_signal_score(&b.content_text, &b.match_spans.0);
-                        exact_b
-                            .cmp(&exact_a)
-                            .then_with(|| marks_b.cmp(&marks_a))
-                            .then_with(|| signal_b.cmp(&signal_a))
+                        let score_a = snippet_rank_score(
+                            &a.content_text,
+                            &a.match_spans.0,
+                            a.is_definition_match,
+                        );
+                        let score_b = snippet_rank_score(
+                            &b.content_text,
+                            &b.match_spans.0,
+                            b.is_definition_match,
+                        );
+                        score_b
+                            .cmp(&score_a)
                             .then_with(|| a.match_line_number.cmp(&b.match_line_number))
                             .then_with(|| a.start_line.cmp(&b.start_line))
                     });
@@ -2823,6 +2892,7 @@ struct SearchResultRow {
     match_spans: Json<Vec<SearchMatchSpan>>,
     highlight_pattern: String,
     highlight_case_sensitive: bool,
+    is_definition_match: bool,
     branches: Vec<String>,
     live_branches: Vec<String>,
     is_historical: bool,
@@ -2839,6 +2909,8 @@ struct RankedFileRow {
     content_hash: String,
     chunk_index: i32,
     total_score: f64,
+    #[allow(dead_code)]
+    definition_matches: i32,
     include_historical: bool,
     branches: Vec<String>,
     live_branches: Vec<String>,
@@ -2908,6 +2980,15 @@ fn snippet_signal_score(text: &str, spans: &[SearchMatchSpan]) -> (i32, i32, i32
         .filter(|byte| matches!(byte, b':' | b'=' | b'(' | b')'))
         .count() as i32;
     (exact_count, span_count, signal_count)
+}
+
+fn snippet_rank_score(
+    text: &str,
+    spans: &[SearchMatchSpan],
+    is_definition_match: bool,
+) -> (bool, i32, i32, i32) {
+    let (exact_count, span_count, signal_count) = snippet_signal_score(text, spans);
+    (is_definition_match, exact_count, span_count, signal_count)
 }
 
 fn normalize_literal_match_spans(
@@ -3198,6 +3279,10 @@ mod tests {
             .into_iter()
             .map(|t| t.to_lowercase())
             .collect();
+        let definition_terms: Vec<String> = collect_definition_terms(request)
+            .into_iter()
+            .map(|t| t.to_lowercase())
+            .collect();
 
         let mut qb = QueryBuilder::new("");
         push_search_ctes(
@@ -3208,8 +3293,174 @@ mod tests {
             file_limit,
             needs_live_branch_filter,
             &symbol_terms,
+            &definition_terms,
         );
         qb.sql().to_string()
+    }
+
+    fn build_phase2_sql_for_first_page(request: &TextSearchRequest) -> String {
+        let SearchBudgets {
+            fetch_limit,
+            file_limit,
+            plan_row_limit,
+        } = compute_search_budgets(request);
+
+        let needs_live_branch_filter = request
+            .plans
+            .iter()
+            .any(|plan| plan.branches.is_empty() && !plan.include_historical);
+
+        let symbol_terms: Vec<String> = collect_symbol_terms(request)
+            .into_iter()
+            .map(|t| t.to_lowercase())
+            .collect();
+        let definition_terms: Vec<String> = collect_definition_terms(request)
+            .into_iter()
+            .map(|t| t.to_lowercase())
+            .collect();
+
+        let mut phase1_qb = QueryBuilder::new("");
+        push_search_ctes(
+            &mut phase1_qb,
+            request,
+            plan_row_limit,
+            fetch_limit,
+            file_limit,
+            needs_live_branch_filter,
+            &symbol_terms,
+            &definition_terms,
+        );
+        phase1_qb.push(
+            "
+            SELECT
+                fr.file_id,
+                fr.repository,
+                fr.commit_sha,
+                fr.file_path,
+                fr.content_hash,
+                fr.chunk_index,
+                fr.total_score,
+                fr.definition_matches,
+                fr.include_historical,
+                fr.branches,
+                fr.live_branches,
+                fr.is_historical,
+                fr.snapshot_indexed_at,
+                fr.highlight_pattern,
+                fr.highlight_case_sensitive
+            FROM filtered_ranked fr
+            ORDER BY
+                fr.definition_matches DESC,
+                fr.total_score DESC,
+                fr.repository,
+                fr.commit_sha,
+                fr.file_path,
+                fr.chunk_index
+            LIMIT 1",
+        );
+
+        let page_rows = vec![RankedFileRow {
+            file_id: 1,
+            repository: "repo".to_string(),
+            commit_sha: "commit".to_string(),
+            file_path: "file".to_string(),
+            content_hash: "hash".to_string(),
+            chunk_index: 0,
+            total_score: 1.0,
+            definition_matches: 0,
+            include_historical: false,
+            branches: Vec::new(),
+            live_branches: Vec::new(),
+            is_historical: false,
+            snapshot_indexed_at: None,
+            highlight_pattern: request.plans[0].highlight_pattern.clone(),
+            highlight_case_sensitive: false,
+        }];
+
+        let mut phase2_qb = QueryBuilder::new(
+            "
+                WITH paged_files (
+                    ord,
+                    file_id,
+                    repository,
+                    commit_sha,
+                    file_path,
+                    content_hash,
+                    chunk_index,
+                    total_score,
+                    include_historical,
+                    branches,
+                    live_branches,
+                    is_historical,
+                    snapshot_indexed_at,
+                    highlight_pattern,
+                    highlight_case_sensitive
+                ) AS (
+                ",
+        );
+        phase2_qb.push_values(page_rows.iter().enumerate(), |mut b, (ord, row)| {
+            b.push_bind(ord as i64)
+                .push_bind(row.file_id)
+                .push_bind(&row.repository)
+                .push_bind(&row.commit_sha)
+                .push_bind(&row.file_path)
+                .push_bind(&row.content_hash)
+                .push_bind(row.chunk_index)
+                .push_bind(row.total_score)
+                .push_bind(row.include_historical)
+                .push_bind(&row.branches)
+                .push_bind(&row.live_branches)
+                .push_bind(row.is_historical)
+                .push_bind(row.snapshot_indexed_at)
+                .push_bind(&row.highlight_pattern)
+                .push_bind(row.highlight_case_sensitive);
+        });
+        phase2_qb.push(
+            "
+            )
+            SELECT
+                pf.repository,
+                pf.commit_sha,
+                pf.file_path,
+                pf.content_hash,
+                sl.start_line,
+                cbc.chunk_line_count AS line_count,
+                COALESCE(ctx.context_snippet, c.text_content) AS content_text,
+                COALESCE(ctx.match_line_number, 1) AS match_line_number,
+                COALESCE(ctx.snippet_start_line_number, 1) AS snippet_start_line_number,
+                COALESCE(ctx.match_spans, '[]'::jsonb) AS match_spans,
+                pf.highlight_pattern,
+                pf.highlight_case_sensitive,
+                FALSE AS is_definition_match,
+                pf.branches,
+                pf.live_branches,
+                pf.is_historical,
+                pf.snapshot_indexed_at
+            FROM paged_files pf
+            JOIN content_blob_chunks cbc
+              ON cbc.content_hash = pf.content_hash
+             AND cbc.chunk_index = pf.chunk_index
+            JOIN chunks c
+              ON c.chunk_hash = cbc.chunk_hash
+            LEFT JOIN LATERAL extract_context_with_highlight(
+                c.text_content,
+                pf.highlight_pattern,
+                3,
+                pf.highlight_case_sensitive
+            ) ctx ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT
+                    1 + COALESCE(SUM(cbc.chunk_line_count), 0) AS start_line
+                FROM content_blob_chunks cbc
+                WHERE cbc.content_hash = pf.content_hash
+                  AND cbc.chunk_index < pf.chunk_index
+            ) sl ON TRUE
+            ORDER BY
+                pf.ord,
+                COALESCE(ctx.match_line_number, 1)",
+        );
+
+        phase2_qb.sql().to_string()
     }
 
     #[test]
@@ -3331,8 +3582,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_plain_highlight_pattern_rejects_regex_constructs() {
-        assert!(parse_plain_highlight_pattern("foo.*bar").is_none());
+    fn parse_plain_highlight_pattern_keeps_regex_like_literals_plain() {
+        assert_eq!(
+            parse_plain_highlight_pattern("foo.*bar"),
+            Some(vec!["foo.*bar".to_string()])
+        );
     }
 
     #[test]
@@ -3363,8 +3617,8 @@ mod tests {
     fn multi_term_search_builds_intersect_filter() {
         let request = TextSearchRequest::from_query_str("polly LinkAllPasses").unwrap();
         let sql = build_phase1_sql(&request);
-        assert!(sql.contains("files.content_hash IN"));
         assert!(sql.contains("INTERSECT"));
+        assert!(sql.contains("cbc.content_hash IN ("));
     }
 
     #[test]
@@ -3395,6 +3649,47 @@ mod tests {
     }
 
     #[test]
+    fn symbol_like_search_includes_definition_boost_ctes() {
+        let request = TextSearchRequest::from_query_str("polly").unwrap();
+        let sql = build_phase1_sql(&request);
+
+        assert!(sql.contains("definition_scores AS"));
+        assert!(sql.contains("sr.kind = 'definition'"));
+        assert!(sql.contains("definition_matches"));
+        assert!(sql.contains("s.name_lc LIKE query_term.term || '%'"));
+    }
+
+    #[test]
+    fn regex_search_omits_definition_boost_ctes() {
+        let request = TextSearchRequest::from_query_str("regex:\"foo.*bar\"").unwrap();
+        let sql = build_phase1_sql(&request);
+
+        assert!(!sql.contains("definition_scores AS"));
+    }
+
+    #[test]
+    fn snippet_rank_score_prioritizes_definition_matches() {
+        let reference_score = snippet_rank_score(
+            "fn helper()",
+            &[SearchMatchSpan { start: 3, end: 9 }],
+            false,
+        );
+        let definition_score =
+            snippet_rank_score("helper", &[SearchMatchSpan { start: 0, end: 6 }], true);
+
+        assert!(definition_score > reference_score);
+    }
+
+    #[test]
+    fn phase2_uses_left_lateral_snippet_extraction() {
+        let request = TextSearchRequest::from_query_str("CloseOrLog util.").unwrap();
+        let sql = build_phase2_sql_for_first_page(&request);
+
+        assert!(sql.contains("LEFT JOIN LATERAL extract_context_with_highlight("));
+        assert!(sql.contains("COALESCE(ctx.context_snippet, c.text_content)"));
+    }
+
+    #[test]
     fn regex_search_uses_smaller_phase1_budgets() {
         let request = TextSearchRequest::from_query_str("regex:\"foo.*bar\"").unwrap();
         let budgets = compute_search_budgets(&request);
@@ -3402,8 +3697,8 @@ mod tests {
         assert_eq!(
             budgets,
             SearchBudgets {
-                fetch_limit: 51,
-                file_limit: 51,
+                fetch_limit: 101,
+                file_limit: 101,
                 plan_row_limit: REGEX_PLAN_ROW_LIMIT,
             }
         );
@@ -3417,8 +3712,8 @@ mod tests {
         assert_eq!(
             budgets,
             SearchBudgets {
-                fetch_limit: 151,
-                file_limit: 151,
+                fetch_limit: 301,
+                file_limit: 301,
                 plan_row_limit: DEFAULT_PLAN_ROW_LIMIT,
             }
         );
@@ -3498,6 +3793,14 @@ fn collect_symbol_terms(request: &TextSearchRequest) -> HashSet<String> {
         }
     }
     terms
+}
+
+fn collect_definition_terms(request: &TextSearchRequest) -> HashSet<String> {
+    collect_symbol_terms(request)
+        .into_iter()
+        .map(|term| split_fully_qualified(&term).1)
+        .filter(|term| !term.is_empty())
+        .collect()
 }
 
 fn looks_like_symbol(term: &str) -> bool {
