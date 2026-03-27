@@ -88,6 +88,8 @@ pub struct SearchToolRequest {
     pub dedupe: SearchDedupeMode,
     #[serde(default = "default_max_results_per_query")]
     pub max_results_per_query: u32,
+    #[serde(default)]
+    pub max_bytes: Option<u32>,
 }
 
 fn default_page() -> u32 {

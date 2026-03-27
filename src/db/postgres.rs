@@ -482,17 +482,31 @@ fn push_search_ctes<'a>(
     } else {
         qb.push(
             "
+            candidate_content_hashes AS MATERIALIZED (
+                SELECT DISTINCT sf.content_hash
+                FROM scored_files sf
+            ),
+            candidate_symbols AS MATERIALIZED (
+                SELECT
+                    cch.content_hash,
+                    s.id AS symbol_id,
+                    s.name_lc
+                FROM candidate_content_hashes cch
+                JOIN symbols s
+                  ON s.content_hash = cch.content_hash
+            ),
             symbol_term_matches AS MATERIALIZED (
                 SELECT
                     term,
-                    us.name_lc
+                    cs.content_hash,
+                    cs.name_lc
                 FROM UNNEST(",
         );
         qb.push_bind(symbol_terms);
         qb.push(
             ") AS term
-                JOIN unique_symbols us
-                  ON us.name_lc LIKE '%' || term || '%'
+                JOIN candidate_symbols cs
+                  ON cs.name_lc LIKE '%' || term || '%'
             ),
             symbol_scores AS (
                 SELECT
@@ -507,8 +521,8 @@ fn push_search_ctes<'a>(
                         END
                     ) AS score
                 FROM symbol_term_matches stm
-                JOIN symbols s ON s.name_lc = stm.name_lc
-                JOIN scored_files sf ON sf.content_hash = s.content_hash
+                JOIN scored_files sf
+                  ON sf.content_hash = stm.content_hash
                 GROUP BY sf.file_id, sf.content_hash
             ),
             definition_scores AS (
@@ -517,24 +531,24 @@ fn push_search_ctes<'a>(
                     sf.content_hash,
                     MAX(
                         CASE
-                            WHEN s.name_lc = query_term.term THEN 2
+                            WHEN cs.name_lc = query_term.term THEN 2
                             ELSE 1
                         END
                     )::INT AS definition_matches
                 FROM scored_files sf
-                JOIN symbols s
-                  ON s.content_hash = sf.content_hash
+                JOIN candidate_symbols cs
+                  ON cs.content_hash = sf.content_hash
                 JOIN UNNEST(
             ",
         );
         qb.push_bind(definition_terms);
         qb.push(
             ") AS query_term(term)
-                  ON s.name_lc = query_term.term
-                  OR s.name_lc LIKE query_term.term || '%'
+                  ON cs.name_lc = query_term.term
+                  OR cs.name_lc LIKE query_term.term || '%'
                 JOIN symbol_references sr
                   ON sr.kind = 'definition'
-                 AND sr.symbol_id = s.id
+                 AND sr.symbol_id = cs.symbol_id
                 GROUP BY sf.file_id, sf.content_hash
             ),
             top_files AS (
@@ -3653,10 +3667,12 @@ mod tests {
         let request = TextSearchRequest::from_query_str("polly").unwrap();
         let sql = build_phase1_sql(&request);
 
+        assert!(sql.contains("candidate_symbols AS MATERIALIZED"));
         assert!(sql.contains("definition_scores AS"));
         assert!(sql.contains("sr.kind = 'definition'"));
         assert!(sql.contains("definition_matches"));
-        assert!(sql.contains("s.name_lc LIKE query_term.term || '%'"));
+        assert!(sql.contains("cs.name_lc LIKE query_term.term || '%'"));
+        assert!(!sql.contains("JOIN unique_symbols"));
     }
 
     #[test]

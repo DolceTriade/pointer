@@ -27,6 +27,7 @@ const MAX_AUTO_TOTAL_FILE_LIST_ENTRIES: usize = 5000;
 
 pub async fn execute_search(payload: SearchToolRequest) -> Result<Value, String> {
     let request_echo = search_request_echo(&payload, None);
+    let max_bytes = normalize_max_bytes(payload.max_bytes);
     let mode = build_search_execution_mode(&payload)?;
     match mode {
         SearchExecutionMode::Single { query, page } => {
@@ -36,6 +37,7 @@ pub async fn execute_search(payload: SearchToolRequest) -> Result<Value, String>
                 request_echo,
                 payload.repo.clone(),
                 payload.branch.clone(),
+                max_bytes,
             )
             .await
         }
@@ -43,7 +45,16 @@ pub async fn execute_search(payload: SearchToolRequest) -> Result<Value, String>
             queries,
             dedupe,
             max_results_per_query,
-        } => execute_batch_search(queries, dedupe, max_results_per_query, request_echo).await,
+        } => {
+            execute_batch_search(
+                queries,
+                dedupe,
+                max_results_per_query,
+                request_echo,
+                max_bytes,
+            )
+            .await
+        }
     }
 }
 
@@ -671,6 +682,7 @@ async fn execute_single_search(
     request_echo: Value,
     repo: Option<String>,
     branch: Option<String>,
+    max_bytes: Option<usize>,
 ) -> Result<Value, String> {
     tracing::trace!(
         target: "pointer::mcp_search",
@@ -692,29 +704,45 @@ async fn execute_single_search(
     }
 
     let enriched_results = enrich_results(&page_data.results);
+    let truncation_state = truncate_results_by_max_bytes(enriched_results, max_bytes)?;
     let top_filetypes = compute_top_filetypes(&page_data.results);
     let mut guidance = Vec::new();
-    if page_data.results.is_empty() {
+    if truncation_state.results.is_empty() {
+        if page_data.results.is_empty() {
+            guidance.extend(build_no_result_guidance());
+        } else {
+            guidance.push(
+                "max_bytes is smaller than the first result payload. Increase max_bytes or narrow the search."
+                    .to_string(),
+            );
+        }
+    } else if page_data.results.is_empty() {
         guidance.extend(build_no_result_guidance());
+    } else if truncation_state.truncated_by_max_bytes {
+        guidance.push(
+            "Results were truncated to satisfy max_bytes. Increase max_bytes or narrow the search to inspect omitted matches."
+                .to_string(),
+        );
     } else if page_data.has_more {
         guidance.push(
             "Results are truncated for this page. Reuse truncation.next_page_args as the next structured search call."
                 .to_string(),
         );
     }
-    let next_page_args = if page_data.has_more {
+    let next_page_args = if page_data.has_more && !truncation_state.truncated_by_max_bytes {
         search_request_echo_from_value(&request_echo, page + 1)
     } else {
         Value::Null
     };
+    let has_more = page_data.has_more || truncation_state.truncated_by_max_bytes;
 
     Ok(json!({
         "mode": "single",
         "request_echo": request_echo,
         "page": page_data.page,
         "page_size": page_data.page_size,
-        "has_more": page_data.has_more,
-        "results": enriched_results,
+        "has_more": has_more,
+        "results": truncation_state.results,
         "stats": page_data.stats,
         "facets": {
             "common_directories": page_data.stats.common_directories,
@@ -724,8 +752,11 @@ async fn execute_single_search(
         },
         "index_freshness": freshness,
         "truncation": {
-            "has_more": page_data.has_more,
+            "has_more": has_more,
             "next_page_args": next_page_args,
+            "max_bytes": truncation_state.max_bytes,
+            "returned_bytes": truncation_state.returned_bytes,
+            "truncated_by_max_bytes": truncation_state.truncated_by_max_bytes,
         },
         "guidance": guidance,
     }))
@@ -736,6 +767,7 @@ async fn execute_batch_search(
     dedupe: SearchDedupeMode,
     max_results_per_query: usize,
     request_echo: Value,
+    max_bytes: Option<usize>,
 ) -> Result<Value, String> {
     tracing::trace!(
         target: "pointer::mcp_search",
@@ -775,7 +807,29 @@ async fn execute_batch_search(
     let deduped_results = dedupe_results(all_results, dedupe.clone());
     let freshness = freshness_from_search_results(&deduped_results);
     let top_filetypes = compute_top_filetypes(&deduped_results);
-    let guidance = if deduped_results.is_empty() {
+    let truncation_state =
+        truncate_results_by_max_bytes(enrich_results(&deduped_results), max_bytes)?;
+    let guidance = if truncation_state.results.is_empty() {
+        if deduped_results.is_empty() {
+            vec![
+                "No matches found in this batch. Broaden terms or remove restrictive filters."
+                    .to_string(),
+                "For OR semantics, keep separate alternatives in any_terms and inspect per_query_counts."
+                    .to_string(),
+                "For older snapshots, include historical:true and rerun per branch.".to_string(),
+            ]
+        } else {
+            vec![
+                "max_bytes is smaller than the first result payload. Increase max_bytes or narrow the search."
+                    .to_string(),
+            ]
+        }
+    } else if truncation_state.truncated_by_max_bytes {
+        vec![
+            "Batch results were truncated to satisfy max_bytes. Increase max_bytes or split any_terms into smaller calls."
+                .to_string(),
+        ]
+    } else if deduped_results.is_empty() {
         vec![
             "No matches found in this batch. Broaden terms or remove restrictive filters."
                 .to_string(),
@@ -786,12 +840,13 @@ async fn execute_batch_search(
     } else {
         Vec::new()
     };
+    let has_more = any_has_more || truncation_state.truncated_by_max_bytes;
 
     Ok(json!({
         "mode": "batch",
         "request_echo": request_echo,
         "dedupe": dedupe,
-        "results": enrich_results(&deduped_results),
+        "results": truncation_state.results,
         "facets": {
             "top_filetypes": top_filetypes,
         },
@@ -799,14 +854,76 @@ async fn execute_batch_search(
         "batch": {
             "per_query_counts": per_query_counts,
             "deduped_count": deduped_results.len(),
-            "truncated": any_has_more,
+            "truncated": has_more,
         },
         "truncation": {
-            "has_more": any_has_more,
-            "next_step_hint": if any_has_more { "Run single-query search with page>1 for the query of interest." } else { "" }
+            "has_more": has_more,
+            "next_step_hint": if truncation_state.truncated_by_max_bytes {
+                "Increase max_bytes or split any_terms into smaller calls to inspect omitted results."
+            } else if any_has_more {
+                "Run single-query search with page>1 for the query of interest."
+            } else {
+                ""
+            },
+            "max_bytes": truncation_state.max_bytes,
+            "returned_bytes": truncation_state.returned_bytes,
+            "truncated_by_max_bytes": truncation_state.truncated_by_max_bytes
         },
         "guidance": guidance,
     }))
+}
+
+#[derive(Debug)]
+struct ResultsByteTruncation {
+    results: Vec<Value>,
+    max_bytes: Option<usize>,
+    returned_bytes: usize,
+    truncated_by_max_bytes: bool,
+}
+
+fn normalize_max_bytes(max_bytes: Option<u32>) -> Option<usize> {
+    max_bytes.map(|value| value.max(1) as usize)
+}
+
+fn truncate_results_by_max_bytes(
+    results: Vec<Value>,
+    max_bytes: Option<usize>,
+) -> Result<ResultsByteTruncation, String> {
+    let Some(max_bytes) = max_bytes else {
+        let returned_bytes = serde_json::to_vec(&results)
+            .map(|bytes| bytes.len())
+            .map_err(|err| err.to_string())?;
+        return Ok(ResultsByteTruncation {
+            results,
+            max_bytes: None,
+            returned_bytes,
+            truncated_by_max_bytes: false,
+        });
+    };
+
+    let mut kept = Vec::with_capacity(results.len());
+    let mut used_bytes = 2usize;
+    let mut truncated = false;
+
+    for result in results {
+        let result_bytes = serde_json::to_vec(&result)
+            .map(|bytes| bytes.len())
+            .map_err(|err| err.to_string())?;
+        let separator_bytes = usize::from(!kept.is_empty());
+        if used_bytes + separator_bytes + result_bytes > max_bytes {
+            truncated = true;
+            break;
+        }
+        used_bytes += separator_bytes + result_bytes;
+        kept.push(result);
+    }
+
+    Ok(ResultsByteTruncation {
+        results: kept,
+        max_bytes: Some(max_bytes),
+        returned_bytes: used_bytes,
+        truncated_by_max_bytes: truncated,
+    })
 }
 
 fn dedupe_results(results: Vec<SearchResult>, dedupe: SearchDedupeMode) -> Vec<SearchResult> {
@@ -965,6 +1082,9 @@ fn search_request_echo(payload: &SearchToolRequest, page_override: Option<u32>) 
                 json!(payload.max_results_per_query.max(1)),
             );
         }
+    }
+    if let Some(max_bytes) = payload.max_bytes {
+        out.insert("max_bytes".to_string(), json!(max_bytes.max(1)));
     }
 
     let page = page_override.unwrap_or_else(|| payload.page.max(1));
@@ -1332,6 +1452,7 @@ mod tests {
             page: 1,
             dedupe: SearchDedupeMode::RepoPath,
             max_results_per_query: 25,
+            max_bytes: Some(4096),
         };
 
         let echo = search_request_echo(&payload, Some(2));
@@ -1341,8 +1462,32 @@ mod tests {
         assert_eq!(echo["regex"], "\\bQueryParser\\(");
         assert_eq!(echo["all_terms"], json!(["symbol", "resolver"]));
         assert_eq!(echo["any_terms"], json!(["panic", "unwrap"]));
+        assert_eq!(echo["max_bytes"], 4096);
         assert_eq!(echo["page"], 2);
         assert!(echo.get("query").is_none());
+    }
+
+    #[test]
+    fn truncate_results_by_max_bytes_keeps_prefix_within_limit() {
+        let results = vec![
+            json!({ "content_text": "a".repeat(32) }),
+            json!({ "content_text": "b".repeat(32) }),
+        ];
+
+        let truncated = truncate_results_by_max_bytes(results, Some(64)).expect("truncate");
+        assert_eq!(truncated.results.len(), 1);
+        assert!(truncated.truncated_by_max_bytes);
+        assert!(truncated.returned_bytes <= 64);
+    }
+
+    #[test]
+    fn truncate_results_by_max_bytes_can_drop_all_results() {
+        let results = vec![json!({ "content_text": "a".repeat(32) })];
+
+        let truncated = truncate_results_by_max_bytes(results, Some(8)).expect("truncate");
+        assert!(truncated.results.is_empty());
+        assert!(truncated.truncated_by_max_bytes);
+        assert_eq!(truncated.returned_bytes, 2);
     }
 
     #[test]

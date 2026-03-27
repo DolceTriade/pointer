@@ -423,7 +423,8 @@ fn mcp_tools() -> Vec<Value> {
                         "enum": ["repo_path_line", "repo_path", "none"],
                         "description": "Used when any_terms fanout is active."
                     },
-                    "max_results_per_query": { "type": "integer", "minimum": 1, "maximum": 100 }
+                    "max_results_per_query": { "type": "integer", "minimum": 1, "maximum": 100 },
+                    "max_bytes": { "type": "integer", "minimum": 1, "maximum": 1048576, "description": "Optional cap on the serialized `results` payload in bytes. Results are truncated from the tail when this limit is reached." }
                 },
                 "examples": [
                     { "repo": "pointer", "branch": "main", "all_terms": ["search"] },
