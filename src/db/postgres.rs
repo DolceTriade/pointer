@@ -290,42 +290,10 @@ fn push_search_ctes<'a>(
             );
         }
 
-        if plan.required_terms.len() == 1 {
+        if !plan.required_terms.is_empty() {
             for predicate in &plan.required_terms {
                 push_content_condition(qb, predicate, case_mode, false);
             }
-        } else if !plan.required_terms.is_empty() {
-            qb.push(" AND (");
-            for (idx, predicate) in plan.required_terms.iter().enumerate() {
-                if idx > 0 {
-                    qb.push(" OR ");
-                }
-                qb.push("(");
-                push_content_predicate(qb, predicate, case_mode, "c.text_content");
-                qb.push(")");
-            }
-            qb.push(")");
-
-            qb.push(" AND ");
-            if seed_repo_first {
-                qb.push("f_seed.content_hash");
-            } else {
-                qb.push("cbc.content_hash");
-            }
-            qb.push(" IN (");
-            for (idx, predicate) in plan.required_terms.iter().enumerate() {
-                if idx > 0 {
-                    qb.push(" INTERSECT ");
-                }
-                qb.push(
-                    "SELECT DISTINCT cbc_req.content_hash \
-                             FROM content_blob_chunks cbc_req \
-                             JOIN chunks c_req ON c_req.chunk_hash = cbc_req.chunk_hash \
-                             WHERE ",
-                );
-                push_content_predicate(qb, predicate, case_mode, "c_req.text_content");
-            }
-            qb.push(")");
         }
 
         for predicate in &plan.excluded_terms {
@@ -3628,11 +3596,11 @@ mod tests {
     }
 
     #[test]
-    fn multi_term_search_builds_intersect_filter() {
+    fn multi_term_search_uses_chunk_local_and_filter() {
         let request = TextSearchRequest::from_query_str("polly LinkAllPasses").unwrap();
         let sql = build_phase1_sql(&request);
-        assert!(sql.contains("INTERSECT"));
-        assert!(sql.contains("cbc.content_hash IN ("));
+        assert!(!sql.contains("INTERSECT"));
+        assert!(!sql.contains("cbc.content_hash IN ("));
     }
 
     #[test]

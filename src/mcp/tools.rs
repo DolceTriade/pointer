@@ -1388,7 +1388,7 @@ mod tests {
     use super::{
         build_file_list_entries, build_no_result_guidance, compile_query,
         looks_like_search_filter_query, normalize_repo_path, normalize_tool_error, quote_if_needed,
-        search_request_echo, slice_file_content,
+        search_request_echo, slice_file_content, truncate_results_by_max_bytes,
     };
     use crate::mcp::types::{SearchDedupeMode, SearchToolRequest};
     use serde_json::json;
