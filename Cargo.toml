@@ -1,5 +1,5 @@
 [workspace]
-members = ["indexer", "backend", "reposerver"]
+members = ["indexer", "backend", "reposerver", "indexer-types"]
 resolver = "2"
 
 [package]
@@ -11,14 +11,14 @@ edition = "2024"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-leptos = { version = "0.8.0", features = ["nightly", "tracing"] }
-leptos_router = { version = "0.8.0", features = ["nightly"] }
-axum = { version = "0.8.0", optional = true }
+leptos = { version = "0.8.17", features = ["nightly", "tracing"] }
+leptos_router = { version = "0.8.13", features = ["nightly"] }
+axum = { version = "0.8.8", optional = true }
 console_error_panic_hook = { version = "0.1", optional = true }
-leptos_axum = { version = "0.8.0", optional = true }
-leptos_meta = { version = "0.8.0" }
+leptos_axum = { version = "0.8.8", optional = true }
+leptos_meta = { version = "0.8.6" }
 tokio = { version = "1", features = ["full"], optional = true }
-wasm-bindgen = { version = "=0.2.104", optional = true }
+wasm-bindgen = { version = "=0.2.108", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = [
@@ -35,7 +35,7 @@ colored = { version = "2.1", optional = true }
 console_log = { version = "1.0", optional = true }
 log = "0.4.28"
 tracing-web = { version = "0.1.3", optional = true }
-web-sys = { version = "=0.3.81", features = [
+web-sys = { version = "=0.3.85", features = [
     "Blob",
     "BlobPropertyBag",
     "CanvasRenderingContext2d",
@@ -74,12 +74,37 @@ sqlx = { version = "0.8", optional = true }
 async-trait = { version = "0.1" }
 base64 = { version = "0.22", optional = true }
 zstd = { version = "0.13", optional = true }
-pointer-indexer = { path = "./indexer", optional = true }
+pointer-indexer-types = { path = "./indexer-types", optional = true }
 anyhow = "1.0.100"
 server_fn_macro_default = { version = "0.8.5", optional = true }
 pulldown-cmark = { version = "0.11.0", optional = true, default-features = false }
 lazy_static = { version = "1.5.0", optional = true }
-autumnus = { version = "0.8.0-beta.3", optional = true, features = ["all-languages"] }
+lumis = { git = "https://github.com/leandrocp/lumis", branch = "main", optional = true, default-features = false, features = [
+    "lang-bash",
+    "lang-c",
+    "lang-cpp",
+    "lang-css",
+    "lang-glsl",
+    "lang-go",
+    "lang-html",
+    "lang-java",
+    "lang-javascript",
+    "lang-json",
+    "lang-lua",
+    "lang-markdown",
+    "lang-nix",
+    "lang-objc",
+    "lang-php",
+    "lang-protobuf",
+    "lang-python",
+    "lang-rust",
+    "lang-sql",
+    "lang-swift",
+    "lang-toml",
+    "lang-typescript",
+    "lang-xml",
+    "lang-yaml",
+] }
 
 thiserror = { version = "1.0.63", optional = true }
 tower-http = { version = "0.6.6", optional = true, features = ["compression-gzip", "compression-zstd"] }
@@ -94,7 +119,6 @@ hydrate = [
     "dep:wasm-bindgen",
     "leptos/hydrate",
 ]
-pointer-indexer = ["dep:pointer-indexer"]
 ssr = [
     "dep:axum",
     "dep:colored",
@@ -104,10 +128,10 @@ ssr = [
     "dep:tokio",
     "dep:base64",
     "dep:zstd",
-    "dep:pointer-indexer",
+    "dep:pointer-indexer-types",
     "dep:lazy_static",
     "pulldown-cmark/html",
-    "autumnus",
+    "lumis",
     "server_fn_macro_default/axum",
     "clap/derive",
     "clap/wrap_help",
@@ -133,8 +157,8 @@ pulldown-cmark = ["dep:pulldown-cmark"]
 thiserror = ["dep:thiserror"]
 
 server_fn_macro_default = ["dep:server_fn_macro_default"]
-autumnus = ["dep:autumnus"]
-vendored = ["pointer-indexer/vendored"]
+pointer-indexer-types = ["dep:pointer-indexer-types"]
+lumis = ["dep:lumis"]
 
 # Defines a size-optimized profile for the WASM bundle in release mode
 [profile.wasm-release]

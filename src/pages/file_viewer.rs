@@ -194,7 +194,7 @@ pub async fn get_file_viewer_data(
         // For text files, we'll add line numbers.
         let line_count = file_content.content.lines().count();
 
-        use autumnus::{HtmlInlineBuilder, OptionsBuilder, highlight, languages::Language, themes};
+        use lumis::{highlight, languages::Language, themes, HtmlInlineBuilder};
 
         let lang = p
             .file_name()
@@ -205,18 +205,12 @@ pub async fn get_file_viewer_data(
         let formatter = HtmlInlineBuilder::new()
             .lang(lang)
             .theme(theme)
-            .pre_class(Some("code-block"))
+            .pre_class(Some("code-block".to_string()))
             .italic(false)
             .include_highlights(false)
             .build()
             .unwrap();
-
-        let options = OptionsBuilder::new()
-            .formatter(Box::new(formatter))
-            .build()
-            .unwrap();
-
-        let html = highlight(&file_content.content, options);
+        let html = highlight(&file_content.content, formatter);
 
         Ok(FileViewerData::File {
             html,

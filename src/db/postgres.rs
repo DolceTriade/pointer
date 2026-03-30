@@ -7,6 +7,7 @@ use crate::db::{
     RepoTreeQuery, SearchRequest, SearchResponse, SearchResult, SnippetRequest, SnippetResponse,
     SymbolReferenceRequest, SymbolReferenceResponse, SymbolResult, TreeEntry, TreeResponse,
 };
+use pointer_indexer_types::{BranchHead, ContentBlob, FilePointer, IndexReport, ReferenceRecord, SymbolRecord};
 use crate::dsl::{
     CaseSensitivity, ContentPredicate, TextSearchPlan, TextSearchRequest, escape_sql_like_literal,
 };
@@ -1108,7 +1109,7 @@ impl Database for PostgresDb {
             combined
         };
 
-        let report: pointer_indexer::models::IndexReport = serde_json::from_slice(&report_bytes)
+        let report: IndexReport = serde_json::from_slice(&report_bytes)
             .map_err(|e| DbError::Serialization(e.to_string()))?;
 
         self.ingest_report(report).await?;
@@ -2754,7 +2755,7 @@ impl PostgresDb {
 
     async fn ingest_report(
         &self,
-        report: pointer_indexer::models::IndexReport,
+        report: IndexReport,
     ) -> Result<(), DbError> {
         let mut tx = self
             .pool
@@ -2782,7 +2783,7 @@ impl PostgresDb {
     async fn insert_content_blobs(
         &self,
         tx: &mut Transaction<'_, Postgres>,
-        blobs: &[pointer_indexer::models::ContentBlob],
+        blobs: &[ContentBlob],
     ) -> Result<(), DbError> {
         if blobs.is_empty() {
             return Ok(());
@@ -2816,7 +2817,7 @@ impl PostgresDb {
     async fn insert_file_pointers(
         &self,
         tx: &mut Transaction<'_, Postgres>,
-        files: &[pointer_indexer::models::FilePointer],
+        files: &[FilePointer],
     ) -> Result<(), DbError> {
         if files.is_empty() {
             return Ok(());
@@ -2856,7 +2857,7 @@ impl PostgresDb {
     async fn insert_symbol_records(
         &self,
         tx: &mut Transaction<'_, Postgres>,
-        symbols: &[pointer_indexer::models::SymbolRecord],
+        symbols: &[SymbolRecord],
     ) -> Result<(), DbError> {
         if symbols.is_empty() {
             return Ok(());
@@ -2888,7 +2889,7 @@ impl PostgresDb {
     async fn insert_reference_records(
         &self,
         tx: &mut Transaction<'_, Postgres>,
-        references: &[pointer_indexer::models::ReferenceRecord],
+        references: &[ReferenceRecord],
     ) -> Result<(), DbError> {
         if references.is_empty() {
             return Ok(());
@@ -2973,7 +2974,7 @@ impl PostgresDb {
     async fn upsert_branch_heads(
         &self,
         tx: &mut Transaction<'_, Postgres>,
-        branches: &[pointer_indexer::models::BranchHead],
+        branches: &[BranchHead],
     ) -> Result<(), DbError> {
         if branches.is_empty() {
             return Ok(());

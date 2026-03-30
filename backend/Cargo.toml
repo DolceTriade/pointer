@@ -10,9 +10,9 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "macros", "chrono"] }
-pointer-indexer = { path = "../indexer" }
+pointer-indexer-types = { path = "../indexer-types" }
 zstd = "0.13"
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.5", features = ["derive", "env"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 thiserror = "1"
@@ -26,4 +26,3 @@ tempfile = "3"
 chrono = { version = "0.4", features = ["serde"] }
 
 [features]
-vendored = ["pointer-indexer/vendored"]

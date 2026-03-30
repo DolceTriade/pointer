@@ -21,7 +21,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use clap::Parser;
 use futures::{StreamExt, TryStreamExt, stream::FuturesUnordered};
-use pointer_indexer::models::{
+use pointer_indexer_types::{
     BranchHead, ChunkMapping, ContentBlob, FilePointer, ReferenceRecord, SymbolNamespaceRecord,
     SymbolRecord, UniqueChunk,
 };

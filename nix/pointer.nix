@@ -6,7 +6,7 @@
   rustPlatform,
   rustc,
   tailwindcss,
-  wasm-bindgen-cli_0_2_104,
+  wasm-bindgen-cli_0_2_108,
   openssl,
   pkg-config,
   autoPatchelfHook,
@@ -30,7 +30,7 @@ rustPlatform.buildRustPackage rec {
   enableParallelBuild = true;
 
   nativeBuildInputs = [
-    wasm-bindgen-cli_0_2_104
+    wasm-bindgen-cli_0_2_108
     binaryen
     cargo-leptos
     rustc.llvmPackages.lld
