@@ -114,6 +114,27 @@ fn request_has_regex(request: &TextSearchRequest) -> bool {
     request.plans.iter().any(plan_has_regex)
 }
 
+fn explicit_chunk_and_terms(plan: &TextSearchPlan) -> Option<Vec<ContentPredicate>> {
+    if plan.required_terms.len() <= 1
+        || !plan
+            .required_terms
+            .iter()
+            .all(|predicate| matches!(predicate, ContentPredicate::Plain(_)))
+    {
+        return None;
+    }
+
+    let mut terms = plan.required_terms.clone();
+    terms.sort_by(|left, right| match (left, right) {
+        (ContentPredicate::Plain(left_value), ContentPredicate::Plain(right_value)) => right_value
+            .len()
+            .cmp(&left_value.len())
+            .then_with(|| left_value.cmp(right_value)),
+        _ => std::cmp::Ordering::Equal,
+    });
+    Some(terms)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SearchBudgets {
     fetch_limit: i64,
@@ -204,31 +225,160 @@ fn push_search_ctes<'a>(
         let case_mode = resolve_case(plan);
         let highlight_case_sensitive = matches!(case_mode, CaseSensitivity::Yes);
         let seed_repo_first = !plan_has_regex(plan) && !plan.repos.is_empty();
+        let explicit_chunk_and_terms = explicit_chunk_and_terms(plan);
 
         qb.push("(");
-        qb.push(
-            "
+        if let Some(required_terms) = explicit_chunk_and_terms.as_ref() {
+            let seed_predicate = &required_terms[0];
+            let remaining_predicates = &required_terms[1..];
+
+            qb.push("WITH seed_rows AS (");
+            if seed_repo_first {
+                qb.push(
+                    "
+                    SELECT
+                        f_seed.id AS file_id,
+                        f_seed.content_hash,
+                        cbc.chunk_line_count,
+                        cbc.chunk_index,
+                        c.text_content
+                    FROM
+                        files f_seed
+                        JOIN content_blob_chunks cbc
+                          ON cbc.content_hash = f_seed.content_hash
+                        JOIN chunks c
+                          ON c.chunk_hash = cbc.chunk_hash
+                    WHERE
+                        TRUE",
+                );
+
+                qb.push(" AND f_seed.repository = ANY(");
+                qb.push_bind(&plan.repos);
+                qb.push(")");
+
+                if !plan.excluded_repos.is_empty() {
+                    qb.push(" AND NOT (f_seed.repository = ANY(");
+                    qb.push_bind(&plan.excluded_repos);
+                    qb.push("))");
+                }
+
+                if !plan.file_globs.is_empty() {
+                    for pattern in &plan.file_globs {
+                        qb.push(" AND f_seed.file_path ILIKE ");
+                        qb.push_bind(pattern);
+                        qb.push(" ESCAPE '\\'");
+                    }
+                }
+
+                if !plan.excluded_file_globs.is_empty() {
+                    for pattern in &plan.excluded_file_globs {
+                        qb.push(" AND f_seed.file_path NOT ILIKE ");
+                        qb.push_bind(pattern);
+                        qb.push(" ESCAPE '\\'");
+                    }
+                }
+            } else {
+                qb.push(
+                    "
+                    SELECT
+                        f_seed.id AS file_id,
+                        f_seed.content_hash,
+                        cbc.chunk_line_count,
+                        cbc.chunk_index,
+                        c.text_content
+                    FROM
+                        chunks c
+                        JOIN content_blob_chunks cbc
+                          ON cbc.chunk_hash = c.chunk_hash
+                        JOIN files f_seed
+                          ON f_seed.content_hash = cbc.content_hash
+                    WHERE
+                        TRUE",
+                );
+            }
+
+            push_content_condition(qb, seed_predicate, case_mode, false);
+
+            for predicate in &plan.excluded_terms {
+                push_content_condition(qb, predicate, case_mode, true);
+            }
+
+            qb.push(
+                "
+                ),
+                matched_rows AS (
+                    SELECT
+                        seed.file_id,
+                        seed.content_hash,
+                        seed.chunk_line_count,
+                        seed.chunk_index
+                    FROM
+                        seed_rows seed
+                    WHERE
+                        TRUE",
+            );
+
+            for predicate in remaining_predicates {
+                qb.push(" AND (");
+                push_content_predicate(qb, predicate, case_mode, "seed.text_content");
+                qb.push(")");
+            }
+
+            qb.push(
+                "
+                    LIMIT ",
+            );
+            qb.push_bind(plan_row_limit);
+            qb.push(
+                "
+                )
                 SELECT
                     files.id AS file_id,
                     files.content_hash,
                     matched_rows.chunk_line_count AS line_count,
                     matched_rows.chunk_index,
                 ",
-        );
-        qb.push_bind(&plan.highlight_pattern);
-        qb.push(
-            " AS highlight_pattern,
+            );
+            qb.push_bind(&plan.highlight_pattern);
+            qb.push(
+                " AS highlight_pattern,
                 ",
-        );
-        qb.push_bind(highlight_case_sensitive);
-        qb.push(
-            " AS highlight_case_sensitive,
+            );
+            qb.push_bind(highlight_case_sensitive);
+            qb.push(
+                " AS highlight_case_sensitive,
                 ",
-        );
-        qb.push_bind(plan.include_historical);
-        if seed_repo_first {
+            );
+            qb.push_bind(plan.include_historical);
             qb.push(
                 " AS include_historical
+                FROM matched_rows
+                JOIN files ON files.id = matched_rows.file_id",
+            );
+        } else {
+            qb.push(
+                "
+                SELECT
+                    files.id AS file_id,
+                    files.content_hash,
+                    matched_rows.chunk_line_count AS line_count,
+                    matched_rows.chunk_index,
+                ",
+            );
+            qb.push_bind(&plan.highlight_pattern);
+            qb.push(
+                " AS highlight_pattern,
+                ",
+            );
+            qb.push_bind(highlight_case_sensitive);
+            qb.push(
+                " AS highlight_case_sensitive,
+                ",
+            );
+            qb.push_bind(plan.include_historical);
+            if seed_repo_first {
+                qb.push(
+                    " AS include_historical
                 FROM (
                     SELECT
                         f_seed.id AS file_id,
@@ -243,36 +393,36 @@ fn push_search_ctes<'a>(
                           ON c.chunk_hash = cbc.chunk_hash
                     WHERE
                         TRUE",
-            );
+                );
 
-            qb.push(" AND f_seed.repository = ANY(");
-            qb.push_bind(&plan.repos);
-            qb.push(")");
+                qb.push(" AND f_seed.repository = ANY(");
+                qb.push_bind(&plan.repos);
+                qb.push(")");
 
-            if !plan.excluded_repos.is_empty() {
-                qb.push(" AND NOT (f_seed.repository = ANY(");
-                qb.push_bind(&plan.excluded_repos);
-                qb.push("))");
-            }
-
-            if !plan.file_globs.is_empty() {
-                for pattern in &plan.file_globs {
-                    qb.push(" AND f_seed.file_path ILIKE ");
-                    qb.push_bind(pattern);
-                    qb.push(" ESCAPE '\\'");
+                if !plan.excluded_repos.is_empty() {
+                    qb.push(" AND NOT (f_seed.repository = ANY(");
+                    qb.push_bind(&plan.excluded_repos);
+                    qb.push("))");
                 }
-            }
 
-            if !plan.excluded_file_globs.is_empty() {
-                for pattern in &plan.excluded_file_globs {
-                    qb.push(" AND f_seed.file_path NOT ILIKE ");
-                    qb.push_bind(pattern);
-                    qb.push(" ESCAPE '\\'");
+                if !plan.file_globs.is_empty() {
+                    for pattern in &plan.file_globs {
+                        qb.push(" AND f_seed.file_path ILIKE ");
+                        qb.push_bind(pattern);
+                        qb.push(" ESCAPE '\\'");
+                    }
                 }
-            }
-        } else {
-            qb.push(
-                " AS include_historical
+
+                if !plan.excluded_file_globs.is_empty() {
+                    for pattern in &plan.excluded_file_globs {
+                        qb.push(" AND f_seed.file_path NOT ILIKE ");
+                        qb.push_bind(pattern);
+                        qb.push(" ESCAPE '\\'");
+                    }
+                }
+            } else {
+                qb.push(
+                    " AS include_historical
                 FROM (
                     SELECT
                         f_seed.id AS file_id,
@@ -287,29 +437,30 @@ fn push_search_ctes<'a>(
                           ON f_seed.content_hash = cbc.content_hash
                     WHERE
                         TRUE",
-            );
-        }
-
-        if !plan.required_terms.is_empty() {
-            for predicate in &plan.required_terms {
-                push_content_condition(qb, predicate, case_mode, false);
+                );
             }
-        }
 
-        for predicate in &plan.excluded_terms {
-            push_content_condition(qb, predicate, case_mode, true);
-        }
+            if !plan.required_terms.is_empty() {
+                for predicate in &plan.required_terms {
+                    push_content_condition(qb, predicate, case_mode, false);
+                }
+            }
 
-        qb.push(
-            "
+            for predicate in &plan.excluded_terms {
+                push_content_condition(qb, predicate, case_mode, true);
+            }
+
+            qb.push(
+                "
                         LIMIT ",
-        );
-        qb.push_bind(plan_row_limit);
-        qb.push(
-            "
+            );
+            qb.push_bind(plan_row_limit);
+            qb.push(
+                "
                 ) matched_rows
                 JOIN files ON files.id = matched_rows.file_id",
-        );
+            );
+        }
 
         let needs_live_branch_filter_for_plan =
             plan.branches.is_empty() && !plan.include_historical;
@@ -546,15 +697,15 @@ fn push_search_ctes<'a>(
         "
             ),
             ranked_top AS (
-                SELECT
+                SELECT DISTINCT ON (lp.file_id, lp.content_hash, lp.include_historical)
                     f.id AS file_id,
                     f.repository,
                     f.commit_sha,
                     f.file_path,
                     lp.content_hash,
-                    MIN(lp.chunk_index) AS chunk_index,
-                    (array_agg(lp.highlight_pattern ORDER BY lp.chunk_index ASC))[1] AS highlight_pattern,
-                    (array_agg(lp.highlight_case_sensitive ORDER BY lp.chunk_index ASC))[1] AS highlight_case_sensitive,
+                    lp.chunk_index,
+                    lp.highlight_pattern,
+                    lp.highlight_case_sensitive,
                     tf.total_score,
                     tf.definition_matches,
                     tf.include_historical
@@ -565,15 +716,11 @@ fn push_search_ctes<'a>(
                  AND lp.include_historical = tf.include_historical
                 JOIN files f
                   ON f.id = lp.file_id
-                GROUP BY
-                    f.id,
-                    f.repository,
-                    f.commit_sha,
-                    f.file_path,
+                ORDER BY
+                    lp.file_id,
                     lp.content_hash,
-                    tf.total_score,
-                    tf.definition_matches,
-                    tf.include_historical
+                    lp.include_historical,
+                    lp.chunk_index ASC
             ),
             ranked_keys AS (
                 SELECT DISTINCT repository, commit_sha
@@ -1779,14 +1926,16 @@ ORDER BY idx
             .iter()
             .any(|plan| plan.branches.is_empty() && !plan.include_historical);
 
-        let symbol_terms: Vec<String> = collect_symbol_terms(request)
+        let mut symbol_terms: Vec<String> = collect_symbol_terms(request)
             .into_iter()
             .map(|t| t.to_lowercase())
             .collect();
-        let definition_terms: Vec<String> = collect_definition_terms(request)
+        symbol_terms.sort_unstable();
+        let mut definition_terms: Vec<String> = collect_definition_terms(request)
             .into_iter()
             .map(|t| t.to_lowercase())
             .collect();
+        definition_terms.sort_unstable();
 
         let explain_requested = std::env::var("POINTER_EXPLAIN_SEARCH_SQL").is_ok();
 
@@ -2037,15 +2186,31 @@ ORDER BY idx
                 .into_iter()
                 .map(|mut agg| {
                     agg.entries.sort_by(|a, b| {
-                        let score_a = snippet_rank_score(
+                        let spans_a = normalize_literal_match_spans(
                             &a.content_text,
                             &a.match_spans.0,
+                            &a.highlight_pattern,
+                            a.highlight_case_sensitive,
+                        );
+                        let spans_b = normalize_literal_match_spans(
+                            &b.content_text,
+                            &b.match_spans.0,
+                            &b.highlight_pattern,
+                            b.highlight_case_sensitive,
+                        );
+                        let score_a = snippet_rank_score(
+                            &a.content_text,
+                            &spans_a,
                             a.is_definition_match,
+                            &a.highlight_pattern,
+                            a.highlight_case_sensitive,
                         );
                         let score_b = snippet_rank_score(
                             &b.content_text,
-                            &b.match_spans.0,
+                            &spans_b,
                             b.is_definition_match,
+                            &b.highlight_pattern,
+                            b.highlight_case_sensitive,
                         );
                         score_b
                             .cmp(&score_a)
@@ -2968,9 +3133,22 @@ fn snippet_rank_score(
     text: &str,
     spans: &[SearchMatchSpan],
     is_definition_match: bool,
-) -> (bool, i32, i32, i32) {
+    pattern: &str,
+    case_sensitive: bool,
+) -> (bool, bool, i32, i32, i32, i32) {
+    let (covers_all_terms, distinct_terms) = snippet_term_coverage(text, pattern, case_sensitive)
+        .filter(|(_, total_terms)| *total_terms > 1)
+        .map(|(covered_terms, total_terms)| (covered_terms == total_terms, covered_terms))
+        .unwrap_or((false, 0));
     let (exact_count, span_count, signal_count) = snippet_signal_score(text, spans);
-    (is_definition_match, exact_count, span_count, signal_count)
+    (
+        is_definition_match,
+        covers_all_terms,
+        distinct_terms,
+        exact_count,
+        span_count,
+        signal_count,
+    )
 }
 
 fn normalize_literal_match_spans(
@@ -3024,6 +3202,35 @@ fn parse_plain_highlight_pattern(pattern: &str) -> Option<Vec<String>> {
     }
     terms.push(current);
     Some(terms)
+}
+
+fn snippet_term_coverage(text: &str, pattern: &str, case_sensitive: bool) -> Option<(i32, i32)> {
+    let mut terms = parse_plain_highlight_pattern(pattern)?;
+    terms.sort_unstable();
+    terms.dedup();
+
+    if terms.is_empty() {
+        return Some((0, 0));
+    }
+
+    let covered_terms = if case_sensitive {
+        terms
+            .iter()
+            .filter(|term| text.contains(term.as_str()))
+            .count()
+    } else {
+        if !text.is_ascii() || terms.iter().any(|term| !term.is_ascii()) {
+            return None;
+        }
+
+        let lower_text = text.to_ascii_lowercase();
+        terms
+            .iter()
+            .filter(|term| lower_text.contains(&term.to_ascii_lowercase()))
+            .count()
+    };
+
+    Some((covered_terms as i32, terms.len() as i32))
 }
 
 fn find_literal_match_spans(
@@ -3257,14 +3464,16 @@ mod tests {
             .iter()
             .any(|plan| plan.branches.is_empty() && !plan.include_historical);
 
-        let symbol_terms: Vec<String> = collect_symbol_terms(request)
+        let mut symbol_terms: Vec<String> = collect_symbol_terms(request)
             .into_iter()
             .map(|t| t.to_lowercase())
             .collect();
-        let definition_terms: Vec<String> = collect_definition_terms(request)
+        symbol_terms.sort_unstable();
+        let mut definition_terms: Vec<String> = collect_definition_terms(request)
             .into_iter()
             .map(|t| t.to_lowercase())
             .collect();
+        definition_terms.sort_unstable();
 
         let mut qb = QueryBuilder::new("");
         push_search_ctes(
@@ -3292,14 +3501,16 @@ mod tests {
             .iter()
             .any(|plan| plan.branches.is_empty() && !plan.include_historical);
 
-        let symbol_terms: Vec<String> = collect_symbol_terms(request)
+        let mut symbol_terms: Vec<String> = collect_symbol_terms(request)
             .into_iter()
             .map(|t| t.to_lowercase())
             .collect();
-        let definition_terms: Vec<String> = collect_definition_terms(request)
+        symbol_terms.sort_unstable();
+        let mut definition_terms: Vec<String> = collect_definition_terms(request)
             .into_iter()
             .map(|t| t.to_lowercase())
             .collect();
+        definition_terms.sort_unstable();
 
         let mut phase1_qb = QueryBuilder::new("");
         push_search_ctes(
@@ -3599,8 +3810,20 @@ mod tests {
     fn multi_term_search_uses_chunk_local_and_filter() {
         let request = TextSearchRequest::from_query_str("polly LinkAllPasses").unwrap();
         let sql = build_phase1_sql(&request);
-        assert!(!sql.contains("INTERSECT"));
-        assert!(!sql.contains("cbc.content_hash IN ("));
+        assert!(sql.contains("seed_rows AS ("));
+        assert!(sql.contains("matched_rows AS ("));
+        assert!(sql.contains("seed.text_content"));
+    }
+
+    #[test]
+    fn ranked_top_preserves_chunk_row_identity() {
+        let request = TextSearchRequest::from_query_str("polly LinkAllPasses").unwrap();
+        let sql = build_phase1_sql(&request);
+
+        assert!(
+            sql.contains("SELECT DISTINCT ON (lp.file_id, lp.content_hash, lp.include_historical)")
+        );
+        assert!(!sql.contains("MIN(lp.chunk_index) AS chunk_index"));
     }
 
     #[test]
@@ -3657,11 +3880,45 @@ mod tests {
             "fn helper()",
             &[SearchMatchSpan { start: 3, end: 9 }],
             false,
+            "helper",
+            true,
         );
-        let definition_score =
-            snippet_rank_score("helper", &[SearchMatchSpan { start: 0, end: 6 }], true);
+        let definition_score = snippet_rank_score(
+            "helper",
+            &[SearchMatchSpan { start: 0, end: 6 }],
+            true,
+            "helper",
+            true,
+        );
 
         assert!(definition_score > reference_score);
+    }
+
+    #[test]
+    fn snippet_rank_score_prefers_multi_term_coverage_for_plain_terms() {
+        let util_only = snippet_rank_score(
+            "util util util",
+            &[
+                SearchMatchSpan { start: 0, end: 4 },
+                SearchMatchSpan { start: 5, end: 9 },
+                SearchMatchSpan { start: 10, end: 14 },
+            ],
+            false,
+            "util|atomicwritefile",
+            false,
+        );
+        let both_terms = snippet_rank_score(
+            "util AtomicWriteFile",
+            &[
+                SearchMatchSpan { start: 0, end: 4 },
+                SearchMatchSpan { start: 5, end: 20 },
+            ],
+            false,
+            "util|atomicwritefile",
+            false,
+        );
+
+        assert!(both_terms > util_only);
     }
 
     #[test]
