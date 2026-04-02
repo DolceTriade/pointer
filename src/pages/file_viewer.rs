@@ -194,7 +194,7 @@ pub async fn get_file_viewer_data(
         // For text files, we'll add line numbers.
         let line_count = file_content.content.lines().count();
 
-        use lumis::{highlight, languages::Language, themes, HtmlInlineBuilder};
+        use lumis::{HtmlInlineBuilder, highlight, languages::Language, themes};
 
         let lang = p
             .file_name()

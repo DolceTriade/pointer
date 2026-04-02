@@ -686,6 +686,22 @@ impl TextSearchPlan {
     }
 }
 
+fn compare_content_predicates(
+    left: &ContentPredicate,
+    right: &ContentPredicate,
+) -> std::cmp::Ordering {
+    match (left, right) {
+        (ContentPredicate::Plain(left_value), ContentPredicate::Plain(right_value)) => {
+            left_value.cmp(right_value)
+        }
+        (ContentPredicate::Plain(_), ContentPredicate::Regex(_)) => std::cmp::Ordering::Less,
+        (ContentPredicate::Regex(_), ContentPredicate::Plain(_)) => std::cmp::Ordering::Greater,
+        (ContentPredicate::Regex(left_value), ContentPredicate::Regex(right_value)) => {
+            left_value.cmp(right_value)
+        }
+    }
+}
+
 impl TryFrom<FlatQuery> for TextSearchPlan {
     type Error = QueryPlanError;
 
@@ -713,10 +729,13 @@ impl TryFrom<FlatQuery> for TextSearchPlan {
             }
         }
 
-        let highlight_pattern = TextSearchPlan::highlight_from_terms(&value.required_terms);
-
         value.required_terms = dedup_content_terms(value.required_terms);
         value.excluded_terms = dedup_content_terms(value.excluded_terms);
+        value.required_terms.sort_by(compare_content_predicates);
+        value.excluded_terms.sort_by(compare_content_predicates);
+
+        let highlight_pattern = TextSearchPlan::highlight_from_terms(&value.required_terms);
+
         dedup_vec(&mut value.repos);
         dedup_vec(&mut value.excluded_repos);
         dedup_vec(&mut value.file_globs);
@@ -1058,6 +1077,36 @@ mod tests {
     fn test_parse_simple_content() {
         let result = parse_query("hello world");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn plain_terms_flatten_into_single_and_plan() {
+        let request = TextSearchRequest::from_query_str("util atomicwritefile").unwrap();
+        assert_eq!(request.plans.len(), 1);
+        assert_eq!(
+            request.plans[0].required_terms,
+            vec![
+                ContentPredicate::Plain("atomicwritefile".to_string()),
+                ContentPredicate::Plain("util".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn plain_terms_are_canonicalized_independent_of_order() {
+        let forward = TextSearchRequest::from_query_str("shadow fxaa").unwrap();
+        let reverse = TextSearchRequest::from_query_str("fxaa shadow").unwrap();
+
+        assert_eq!(forward.plans.len(), 1);
+        assert_eq!(reverse.plans.len(), 1);
+        assert_eq!(
+            forward.plans[0].required_terms,
+            reverse.plans[0].required_terms
+        );
+        assert_eq!(
+            forward.plans[0].highlight_pattern,
+            reverse.plans[0].highlight_pattern
+        );
     }
 
     #[test]
