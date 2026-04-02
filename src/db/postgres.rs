@@ -7,12 +7,14 @@ use crate::db::{
     RepoTreeQuery, SearchRequest, SearchResponse, SearchResult, SnippetRequest, SnippetResponse,
     SymbolReferenceRequest, SymbolReferenceResponse, SymbolResult, TreeEntry, TreeResponse,
 };
-use pointer_indexer_types::{BranchHead, ContentBlob, FilePointer, IndexReport, ReferenceRecord, SymbolRecord};
 use crate::dsl::{
     CaseSensitivity, ContentPredicate, TextSearchPlan, TextSearchRequest, escape_sql_like_literal,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use pointer_indexer_types::{
+    BranchHead, ContentBlob, FilePointer, IndexReport, ReferenceRecord, SymbolRecord,
+};
 use sqlx::postgres::PgArguments;
 use sqlx::{Execute, PgPool, Postgres, QueryBuilder, Transaction, types::Json};
 use std::{
@@ -2753,10 +2755,7 @@ impl PostgresDb {
         Ok(FileData { bytes, language })
     }
 
-    async fn ingest_report(
-        &self,
-        report: IndexReport,
-    ) -> Result<(), DbError> {
+    async fn ingest_report(&self, report: IndexReport) -> Result<(), DbError> {
         let mut tx = self
             .pool
             .begin()
