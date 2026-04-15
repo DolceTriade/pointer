@@ -3304,8 +3304,12 @@ fn is_identifier_byte(byte: u8) -> bool {
 }
 
 fn snippet_end_line(content_text: &str, start_line: i32) -> i32 {
-    let line_count = content_text.split('\n').count().max(1) as i32;
-    start_line.saturating_add(line_count.saturating_sub(1))
+    let line_count = content_text.lines().count() as i32;
+    if line_count == 0 {
+        start_line
+    } else {
+        start_line.saturating_add(line_count.saturating_sub(1))
+    }
 }
 
 fn merge_overlapping_snippets(mut snippets: Vec<SearchSnippet>) -> Vec<SearchSnippet> {
@@ -3327,8 +3331,9 @@ fn merge_overlapping_snippets(mut snippets: Vec<SearchSnippet>) -> Vec<SearchSni
 
     for snippet in snippets.into_iter().skip(1) {
         if snippet.start_line <= current_end.saturating_add(1) {
-            current_end = current_end.max(snippet.end_line);
-            merge_snippet_line_map(&mut line_map, &snippet);
+            let (merged_start, merged_end) = merge_snippet_line_map(&mut line_map, &snippet);
+            current_start = current_start.min(merged_start);
+            current_end = current_end.max(merged_end);
         } else {
             merged.push(build_snippet_from_map(
                 current_start,
@@ -3357,8 +3362,7 @@ fn build_snippet_line_map(
     snippet: &SearchSnippet,
 ) -> BTreeMap<i32, (String, Vec<SearchMatchSpan>)> {
     let mut map = BTreeMap::new();
-    for (idx, (line, spans)) in split_snippet_lines(snippet).into_iter().enumerate() {
-        let line_number = snippet.start_line.saturating_add(idx as i32);
+    for (line_number, line, spans) in aligned_snippet_lines(&map, snippet) {
         insert_snippet_line(&mut map, line_number, line, spans);
     }
     map
@@ -3367,11 +3371,86 @@ fn build_snippet_line_map(
 fn merge_snippet_line_map(
     map: &mut BTreeMap<i32, (String, Vec<SearchMatchSpan>)>,
     snippet: &SearchSnippet,
-) {
-    for (idx, (line, spans)) in split_snippet_lines(snippet).into_iter().enumerate() {
-        let line_number = snippet.start_line.saturating_add(idx as i32);
+) -> (i32, i32) {
+    let mut min_line = i32::MAX;
+    let mut max_line = i32::MIN;
+    for (line_number, line, spans) in aligned_snippet_lines(map, snippet) {
+        min_line = min_line.min(line_number);
+        max_line = max_line.max(line_number);
         insert_snippet_line(map, line_number, line, spans);
     }
+    if min_line == i32::MAX {
+        (snippet.start_line, snippet.end_line)
+    } else {
+        (min_line, max_line)
+    }
+}
+
+fn aligned_snippet_lines(
+    map: &BTreeMap<i32, (String, Vec<SearchMatchSpan>)>,
+    snippet: &SearchSnippet,
+) -> Vec<(i32, String, Vec<SearchMatchSpan>)> {
+    let split_lines = split_snippet_lines(snippet);
+    let shift = best_snippet_line_shift(map, snippet.start_line, &split_lines);
+    split_lines
+        .into_iter()
+        .enumerate()
+        .map(|(idx, (line, spans))| {
+            (
+                snippet
+                    .start_line
+                    .saturating_add(idx as i32)
+                    .saturating_add(shift),
+                line,
+                spans,
+            )
+        })
+        .collect()
+}
+
+fn best_snippet_line_shift(
+    map: &BTreeMap<i32, (String, Vec<SearchMatchSpan>)>,
+    start_line: i32,
+    lines: &[(String, Vec<SearchMatchSpan>)],
+) -> i32 {
+    if map.is_empty() || lines.is_empty() {
+        return 0;
+    }
+
+    const MAX_SHIFT: i32 = 3;
+
+    let mut best_shift: i32 = 0;
+    let mut best_score: i32 = 0;
+
+    for shift in -MAX_SHIFT..=MAX_SHIFT {
+        let mut exact_matches = 0i32;
+        let mut conflicts = 0i32;
+
+        for (idx, (line, _)) in lines.iter().enumerate() {
+            let line_number = start_line.saturating_add(idx as i32).saturating_add(shift);
+            let Some((existing, _)) = map.get(&line_number) else {
+                continue;
+            };
+
+            if existing.is_empty() || line.is_empty() {
+                continue;
+            }
+
+            if existing == line {
+                exact_matches += 1;
+            } else {
+                conflicts += 1;
+            }
+        }
+
+        let score = exact_matches * 3 - conflicts * 4;
+        if score > best_score || (score == best_score && shift.abs() < best_shift.abs()) {
+            best_score = score;
+            best_shift = shift;
+        }
+    }
+
+    best_shift
 }
 
 fn insert_snippet_line(
@@ -3664,6 +3743,13 @@ mod tests {
     }
 
     #[test]
+    fn snippet_end_line_ignores_trailing_newline() {
+        let text = "alpha\nip_rcv\n";
+        let end = snippet_end_line(text, 99);
+        assert_eq!(end, 100);
+    }
+
+    #[test]
     fn merge_overlapping_snippets_merges_adjacent_and_preserves_spans() {
         let snippet_a = SearchSnippet {
             start_line: 10,
@@ -3729,6 +3815,65 @@ mod tests {
         assert_eq!(
             merged_snippet.match_spans,
             vec![SearchMatchSpan { start: 14, end: 19 }]
+        );
+    }
+
+    #[test]
+    fn merge_overlapping_snippets_realigns_conflicting_overlap_by_text() {
+        let snippet_a = SearchSnippet {
+            start_line: 100,
+            end_line: 105,
+            match_line: 102,
+            content_text: concat!(
+                "func validateCidrInFilter(...) bool {\n",
+                "\tuuidStr, _ := global_config.ProtoUuidToStringWithDash(adUUID)\n",
+                "\tlogging.L(ctx).Debug(\"Target filter\", zap.String(\"uuid\", uuidStr))\n",
+                "\tfor _, filter := range filters {\n",
+                "\t\tuuidStr, _ := global_config.ProtoUuidToStringWithDash(filter.Id)\n",
+                "\t\tlogging.L(ctx).Debug(\"Check filter\", zap.String(\"uuid\", uuidStr))"
+            )
+            .to_string(),
+            match_spans: vec![SearchMatchSpan {
+                start: 95,
+                end: 108,
+            }],
+        };
+        let snippet_b = SearchSnippet {
+            start_line: 104,
+            end_line: 109,
+            match_line: 107,
+            content_text: concat!(
+                "\tlogging.L(ctx).Debug(\"Target filter\", zap.String(\"uuid\", uuidStr))\n",
+                "\tfor _, filter := range filters {\n",
+                "\t\tuuidStr, _ := global_config.ProtoUuidToStringWithDash(filter.Id)\n",
+                "\t\tlogging.L(ctx).Debug(\"Check filter\", zap.String(\"uuid\", uuidStr))\n",
+                "\t\tif proto.Equal(adUUID, filter.Id) {\n",
+                "\t\t\tlogging.L(ctx).Debug(\"Found filter\", zap.Any(\"uuid\", adUUID))"
+            )
+            .to_string(),
+            match_spans: vec![SearchMatchSpan {
+                start: 185,
+                end: 197,
+            }],
+        };
+
+        let merged = merge_overlapping_snippets(vec![snippet_a, snippet_b]);
+        let merged_snippet = &merged[0];
+        let lines: Vec<&str> = merged_snippet.content_text.lines().collect();
+
+        assert_eq!(merged_snippet.start_line, 100);
+        assert_eq!(
+            lines,
+            vec![
+                "func validateCidrInFilter(...) bool {",
+                "\tuuidStr, _ := global_config.ProtoUuidToStringWithDash(adUUID)",
+                "\tlogging.L(ctx).Debug(\"Target filter\", zap.String(\"uuid\", uuidStr))",
+                "\tfor _, filter := range filters {",
+                "\t\tuuidStr, _ := global_config.ProtoUuidToStringWithDash(filter.Id)",
+                "\t\tlogging.L(ctx).Debug(\"Check filter\", zap.String(\"uuid\", uuidStr))",
+                "\t\tif proto.Equal(adUUID, filter.Id) {",
+                "\t\t\tlogging.L(ctx).Debug(\"Found filter\", zap.Any(\"uuid\", adUUID))",
+            ]
         );
     }
 

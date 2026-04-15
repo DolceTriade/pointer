@@ -120,7 +120,11 @@ pub fn line_count(bytes: &[u8]) -> i32 {
     }
 
     let line_breaks = bytes.iter().filter(|b| **b == b'\n').count();
-    (line_breaks + 1) as i32
+    if bytes.last() == Some(&b'\n') {
+        line_breaks as i32
+    } else {
+        (line_breaks + 1) as i32
+    }
 }
 
 pub fn normalize_relative_path(path: &Path) -> String {
@@ -215,4 +219,19 @@ pub fn ensure_relative(path: &Path, root: &Path) -> Result<PathBuf> {
     path.strip_prefix(root)
         .map(|p| p.to_path_buf())
         .with_context(|| format!("{} is not inside {}", path.display(), root.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::line_count;
+
+    #[test]
+    fn line_count_ignores_single_trailing_newline() {
+        assert_eq!(line_count(b"alpha\nbeta\n"), 2);
+    }
+
+    #[test]
+    fn line_count_preserves_real_blank_lines() {
+        assert_eq!(line_count(b"alpha\n\n"), 2);
+    }
 }
