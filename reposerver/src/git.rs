@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -127,6 +128,46 @@ impl Git {
         })?;
 
         Ok(())
+    }
+
+    pub fn clear_stale_index_locks(&self, repo: &RepoConfig, paths: &RepoPaths) -> Result<usize> {
+        let mut removed = 0usize;
+
+        let mirror_lock = paths.mirror.join("index.lock");
+        removed += remove_lock_file(&mirror_lock)?;
+
+        let worktrees_admin_root = paths.mirror.join("worktrees");
+        if worktrees_admin_root.exists() {
+            for entry in fs::read_dir(&worktrees_admin_root).with_context(|| {
+                format!(
+                    "failed to read git worktrees admin directory {}",
+                    worktrees_admin_root.display()
+                )
+            })? {
+                let entry = entry.with_context(|| {
+                    format!(
+                        "failed to read entry in git worktrees admin directory {}",
+                        worktrees_admin_root.display()
+                    )
+                })?;
+                let admin_dir = entry.path();
+                if !admin_dir.is_dir() {
+                    continue;
+                }
+                removed += remove_lock_file(&admin_dir.join("index.lock"))?;
+            }
+        }
+
+        info!(
+            stage = "git",
+            event = "git.clear_stale_index_locks.end",
+            repo = %repo.name,
+            removed_lock_count = removed,
+            mirror = %paths.mirror.display(),
+            "cleared stale git index locks"
+        );
+
+        Ok(removed)
     }
 
     pub async fn fetch_branches(
@@ -517,6 +558,16 @@ fn select_branches(
         .collect())
 }
 
+fn remove_lock_file(path: &Path) -> Result<usize> {
+    if !path.exists() {
+        return Ok(0);
+    }
+
+    fs::remove_file(path)
+        .with_context(|| format!("failed to remove stale git lock {}", path.display()))?;
+    Ok(1)
+}
+
 fn sanitize_branch(branch: &str) -> String {
     branch
         .chars()
@@ -578,5 +629,36 @@ mod tests {
         let err = select_branches(&repo, &remote_heads).expect_err("should fail");
 
         assert!(err.to_string().contains("matched no remote branches"));
+    }
+
+    #[test]
+    fn clears_stale_index_locks_in_mirror_and_worktrees() {
+        let temp = std::env::temp_dir().join(format!(
+            "pointer-reposerver-git-lock-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(temp.join("mirror.git/worktrees/feature"))
+            .expect("create admin worktree dir");
+        fs::write(temp.join("mirror.git/index.lock"), "").expect("write mirror lock");
+        fs::write(temp.join("mirror.git/worktrees/feature/index.lock"), "")
+            .expect("write worktree lock");
+
+        let git = Git::new("git");
+        let repo = repo_config(vec!["main"], Vec::new());
+        let paths = RepoPaths {
+            mirror: temp.join("mirror.git"),
+            worktrees_root: temp.join("worktrees"),
+        };
+
+        let removed = git
+            .clear_stale_index_locks(&repo, &paths)
+            .expect("clear locks");
+
+        assert_eq!(removed, 2);
+        assert!(!paths.mirror.join("index.lock").exists());
+        assert!(!paths.mirror.join("worktrees/feature/index.lock").exists());
+
+        fs::remove_dir_all(&temp).expect("remove temp dir");
     }
 }

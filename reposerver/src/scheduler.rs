@@ -77,6 +77,32 @@ impl Scheduler {
             let paths = self.git.repo_paths(&self.cfg.global.state_dir, &repo.name);
 
             let op_start = Instant::now();
+            info!(stage = "startup", event = "repo.validate.clear_locks.begin", repo = %repo.name, "clearing stale git index locks");
+            match self.git.clear_stale_index_locks(repo, &paths) {
+                Ok(removed) => info!(
+                    stage = "startup",
+                    event = "repo.validate.clear_locks.end",
+                    repo = %repo.name,
+                    result = "ok",
+                    duration_ms = op_start.elapsed().as_millis(),
+                    removed_lock_count = removed,
+                    "stale git index locks cleared"
+                ),
+                Err(err) => {
+                    error!(
+                        stage = "startup",
+                        event = "repo.validate.clear_locks.end",
+                        repo = %repo.name,
+                        result = "fail",
+                        duration_ms = op_start.elapsed().as_millis(),
+                        error = %format!("{err:#}"),
+                        "failed to clear stale git index locks"
+                    );
+                    return Err(err);
+                }
+            }
+
+            let op_start = Instant::now();
             info!(stage = "startup", event = "repo.validate.ensure_mirror.begin", repo = %repo.name, "ensuring mirror");
             match self.git.ensure_mirror(repo, &paths).await {
                 Ok(()) => info!(
@@ -331,6 +357,25 @@ impl Scheduler {
         paths: &RepoPaths,
     ) -> Result<CycleStats> {
         let mut stats = CycleStats::default();
+
+        let clear_start = Instant::now();
+        info!(
+            stage = "cycle",
+            event = "cycle.clear_locks.begin",
+            repo = %repo.name,
+            "clearing stale git index locks"
+        );
+        self.git
+            .clear_stale_index_locks(repo, paths)
+            .with_context(|| format!("failed to clear stale git locks for repo '{}'", repo.name))?;
+        info!(
+            stage = "cycle",
+            event = "cycle.clear_locks.end",
+            repo = %repo.name,
+            result = "ok",
+            duration_ms = clear_start.elapsed().as_millis(),
+            "stale git index locks cleared"
+        );
 
         let resolve_start = Instant::now();
         info!(
