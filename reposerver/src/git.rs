@@ -126,69 +126,29 @@ impl Git {
             )
         })?;
 
-        let first_pattern = repo
-            .branches
-            .first()
-            .ok_or_else(|| anyhow!("repo '{}' has no branches configured", repo.name))?
-            .clone();
-
-        self.fetch_patterns(
-            paths,
-            std::slice::from_ref(&first_pattern),
-            "ensure_mirror.fetch_first_pattern",
-            Some(repo.name.as_str()),
-        )
-        .await
-        .with_context(|| {
-            format!(
-                "failed initial shallow fetch for first branch pattern '{}' in repo '{}'",
-                first_pattern, repo.name
-            )
-        })?;
-
-        if repo.branches.len() > 1 {
-            self.fetch_patterns(
-                paths,
-                &repo.branches[1..],
-                "ensure_mirror.fetch_remaining_patterns",
-                Some(repo.name.as_str()),
-            )
-            .await
-            .with_context(|| {
-                format!(
-                    "failed initial shallow fetch for remaining branches in repo '{}'",
-                    repo.name
-                )
-            })?;
-        }
-
         Ok(())
     }
 
-    pub async fn fetch_configured_patterns(
+    pub async fn fetch_branches(
         &self,
         repo: &RepoConfig,
         paths: &RepoPaths,
+        branches: &[String],
     ) -> Result<()> {
-        self.fetch_patterns(
-            paths,
-            &repo.branches,
-            "fetch_configured_patterns",
-            Some(repo.name.as_str()),
-        )
-        .await
-        .with_context(|| format!("git fetch failed for repo '{}'", repo.name))?;
+        self.fetch_exact_branches(paths, branches, "fetch_branches", Some(repo.name.as_str()))
+            .await
+            .with_context(|| format!("git fetch failed for repo '{}'", repo.name))?;
         Ok(())
     }
 
-    async fn fetch_patterns(
+    async fn fetch_exact_branches(
         &self,
         paths: &RepoPaths,
-        patterns: &[String],
+        branches: &[String],
         operation: &str,
         repo: Option<&str>,
     ) -> Result<()> {
-        if patterns.is_empty() {
+        if branches.is_empty() {
             return Ok(());
         }
 
@@ -202,11 +162,8 @@ impl Git {
             "origin".to_string(),
         ];
 
-        for branch_pattern in patterns {
-            let refspec = format!(
-                "+refs/heads/{0}:refs/remotes/origin/{0}",
-                branch_pattern.trim()
-            );
+        for branch in branches {
+            let refspec = format!("+refs/heads/{0}:refs/remotes/origin/{0}", branch.trim());
             args.push(refspec);
         }
 
@@ -218,46 +175,11 @@ impl Git {
         repo: &RepoConfig,
         paths: &RepoPaths,
     ) -> Result<BTreeMap<String, String>> {
-        let branches = self.list_remote_branches(paths, repo).await?;
-        if branches.is_empty() {
-            bail!("repo '{}' has no fetched remote branches", repo.name);
-        }
+        let remote_heads = self.list_origin_heads(paths, repo).await?;
+        let heads = select_branches(repo, &remote_heads)?;
+        let branches = heads.keys().cloned().collect::<Vec<_>>();
 
-        let mut wanted = BTreeSet::new();
-
-        for configured in &repo.branches {
-            if is_glob_pattern(configured) {
-                let pattern = Pattern::new(configured).with_context(|| {
-                    format!(
-                        "repo '{}' has invalid branch glob pattern '{}'",
-                        repo.name, configured
-                    )
-                })?;
-                for branch in &branches {
-                    if pattern.matches(branch) {
-                        wanted.insert(branch.clone());
-                    }
-                }
-            } else if branches.contains(configured) {
-                wanted.insert(configured.to_string());
-            }
-        }
-
-        if wanted.is_empty() {
-            bail!(
-                "repo '{}' branch patterns {:?} matched no remote branches",
-                repo.name,
-                repo.branches
-            );
-        }
-
-        let mut heads = BTreeMap::new();
-        for branch in wanted {
-            let sha = self
-                .remote_head_commit(paths, repo.name.as_str(), &branch)
-                .await?;
-            heads.insert(branch, sha);
-        }
+        self.fetch_branches(repo, paths, &branches).await?;
 
         Ok(heads)
     }
@@ -339,60 +261,50 @@ impl Git {
         Ok(worktree)
     }
 
-    async fn list_remote_branches(
+    async fn list_origin_heads(
         &self,
         paths: &RepoPaths,
         repo: &RepoConfig,
-    ) -> Result<BTreeSet<String>> {
+    ) -> Result<BTreeMap<String, String>> {
         let mirror = paths.mirror.display().to_string();
         let output = self
             .run_capture(
                 [
                     "--git-dir",
                     mirror.as_str(),
-                    "for-each-ref",
-                    "--format=%(refname:lstrip=3)",
-                    "refs/remotes/origin",
+                    "ls-remote",
+                    "--heads",
+                    "origin",
                 ],
                 None,
-                "list_remote_branches",
+                "list_origin_heads",
                 Some(repo.name.as_str()),
                 None,
             )
             .await?;
 
-        let mut branches = BTreeSet::new();
+        let mut branches = BTreeMap::new();
         for line in output.lines() {
-            let branch = line.trim();
-            if branch.is_empty() || branch == "HEAD" {
+            let line = line.trim();
+            if line.is_empty() {
                 continue;
             }
-            branches.insert(branch.to_string());
+
+            let Some((sha, refname)) = line.split_once('\t') else {
+                bail!(
+                    "repo '{}' returned malformed ls-remote line '{}'",
+                    repo.name,
+                    line
+                );
+            };
+            let Some(branch) = refname.strip_prefix("refs/heads/") else {
+                continue;
+            };
+
+            branches.insert(branch.to_string(), sha.to_string());
         }
 
         Ok(branches)
-    }
-
-    async fn remote_head_commit(
-        &self,
-        paths: &RepoPaths,
-        repo_name: &str,
-        branch: &str,
-    ) -> Result<String> {
-        let mirror = paths.mirror.display().to_string();
-        let refname = format!("refs/remotes/origin/{branch}^{{commit}}");
-
-        let output = self
-            .run_capture(
-                ["--git-dir", mirror.as_str(), "rev-parse", refname.as_str()],
-                None,
-                "remote_head_commit",
-                Some(repo_name),
-                Some(branch),
-            )
-            .await?;
-
-        Ok(output.trim().to_string())
     }
 
     async fn run<I, S>(
@@ -560,8 +472,49 @@ impl Git {
     }
 }
 
-fn is_glob_pattern(s: &str) -> bool {
-    s.contains('*') || s.contains('?') || s.contains('[')
+fn select_branches(
+    repo: &RepoConfig,
+    remote_heads: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>> {
+    if remote_heads.is_empty() {
+        bail!("repo '{}' has no remote branches", repo.name);
+    }
+
+    let mut wanted = BTreeSet::new();
+
+    for branch in &repo.branches {
+        if remote_heads.contains_key(branch) {
+            wanted.insert(branch.clone());
+        }
+    }
+
+    for configured in &repo.branch_patterns {
+        let pattern = Pattern::new(configured).with_context(|| {
+            format!(
+                "repo '{}' has invalid branch pattern '{}'",
+                repo.name, configured
+            )
+        })?;
+        for branch in remote_heads.keys() {
+            if pattern.matches(branch) {
+                wanted.insert(branch.clone());
+            }
+        }
+    }
+
+    if wanted.is_empty() {
+        bail!(
+            "repo '{}' branches {:?} and branch_patterns {:?} matched no remote branches",
+            repo.name,
+            repo.branches,
+            repo.branch_patterns
+        );
+    }
+
+    Ok(wanted
+        .into_iter()
+        .filter_map(|branch| remote_heads.get(&branch).map(|sha| (branch, sha.clone())))
+        .collect())
 }
 
 fn sanitize_branch(branch: &str) -> String {
@@ -575,4 +528,55 @@ fn sanitize_branch(branch: &str) -> String {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn repo_config(branches: Vec<&str>, branch_patterns: Vec<&str>) -> RepoConfig {
+        RepoConfig {
+            name: "pointer".to_string(),
+            url: "git@example.com:pointer.git".to_string(),
+            interval: std::time::Duration::from_secs(60),
+            branches: branches.into_iter().map(str::to_string).collect(),
+            branch_patterns: branch_patterns.into_iter().map(str::to_string).collect(),
+            indexer_args: Vec::new(),
+            per_branch: Vec::new(),
+            pre_index_hooks: Vec::new(),
+            post_upload_hooks: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn select_branches_unions_exact_and_pattern_matches() {
+        let repo = repo_config(vec!["main"], vec!["rc-*", "release/*"]);
+        let remote_heads = BTreeMap::from([
+            ("feature/foo".to_string(), "ddd".to_string()),
+            ("main".to_string(), "aaa".to_string()),
+            ("rc-1".to_string(), "bbb".to_string()),
+            ("release/1.0".to_string(), "ccc".to_string()),
+        ]);
+
+        let heads = select_branches(&repo, &remote_heads).expect("select branches");
+
+        assert_eq!(
+            heads,
+            BTreeMap::from([
+                ("main".to_string(), "aaa".to_string()),
+                ("rc-1".to_string(), "bbb".to_string()),
+                ("release/1.0".to_string(), "ccc".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn select_branches_errors_when_nothing_matches() {
+        let repo = repo_config(vec!["main"], vec!["rc-*"]);
+        let remote_heads = BTreeMap::from([("develop".to_string(), "aaa".to_string())]);
+
+        let err = select_branches(&repo, &remote_heads).expect_err("should fail");
+
+        assert!(err.to_string().contains("matched no remote branches"));
+    }
 }

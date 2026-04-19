@@ -69,7 +69,8 @@ impl Scheduler {
                 event = "repo.validate.begin",
                 repo = %repo.name,
                 url = %repo.url,
-                branch_pattern_count = repo.branches.len(),
+                branch_count = repo.branches.len(),
+                branch_pattern_count = repo.branch_patterns.len(),
                 "validating repository runtime prerequisites"
             );
 
@@ -95,31 +96,6 @@ impl Scheduler {
                         duration_ms = op_start.elapsed().as_millis(),
                         error = %format!("{err:#}"),
                         "failed to ensure mirror"
-                    );
-                    return Err(err);
-                }
-            }
-
-            let op_start = Instant::now();
-            info!(stage = "startup", event = "repo.validate.fetch.begin", repo = %repo.name, "validating fetch");
-            match self.git.fetch_configured_patterns(repo, &paths).await {
-                Ok(()) => info!(
-                    stage = "startup",
-                    event = "repo.validate.fetch.end",
-                    repo = %repo.name,
-                    result = "ok",
-                    duration_ms = op_start.elapsed().as_millis(),
-                    "fetch validated"
-                ),
-                Err(err) => {
-                    error!(
-                        stage = "startup",
-                        event = "repo.validate.fetch.end",
-                        repo = %repo.name,
-                        result = "fail",
-                        duration_ms = op_start.elapsed().as_millis(),
-                        error = %format!("{err:#}"),
-                        "failed to fetch during validation"
                     );
                     return Err(err);
                 }
@@ -356,32 +332,12 @@ impl Scheduler {
     ) -> Result<CycleStats> {
         let mut stats = CycleStats::default();
 
-        let fetch_start = Instant::now();
-        info!(
-            stage = "cycle",
-            event = "cycle.fetch.begin",
-            repo = %repo.name,
-            "starting branch fetch"
-        );
-        self.git
-            .fetch_configured_patterns(repo, paths)
-            .await
-            .with_context(|| format!("fetch failed for repo '{}'", repo.name))?;
-        info!(
-            stage = "cycle",
-            event = "cycle.fetch.end",
-            repo = %repo.name,
-            result = "ok",
-            duration_ms = fetch_start.elapsed().as_millis(),
-            "fetched configured branch refs"
-        );
-
         let resolve_start = Instant::now();
         info!(
             stage = "cycle",
             event = "cycle.resolve.begin",
             repo = %repo.name,
-            "resolving tracked branches"
+            "discovering, fetching, and resolving tracked branches"
         );
         let branches = self
             .git
@@ -396,7 +352,7 @@ impl Scheduler {
             result = "ok",
             duration_ms = resolve_start.elapsed().as_millis(),
             resolved_branch_count = branches.len(),
-            "resolved tracked branches"
+            "tracked branches resolved and fetched"
         );
 
         for (branch, commit) in branches {

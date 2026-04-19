@@ -1,7 +1,8 @@
 # pointer-reposerver
 
-`pointer-reposerver` polls configured Git repositories, fetches only configured branches at depth 1,
-and runs `pointer-indexer` only when branch head commits change.
+`pointer-reposerver` polls configured Git repositories, discovers matching remote branches,
+fetches only the resolved branch set at depth 1, and runs `pointer-indexer` only when branch
+head commits change.
 
 Logging is emitted to stderr via `tracing` (configure verbosity with `RUST_LOG`).
 
@@ -17,6 +18,9 @@ cargo run -p pointer-reposerver -- --config reposerver/example.reposerver.toml
 
 See `reposerver/example.reposerver.toml` for a complete example.
 
+`repo.branches` contains exact branch names.
+`repo.branch_patterns` contains glob patterns such as `release/*` or `rc-*`; these are matched
+against the remote branch list each cycle, and only the matched concrete branch names are fetched.
 `global.indexer_args` are applied first for every invocation, then `repo.indexer_args` are appended.
 Per-branch args can be set with `[[repo.per_branch]]`; those args are appended last.
 Hooks run as `<global.shell> -c "<command>"` and `global.shell` defaults to `sh`.

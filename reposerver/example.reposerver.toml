@@ -15,7 +15,8 @@ timeout = "30s"
 name = "pointer"
 url = "git@github.com:org/pointer.git"
 interval = "2m"
-branches = ["main", "release/*"]
+branches = ["main"]
+branch_patterns = ["release/*", "rc-*"]
 indexer_args = ["--keep-latest", "3"]
 
 [[repo.per_branch]]

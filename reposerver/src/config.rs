@@ -31,6 +31,7 @@ pub struct RepoConfig {
     pub url: String,
     pub interval: Duration,
     pub branches: Vec<String>,
+    pub branch_patterns: Vec<String>,
     pub indexer_args: Vec<String>,
     pub per_branch: Vec<PerBranchConfig>,
     pub pre_index_hooks: Vec<HookConfig>,
@@ -76,6 +77,8 @@ struct RawRepoConfig {
     url: String,
     interval: Option<String>,
     branches: Vec<String>,
+    #[serde(default)]
+    branch_patterns: Vec<String>,
     #[serde(default)]
     indexer_args: Vec<String>,
     #[serde(default)]
@@ -185,22 +188,43 @@ impl AppConfig {
             if repo.url.trim().is_empty() {
                 bail!("repo.url must not be empty for repo '{}'", repo.name);
             }
-            if repo.branches.is_empty() {
+            if repo.branches.is_empty() && repo.branch_patterns.is_empty() {
                 bail!(
-                    "repo '{}' must define at least one branch pattern",
+                    "repo '{}' must define at least one exact branch or branch pattern",
                     repo.name
                 );
             }
 
-            for pattern in &repo.branches {
+            for branch in &repo.branches {
+                if branch.trim().is_empty() {
+                    bail!("repo '{}' contains an empty branch name", repo.name);
+                }
+                if is_glob_pattern(branch) {
+                    bail!(
+                        "repo '{}' branches must be exact names; move pattern '{}' to branch_patterns",
+                        repo.name,
+                        branch
+                    );
+                }
+            }
+
+            for pattern in &repo.branch_patterns {
                 if pattern.trim().is_empty() {
                     bail!("repo '{}' contains an empty branch pattern", repo.name);
                 }
-                if is_glob_pattern(pattern) {
-                    Pattern::new(pattern).with_context(|| {
-                        format!("repo '{}' has invalid branch glob '{}'", repo.name, pattern)
-                    })?;
+                if !is_glob_pattern(pattern) {
+                    bail!(
+                        "repo '{}' branch_patterns entries must contain glob syntax, got '{}'",
+                        repo.name,
+                        pattern
+                    );
                 }
+                Pattern::new(pattern).with_context(|| {
+                    format!(
+                        "repo '{}' has invalid branch pattern '{}'",
+                        repo.name, pattern
+                    )
+                })?;
             }
 
             for hook in repo
@@ -282,6 +306,7 @@ fn build_repo(raw: RawRepoConfig, default_interval: Duration) -> Result<RepoConf
         url: raw.url,
         interval,
         branches,
+        branch_patterns: raw.branch_patterns,
         indexer_args: raw.indexer_args,
         per_branch,
         pre_index_hooks,
@@ -475,11 +500,69 @@ mod tests {
             cfg.repos[0].branches,
             vec!["main".to_string(), "release".to_string()]
         );
+        assert!(cfg.repos[0].branch_patterns.is_empty());
         assert_eq!(cfg.repos[0].per_branch.len(), 1);
         assert_eq!(cfg.repos[0].per_branch[0].branch, "release");
         assert_eq!(
             cfg.repos[0].per_branch[0].indexer_args,
             vec!["--live".to_string()]
+        );
+    }
+
+    #[test]
+    fn parses_explicit_branch_patterns() {
+        let raw = r#"
+            [[repo]]
+            name = "foo"
+            url = "git@example.com:foo.git"
+            branches = ["main"]
+            branch_patterns = ["rc-*", "release/*"]
+        "#;
+
+        let parsed: FileConfig = toml::from_str(raw).expect("parse config");
+        let cfg = AppConfig::from_raw(parsed).expect("normalize");
+
+        assert_eq!(cfg.repos[0].branches, vec!["main".to_string()]);
+        assert_eq!(
+            cfg.repos[0].branch_patterns,
+            vec!["rc-*".to_string(), "release/*".to_string()]
+        );
+    }
+
+    #[test]
+    fn rejects_glob_in_branches() {
+        let raw = r#"
+            [[repo]]
+            name = "foo"
+            url = "git@example.com:foo.git"
+            branches = ["rc-*"]
+        "#;
+
+        let parsed: FileConfig = toml::from_str(raw).expect("parse config");
+        let cfg = AppConfig::from_raw(parsed).expect("normalize");
+        let err = cfg.validate_config().expect_err("should fail");
+        assert!(
+            err.to_string()
+                .contains("move pattern 'rc-*' to branch_patterns")
+        );
+    }
+
+    #[test]
+    fn rejects_non_glob_branch_pattern() {
+        let raw = r#"
+            [[repo]]
+            name = "foo"
+            url = "git@example.com:foo.git"
+            branches = ["main"]
+            branch_patterns = ["release"]
+        "#;
+
+        let parsed: FileConfig = toml::from_str(raw).expect("parse config");
+        let cfg = AppConfig::from_raw(parsed).expect("normalize");
+        let err = cfg.validate_config().expect_err("should fail");
+        assert!(
+            err.to_string()
+                .contains("branch_patterns entries must contain glob syntax")
         );
     }
 }
