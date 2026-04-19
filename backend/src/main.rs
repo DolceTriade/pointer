@@ -37,7 +37,8 @@ use tokio::{signal, time};
 use tracing::info;
 
 use crate::gc::{
-    GarbageCollector, is_latest_commit_on_any_branch, prune_commit_data, prune_repository_data,
+    GarbageCollector, commit_is_protected, is_latest_commit_on_any_branch, prune_commit_data,
+    prune_repository_data,
 };
 use chrono::Utc;
 use zstd::stream::read::Decoder;
@@ -1412,44 +1413,81 @@ async fn prune_commit_handler(
     }))
 }
 
-// Prune all commits for a specific branch except the latest
+// Delete a branch and prune commits that become unreferenced afterward.
 async fn prune_branch_handler(
     State(state): State<AppState>,
     Json(payload): Json<PruneBranchRequest>,
 ) -> ApiResult<Json<PruneBranchResponse>> {
-    // Get the latest commit for this branch
-    let latest_commit_opt: Option<(String,)> =
-        sqlx::query_as("SELECT commit_sha FROM branches WHERE repository = $1 AND branch = $2")
+    let mut affected_commits = HashSet::new();
+
+    let latest_commit_opt: Option<String> =
+        sqlx::query_scalar("SELECT commit_sha FROM branches WHERE repository = $1 AND branch = $2")
             .bind(&payload.repository)
             .bind(&payload.branch)
             .fetch_optional(&state.pool)
             .await
             .map_err(ApiErrorKind::from)?;
+    if let Some(commit_sha) = &latest_commit_opt {
+        affected_commits.insert(commit_sha.clone());
+    }
 
-    let latest_commit = match latest_commit_opt {
-        Some((commit,)) => commit,
-        None => {
-            return Ok(Json(PruneBranchResponse {
-                repository: payload.repository,
-                branch: payload.branch,
-                pruned: false,
-                message: "Branch not found".to_string(),
-            }));
-        }
-    };
-
-    // Get all commits for this repository and branch (except the latest)
-    let commits_to_prune: Vec<(String,)> = sqlx::query_as(
-        "SELECT DISTINCT commit_sha FROM files WHERE repository = $1 AND commit_sha != $2",
+    let snapshot_commits: Vec<String> = sqlx::query_scalar(
+        "SELECT commit_sha FROM branch_snapshots WHERE repository = $1 AND branch = $2",
     )
     .bind(&payload.repository)
-    .bind(&latest_commit)
+    .bind(&payload.branch)
     .fetch_all(&state.pool)
     .await
     .map_err(ApiErrorKind::from)?;
+    affected_commits.extend(snapshot_commits);
+
+    let mut tx = state.pool.begin().await.map_err(ApiErrorKind::from)?;
+    let branches_deleted =
+        sqlx::query("DELETE FROM branches WHERE repository = $1 AND branch = $2")
+            .bind(&payload.repository)
+            .bind(&payload.branch)
+            .execute(&mut *tx)
+            .await
+            .map_err(ApiErrorKind::from)?
+            .rows_affected();
+
+    let policies_deleted =
+        sqlx::query("DELETE FROM branch_policies WHERE repository = $1 AND branch = $2")
+            .bind(&payload.repository)
+            .bind(&payload.branch)
+            .execute(&mut *tx)
+            .await
+            .map_err(ApiErrorKind::from)?
+            .rows_affected();
+
+    let snapshots_deleted = if policies_deleted == 0 {
+        sqlx::query("DELETE FROM branch_snapshots WHERE repository = $1 AND branch = $2")
+            .bind(&payload.repository)
+            .bind(&payload.branch)
+            .execute(&mut *tx)
+            .await
+            .map_err(ApiErrorKind::from)?
+            .rows_affected()
+    } else {
+        0
+    };
+
+    tx.commit().await.map_err(ApiErrorKind::from)?;
+
+    if branches_deleted == 0 && policies_deleted == 0 && snapshots_deleted == 0 {
+        return Ok(Json(PruneBranchResponse {
+            repository: payload.repository,
+            branch: payload.branch,
+            pruned: false,
+            message: "Branch not found".to_string(),
+        }));
+    }
 
     let mut pruned_count = 0;
-    for (commit_sha,) in commits_to_prune {
+    for commit_sha in affected_commits {
+        if commit_is_protected(&state.pool, &payload.repository, &commit_sha).await? {
+            continue;
+        }
         if prune_commit_data(&state.pool, &payload.repository, &commit_sha).await? {
             pruned_count += 1;
         }
@@ -1460,8 +1498,8 @@ async fn prune_branch_handler(
         branch: payload.branch,
         pruned: true,
         message: format!(
-            "Pruned {} commits from branch (kept latest commit {})",
-            pruned_count, latest_commit
+            "Deleted branch metadata and pruned {} unreferenced commits",
+            pruned_count
         ),
     }))
 }

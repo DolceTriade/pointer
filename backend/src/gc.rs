@@ -185,7 +185,7 @@ fn compute_keep_set(
     keep
 }
 
-async fn commit_is_protected(
+pub async fn commit_is_protected(
     pool: &PgPool,
     repository: &str,
     commit_sha: &str,
