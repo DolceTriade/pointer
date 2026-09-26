@@ -13,7 +13,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 pointer-indexer-types = { path = "../indexer-types" }
-tree-sitter = "0.25"
+tree-sitter = "0.26"
 tree-sitter-c = "0.24"
 tree-sitter-cpp = "0.23"
 tree-sitter-go = "0.25"

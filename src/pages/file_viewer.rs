@@ -121,6 +121,64 @@ fn is_binary(content: &str) -> bool {
     content.as_bytes().contains(&0)
 }
 
+#[cfg(feature = "ssr")]
+fn highlight_source(file_name: Option<&str>, source: &str) -> Result<String, String> {
+    use lumis::{HtmlLinkedBuilder, highlight, languages::Language};
+    use std::time::Instant;
+
+    let started = Instant::now();
+    let language = file_name
+        .map(|file| Language::guess(Some(file), source))
+        .unwrap_or(Language::PlainText);
+    let formatter = HtmlLinkedBuilder::new()
+        .language(language)
+        .pre_class(Some("code-block".to_string()))
+        .line_numbers(false)
+        .build()
+        .map_err(|error| error.to_string())?;
+    let html = highlight(source, formatter);
+
+    tracing::debug!(
+        target: "pointer::syntax_highlighting",
+        file_name,
+        language = ?language,
+        source_bytes = source.len(),
+        html_bytes = html.len(),
+        elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+        "highlighted source"
+    );
+
+    Ok(html)
+}
+
+#[cfg(all(test, feature = "ssr"))]
+mod syntax_highlighting_tests {
+    use super::highlight_source;
+
+    #[test]
+    fn emits_compact_linked_markup_with_line_metadata() {
+        let html = highlight_source(Some("main.rs"), "fn main() {\n    let answer = 42;\n}\n")
+            .expect("Rust should be highlighted");
+
+        assert!(html.contains("class=\"l-keyword\""));
+        assert!(html.contains("class=\"l-function\""));
+        assert!(html.contains("data-line=\"1\""));
+        assert!(html.contains("data-line=\"3\""));
+        assert!(!html.contains("style=\"color:"));
+    }
+
+    #[test]
+    fn highlights_embedded_languages_without_changing_source_text() {
+        let source = "<script>const answer = 42;</script>";
+        let html =
+            highlight_source(Some("index.html"), source).expect("HTML should be highlighted");
+
+        assert!(html.contains("class=\"l-tag\""));
+        assert!(html.contains("answer"));
+        assert!(html.contains("42"));
+    }
+}
+
 #[server]
 pub async fn get_file_viewer_data(
     repo: String,
@@ -194,23 +252,11 @@ pub async fn get_file_viewer_data(
         // For text files, we'll add line numbers.
         let line_count = file_content.content.lines().count();
 
-        use lumis::{HtmlInlineBuilder, highlight, languages::Language, themes};
-
-        let lang = p
-            .file_name()
-            .and_then(|file| file.to_str())
-            .map(|file| Language::guess(Some(file), &file_content.content))
-            .unwrap_or(Language::PlainText);
-        let theme = themes::get("catppuccin_mocha").ok();
-        let formatter = HtmlInlineBuilder::new()
-            .lang(lang)
-            .theme(theme)
-            .pre_class(Some("code-block".to_string()))
-            .italic(false)
-            .include_highlights(false)
-            .build()
-            .unwrap();
-        let html = highlight(&file_content.content, formatter);
+        let html = highlight_source(
+            p.file_name().and_then(|file| file.to_str()),
+            &file_content.content,
+        )
+        .map_err(ServerFnError::new)?;
 
         Ok(FileViewerData::File {
             html,

@@ -79,7 +79,7 @@ anyhow = "1.0.100"
 server_fn_macro_default = { version = "0.8.5", optional = true }
 pulldown-cmark = { version = "0.11.0", optional = true, default-features = false }
 lazy_static = { version = "1.5.0", optional = true }
-lumis = { git = "https://github.com/leandrocp/lumis", branch = "main", optional = true, default-features = false, features = [
+lumis = { version = "0.15.0", optional = true, default-features = false, features = [
     "lang-bash",
     "lang-c",
     "lang-cpp",
@@ -102,6 +102,7 @@ lumis = { git = "https://github.com/leandrocp/lumis", branch = "main", optional 
     "lang-swift",
     "lang-toml",
     "lang-typescript",
+    "lang-tsx",
     "lang-xml",
     "lang-yaml",
 ] }
